@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>2026 Tradeplan</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css?v=76">
+<script>
+  // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
+  try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
+</script>
+</head>
+<body>
+<header id="topbar">
+  <div id="brand">Tradeplan</div>
+  <select id="year-select" title="Plan year"></select>
+  <button id="btn-build-year" title="Build next-year forecast">+ year</button>
+  <nav id="tabs">
+    <button class="tab active" data-view="plan">Plan</button>
+    <button class="tab" data-view="summary">Summary</button>
+  </nav>
+  <div id="topbar-right">
+    <span id="save-status" title="Changes save automatically"></span>
+    <button id="btn-theme" class="iconbtn" title="Switch between light and dark mode" aria-label="Toggle dark mode"></button>
+    <button id="btn-save-config" title="Save the current sales forecast + rebuy plans under a name">&#128190; Save config</button>
+    <select id="config-select" title="Load a saved configuration"><option value="">Load config&hellip;</option></select>
+    <button id="btn-export" title="Export order quantities to CSV">Export CSV</button>
+    <button id="btn-export-forecast" title="Export each product's weekly sales-unit forecast (53 weeks) to Excel">Forecast xlsx</button>
+    <button id="btn-settings" title="Multiplier, current week, capacities">Settings</button>
+  </div>
+</header>
+
+<div id="layout">
+  <aside id="sidebar">
+    <input id="search" type="search" placeholder="Search supplier or SKU...">
+    <div id="sidebar-tools">
+      <div id="sidebar-legend">Sorted by <b>forecast sales 2026</b> (£ next to each supplier = its total projected sales value for the year)</div>
+      <div id="sort-controls">
+        <span class="sort-lbl">Sort:</span>
+        <button class="sortbtn" data-sort="value-desc" title="Highest forecast sales first">£ High→Low</button>
+        <button class="sortbtn" data-sort="value-asc" title="Lowest forecast sales first">£ Low→High</button>
+        <button class="sortbtn" data-sort="name" title="Alphabetical">A–Z</button>
+        <button class="sortbtn" data-sort="default" title="Original workbook order">Workbook</button>
+      </div>
+    </div>
+    <div id="supplier-list"></div>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<dialog id="settings-dialog">
+  <form method="dialog" id="settings-form">
+    <div class="settings-head">
+      <h2>Settings</h2>
+      <div class="settings-tabs">
+        <button type="button" class="stab active" data-tab="forecast">Forecast</button>
+        <button type="button" class="stab" data-tab="capacity">Capacity &amp; weeks</button>
+        <button type="button" class="stab" data-tab="cover">Weeks Cover</button>
+        <button type="button" class="stab" data-tab="rebuy">Rebuy</button>
+        <button type="button" class="stab" data-tab="supplier">Supplier forms</button>
+        <button type="button" class="stab" data-tab="imports">File Imports</button>
+        <button type="button" class="stab" data-tab="data">Data</button>
+      </div>
+    </div>
+
+    <!-- FORECAST -->
+    <div class="stab-panel" data-panel="forecast">
+      <label>Sales forecast multiplier
+        <input type="number" step="0.01" min="0" id="set-multiplier">
+        <small>Scales every SKU's weekly sales forecast (Value Splits P494 in the old file). Applies to all years.</small>
+      </label>
+
+      <fieldset class="fc-yearbox">
+        <legend>Forecast mode &mdash; per year</legend>
+        <small>Each year builds its Sales Forecast <b>independently</b>. Pick a year, then choose how that year is forecast &mdash; e.g. leave 2026 on <b>Original</b> but run <b>Seasonality</b> with a growth&nbsp;% on 2027.</small>
+        <div class="fc-year-tabs" id="fc-year-tabs"></div>
+        <div class="fc-modes">
+          <label class="fc-mode"><input type="radio" name="fc-mode" value="off"><span class="fc-mode-txt"><b>Original</b><small>Use the imported / rolled&#8209;over forecast as&#8209;is.</small></span></label>
+          <label class="fc-mode"><input type="radio" name="fc-mode" value="seasonality"><span class="fc-mode-txt"><b>Seasonality model</b><small>Re&#8209;shape demand by season &amp; category, anchored on recent actual sales. Add a growth&nbsp;% for expected business uplift.</small></span></label>
+          <label class="fc-mode"><input type="radio" name="fc-mode" value="target"><span class="fc-mode-txt"><b>Target sales</b><small>Scale the year to hit a &pound; sales target &mdash; for scoping a target's feasibility, not the main forecast.</small></span></label>
+        </div>
+        <div id="fc-seasonality-params" class="fc-params hidden">
+          <label>Model strength <span id="season-strength-val" class="rng-val"></span>
+            <input type="range" id="season-strength" min="0" max="100" step="5">
+            <small>0% = original forecast &middot; 100% = fully model&#8209;driven.</small>
+          </label>
+          <label>Expected year&#8209;on&#8209;year growth (%)
+            <input type="number" step="1" id="season-growth" placeholder="0">
+            <small>Scales this year's forecast up/down for expected growth beyond what history implies (the model runs roughly flat vs last year's actual sales). 0 = pure history.</small>
+          </label>
+        </div>
+        <div id="fc-target-params" class="fc-params hidden">
+          <label>Target total sales (&pound;)
+            <input type="number" step="any" min="0" id="target-value">
+            <small id="target-readout"></small>
+          </label>
+        </div>
+        <div class="band-buttons">
+          <button type="button" id="btn-season-revert">Reset this year to Original</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Shared model settings (all years)</legend>
+        <small>These tune how the Seasonality &amp; Target models behave for every year that uses them. Past weeks are never changed; seasonal peaks are calibrated from real sales history and last year's peak&#8209;season stock&#8209;outs are corrected.</small>
+        <label>Own&#8209;shape weight <span id="season-ownshape-val" class="rng-val"></span>
+          <input type="range" id="season-ownshape" min="0" max="100" step="5">
+          <small>How much each product follows its <b>own</b> sales shape vs the broader season/category average. Higher keeps sharp single&#8209;product spikes (e.g. a Christmas line peaking in week 50) instead of smearing them flat. 0% = pure group average &middot; 60% recommended.</small>
+        </label>
+        <label class="season-row"><input type="checkbox" id="season-weather"> Use live weather forecast for near weeks</label>
+        <label>Weather sensitivity <span id="season-weatherStrength-val" class="rng-val"></span>
+          <input type="range" id="season-weatherStrength" min="0" max="100" step="5">
+        </label>
+        <div class="loc-grid">
+          <label>Location <input type="text" id="season-locname"></label>
+          <label>Lat <input type="number" step="0.01" id="season-lat"></label>
+          <label>Lon <input type="number" step="0.01" id="season-lon"></label>
+        </div>
+        <div id="season-status" class="season-status"></div>
+        <div class="band-buttons">
+          <button type="button" id="btn-season-diag">Show calibrated curves</button>
+        </div>
+        <div id="season-diag" class="hidden"></div>
+      </fieldset>
+    </div>
+
+    <!-- CAPACITY & WEEKS -->
+    <div class="stab-panel hidden" data-panel="capacity">
+      <label>Current week (1&ndash;53)
+        <input type="number" step="1" min="1" max="53" id="set-week">
+        <small>Weeks before this use actuals; this week and later use the forecast model. Today is ISO week <span id="iso-week-now"></span>.</small>
+      </label>
+      <label>Container size (CBM)
+        <input type="number" step="1" min="1" id="set-container">
+      </label>
+      <fieldset>
+        <legend>Warehouse capacities</legend>
+        <div class="cap-grid">
+          <label>WEBSA racking <input type="number" id="cap-racking_websa"></label>
+          <label>Express racking <input type="number" id="cap-racking_express"></label>
+          <label>Refit racking <input type="number" id="cap-racking_refit"></label>
+          <label>WEBSA stillage <input type="number" id="cap-stillage_websa"></label>
+          <label>Lough stillage <input type="number" id="cap-stillage_lough"></label>
+          <label>Express stillage <input type="number" id="cap-stillage_express"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Landed cost estimate</legend>
+        <small>Assumptions used to estimate each product's future <b>landed cost</b> (shown on the plan next to its Landed Cost). Estimate = FOB&nbsp;+&nbsp;sea&nbsp;freight per item &rarr; convert to &pound; &rarr; add duty &rarr; add inland haulage per item. Freight/haulage per item = the rate below &divide; how many units fit in a full container (container&nbsp;CBM &divide; the product's CBM).</small>
+        <div class="cap-grid lc-params">
+          <label>Container rate ($) <input type="number" step="1" min="0" id="lc-container-rate"></label>
+          <label>FX ($ per &pound;1) <input type="number" step="0.01" min="0.01" id="lc-fx"></label>
+          <label>Full container (CBM) <input type="number" step="1" min="1" id="lc-full-cbm"></label>
+          <label>Inland charge (&pound;) <input type="number" step="1" min="0" id="lc-inland-rate"></label>
+          <label>Default duty rate (%) <input type="number" step="0.1" min="0" id="lc-duty-pct"></label>
+        </div>
+      </fieldset>
+    </div>
+
+    <!-- WEEKS COVER -->
+    <div class="stab-panel hidden" data-panel="cover">
+      <fieldset>
+        <legend>Weeks Cover colour bands</legend>
+        <small>Weeks Cover estimates how many more weeks current stock will last (past weeks use actual sales, future weeks use the forecast and include incoming arrivals). Each value range below is shaded in the plan's Weeks Cover row &mdash; aim for a green "sweet spot" around your target, with too&#8209;low (stock&#8209;out risk) and too&#8209;high (overstock) flagged.</small>
+        <div id="cover-bands"></div>
+        <div class="band-buttons">
+          <button type="button" id="btn-add-band" class="addband">+ Add band</button>
+          <button type="button" id="btn-restore-bands">Reset to default</button>
+        </div>
+      </fieldset>
+    </div>
+
+    <!-- REBUY -->
+    <div class="stab-panel hidden" data-panel="rebuy">
+      <small>The rebuy algorithm proposes additional orders to keep each Live product in stock, consolidated into ~container loads and timed by supplier lead time (China ~11 wks, non&#8209;China ~3). On a forecast year it can place orders arriving in the first weeks (placed in the prior year's tail). These settings tune the cover it targets and how containers are grouped.</small>
+      <label>Default weeks cover target
+        <input type="number" step="0.5" min="0" id="rb-cover">
+        <small>Weeks of forward demand to keep in stock for products without a season&#8209;specific target below.</small>
+      </label>
+      <fieldset>
+        <legend>Weeks cover by season</legend>
+        <small>Override the cover target per product <b>season</b>. Raising e.g. Summer builds more buffer as summer demand ramps, helping capture sharp in&#8209;season spikes (blank = use the default above).</small>
+        <div id="rb-season-cover" class="rb-season-grid"></div>
+        <label>Extra weeks cover when in&#8209;season
+          <input type="number" step="0.5" min="0" id="rb-peakboost">
+          <small>Added to a seasonal product's cover across its whole in&#8209;season period (scaled by how far above the year&#8209;round average demand runs, and timed by lead so the buffer lands as the season builds, not after the peak). 0 = off.</small>
+        </label>
+        <label>Stop seasonal rebuys below this % of peak demand
+          <input type="number" step="5" min="0" max="100" id="rb-seasoncutoff">
+          <small>Don't restock a Summer/Winter line for an arrival in its off&#8209;season once demand there falls below this fraction of the line's peak week — it runs down instead of carrying off&#8209;season stock (e.g. summer stock arriving in winter). Raise it to stop earlier, lower it to keep buying further into the shoulder. Lines with genuinely strong off&#8209;season demand still rebuy.</small>
+        </label>
+      </fieldset>
+      <label>Partial&#8209;container target (CBM)
+        <input type="number" step="1" min="1" id="rb-partialcbm">
+        <small>In "Allow partial" mode, build each shipment up to about this load before it goes (e.g. a half container &asymp; 28 CBM), instead of sending very small amounts. Containers still ship full at <span class="rb-cc"></span> CBM when they fill.</small>
+      </label>
+      <label>Partial&#8209;container max wait (weeks)
+        <input type="number" step="1" min="0" id="rb-maxwait">
+        <small>In "Allow partial" mode, if the partial target isn't reached, ship anyway after waiting this many weeks (topped up toward the target).</small>
+      </label>
+      <fieldset>
+        <legend>One product per container</legend>
+        <small>For suppliers whose MOQ is a full container of a single product: order each of their products <b>alone</b> in whole&#8209;container (~<span class="rb-cc"></span> CBM) lots, instead of mixing products. Reduces manual edits for full&#8209;container&#8209;MOQ suppliers.</small>
+        <input id="rb-op-search" type="search" placeholder="Filter suppliers…">
+        <div id="rb-op-list" class="ex-list"></div>
+      </fieldset>
+    </div>
+
+    <!-- SUPPLIER FORMS -->
+    <div class="stab-panel hidden" data-panel="supplier">
+      <p class="ex-sub">These values are embedded in every supplier <b>Order Planning</b> export (all years). Lead-time days drive each container block's <b>Goods Ready date</b> footer from a single master cell; the percentages drive the <b>Marketing Contribution</b>, <b>Deposit</b> and <b>Final Balance</b> summary. Editing here changes what future exports contain.</p>
+      <fieldset>
+        <legend>Lead-time assumptions (days)</legend>
+        <small>Goods Ready date = requested arrival week &minus; UK inland transport &minus; production grace &minus; sea sailing. In the exported form these sit in one master cell per value, so the factory (or you) can flex them across the whole sheet at once.</small>
+        <div class="cap-grid">
+          <label>Estimated sailing days <input type="number" step="1" min="0" id="sf-sailing"></label>
+          <label>Production grace period <input type="number" step="1" min="0" id="sf-grace"></label>
+          <label>UK inland transport days <input type="number" step="1" min="0" id="sf-inland"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Payment terms &amp; contributions (% of order value)</legend>
+        <small>Applied to the exported year's total order value to show the marketing contribution, deposit and resulting final balance in the form's summary.</small>
+        <div class="cap-grid">
+          <label>Marketing contribution (%) <input type="number" step="0.1" min="0" id="sf-marketing"></label>
+          <label>Deposit terms (%) <input type="number" step="0.1" min="0" id="sf-deposit"></label>
+        </div>
+      </fieldset>
+    </div>
+
+    <!-- FILE IMPORTS -->
+    <div class="stab-panel hidden" data-panel="imports">
+      <p class="ex-sub">Every Excel import lives here. Each tile colours itself by how fresh it is for its group's cadence — <b class="if-live">green</b> = current, <b class="if-aged">amber</b> = one period old, <b class="if-old">red</b> = older or never uploaded. <b>Click a tile to upload</b>; <b>drag</b> tiles to reorder or move them between groups (a tile's group sets its freshness rule).</p>
+      <div id="imports-groups"></div>
+      <input type="file" id="asp-file" accept=".xlsx" hidden>
+      <input type="file" id="po-file" accept=".xlsx" hidden>
+      <input type="file" id="containers-file" accept=".xlsx" hidden>
+      <input type="file" id="landed-file" accept=".xlsx" hidden>
+      <input type="file" id="buying-file" accept=".xlsx" hidden>
+      <input type="file" id="duty-file" accept=".xlsx" hidden>
+      <div id="po-status" class="muted-note imp-status"></div>
+      <div id="asp-status" class="muted-note imp-status"></div>
+      <div id="landed-status" class="muted-note imp-status"></div>
+      <div id="buying-status" class="muted-note imp-status"></div>
+      <div id="duty-status" class="muted-note imp-status"></div>
+    </div>
+
+    <!-- DATA -->
+    <div class="stab-panel hidden" data-panel="data">
+      <fieldset>
+        <legend>Manual selling prices</legend>
+        <small>Edit any product's ASP by hand — e.g. new products not in the sales file. <b>Previous</b> shows the price before the last update and <b>Var %</b> the change from it (e.g. how the most recent upload moved each price). Hand-edited prices are tagged <b>manual</b>; products still on their original imported price are tagged <b>not updated</b> (and highlighted in the supplier screen). Changes apply to the current year and later forecast years.</small>
+        <div class="asp-edit-toolbar">
+          <input id="asp-edit-search" type="search" placeholder="Filter by code or name…">
+          <label class="asp-edit-chk"><input type="checkbox" id="asp-edit-stale-only"> Only show not-updated</label>
+          <span id="asp-edit-count" class="muted-note"></span>
+        </div>
+        <div class="asp-edit-head"><span>Code</span><span>Name</span><span>Source</span><span>Previous</span><span>Var&nbsp;%</span><span>Price</span></div>
+        <div id="asp-edit-list" class="asp-edit-list"></div>
+        <div class="band-buttons"><button type="button" id="btn-apply-manual-asp" class="primary" disabled>Apply manual prices</button></div>
+      </fieldset>
+      <fieldset>
+        <legend>Purchase orders &amp; container bookings</legend>
+        <small>Upload the <b>WEBSA Open PO</b> and <b>Qlik Container</b> files from the <b>File Imports</b> tab. Here you can view diagnostics and re-time committed stock arrivals to their PO/container weeks (matched by PO number, across all years).</small>
+        <div class="po-up-row">
+          <button type="button" id="btn-po-diag">View diagnostics&hellip;</button>
+        </div>
+        <div class="po-up-row">
+          <button type="button" id="btn-po-apply" class="primary">&#8635; Apply container dates to plan&hellip;</button>
+          <button type="button" id="btn-po-undo" hidden>&#8624; Undo last re-time</button>
+        </div>
+        <small>Phase&nbsp;2: re&#8209;time committed stock arrivals to their PO arrival weeks &mdash; the booked Qlik container date, or the PO due date where no container is booked yet &mdash; so the plan aligns to the PO/Qlik exports. Preview every move before applying; undo in one click. Stock not on any PO stays put (use the review above).</small>
+      </fieldset>
+      <fieldset>
+        <legend>Stock weeks with no PO match</legend>
+        <small>Weeks (from the current week on) where the plan has <b>committed stock</b> but <b>no PO / container booking matched</b> &mdash; often because the container was consolidated into another week, or the order hasn't been raised. Review each before Phase&nbsp;2 re&#8209;times arrivals, so nothing is lost: <b>Review</b> drops you on the supplier at that week (flagged) and lets you cycle through &mdash; amend the week or clear the order, then move on. Cycling runs through the current supplier's weeks first, then the next supplier in your sidebar order.</small>
+        <div class="pum-toolbar">
+          <button type="button" id="btn-pum-cycle">Review &amp; cycle &rarr;</button>
+          <span id="pum-count" class="muted-note"></span>
+        </div>
+        <div id="po-unmatched" class="pum-wrap"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Order data</legend>
+        <small>Replace every order quantity in the app with the quantities originally imported from the Excel workbook. Your manual edits will be lost.</small>
+        <button type="button" id="btn-restore-orders" class="danger">Restore Excel-imported orders</button>
+      </fieldset>
+    </div>
+
+    <div class="dialog-actions">
+      <span class="spacer"></span>
+      <button value="cancel" type="button" id="btn-settings-cancel">Cancel</button>
+      <button value="ok" id="btn-settings-ok" class="primary">Apply</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="explain-dialog">
+  <div id="explain-content"></div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="explain-close" class="primary">Close</button></div>
+</dialog>
+
+<dialog id="po-diag-dialog">
+  <div class="settings-head"><h2>PO &amp; container diagnostics</h2></div>
+  <div id="po-diag-content"></div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="po-diag-close" class="primary">Close</button></div>
+</dialog>
+
+<dialog id="po-detail-dialog">
+  <div class="settings-head"><h2>Purchase Order <span id="po-detail-title"></span></h2></div>
+  <div id="po-detail-content"></div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="po-detail-close" class="primary">Close</button></div>
+</dialog>
+
+<dialog id="po-apply-dialog">
+  <div class="settings-head"><h2>Apply container arrival dates — whole year</h2></div>
+  <p class="muted-note" style="margin:0 0 8px">Re-times committed arrivals to booked container weeks across <b>all suppliers</b>. To do just one supplier, use <b>Apply Qlik Container Dates</b> on that supplier's plan page.</p>
+  <div id="po-apply-body"></div>
+  <div class="dialog-actions">
+    <span class="spacer"></span>
+    <button type="button" id="po-apply-cancel">Cancel</button>
+    <button type="button" id="po-apply-go" class="primary">Apply re-timing</button>
+  </div>
+</dialog>
+
+<dialog id="asp-dialog">
+  <div class="settings-head"><h2>Update Average Selling Prices</h2></div>
+  <div id="asp-summary"></div>
+  <div id="asp-compare"></div>
+  <div id="asp-detail" class="hidden">
+    <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+      <div id="asp-years" class="asp-years"></div></div>
+    <div id="asp-preview"></div>
+  </div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="asp-cancel">Cancel</button>
+    <button type="button" id="asp-apply" class="primary">Apply ASP updates</button>
+  </div>
+</dialog>
+
+<dialog id="landed-dialog">
+  <div class="settings-head"><h2>Update FOB &amp; landed costs</h2></div>
+  <div id="landed-summary"></div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+    <div id="landed-years" class="asp-years"></div></div>
+  <div class="lc-toolbar">
+    <input id="landed-search" type="search" placeholder="Filter by code or name…">
+    <span id="landed-count" class="muted-note"></span>
+  </div>
+  <div class="lc-head"><span>Code</span><span>Name</span><span>FOB now</span><span>New FOB $</span><span>&Delta;</span><span>Landed now</span><span>New landed &pound;</span><span>&Delta;</span></div>
+  <div id="landed-list" class="lc-list"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="landed-cancel">Cancel</button>
+    <button type="button" id="landed-apply" class="primary">Apply cost updates</button>
+  </div>
+</dialog>
+
+<dialog id="buying-dialog">
+  <div class="settings-head"><h2>Update catalogue status &amp; purchases</h2></div>
+  <div id="buying-summary"></div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+    <div id="buying-years" class="asp-years"></div></div>
+  <div id="buying-changes"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="buying-cancel">Cancel</button>
+    <button type="button" id="buying-apply" class="primary">Apply updates</button>
+  </div>
+</dialog>
+
+<dialog id="duty-dialog">
+  <div class="settings-head"><h2>Update duty rates</h2></div>
+  <div id="duty-summary"></div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+    <div id="duty-years" class="asp-years"></div></div>
+  <div id="duty-changes"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="duty-cancel">Cancel</button>
+    <button type="button" id="duty-apply" class="primary">Apply duty rates</button>
+  </div>
+</dialog>
+
+<dialog id="export-dialog">
+  <form method="dialog" id="export-form">
+    <div class="settings-head"><h2>Export supplier forms</h2></div>
+    <p class="ex-sub">Choose which suppliers to export for <b id="ex-year"></b>. You get one Excel form per supplier; pick more than one and they download together as a single <b>.zip</b> (no flood of separate downloads).</p>
+    <div class="ex-toolbar">
+      <input id="ex-search" type="search" placeholder="Filter suppliers…">
+      <button type="button" id="ex-all">Select all</button>
+      <button type="button" id="ex-none">Clear</button>
+      <span id="ex-count" class="ex-count"></span>
+    </div>
+    <div id="ex-list" class="ex-list"></div>
+    <div class="dialog-actions">
+      <span class="spacer"></span>
+      <button value="cancel" type="button" id="ex-cancel">Cancel</button>
+      <button value="ok" type="button" id="ex-go" class="primary">Export</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="notice-dialog">
+  <div class="settings-head"><h2 id="notice-title"></h2></div>
+  <div id="notice-body"></div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="notice-close" class="primary">Close</button></div>
+</dialog>
+
+<dialog id="saveconfig-dialog">
+  <div class="settings-head"><h2>Save configuration</h2></div>
+  <p class="ex-sub">Save the current sales forecast and rebuy plans (all years) under a name. You can reload any saved configuration later from the <b>Load config</b> menu.</p>
+  <label>Overwrite an existing config <small>optional &mdash; pick one to replace it, or type a new name below</small>
+    <select id="saveconfig-existing-sel" class="sc-wide"></select>
+  </label>
+  <label>Configuration name
+    <input type="text" id="saveconfig-name" class="sc-wide" placeholder="e.g. Aggressive summer plan" autocomplete="off">
+  </label>
+  <label>Save for
+    <select id="saveconfig-scope"></select>
+  </label>
+  <div id="saveconfig-existing" class="ex-sub"></div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="saveconfig-cancel">Cancel</button><button type="button" id="saveconfig-ok" class="primary">Save</button></div>
+</dialog>
+
+<dialog id="loadconfig-dialog">
+  <div class="settings-head"><h2>Load configuration</h2></div>
+  <p class="ex-sub" id="loadconfig-info"></p>
+  <label>Restore
+    <select id="loadconfig-scope"></select>
+  </label>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="loadconfig-cancel">Cancel</button><button type="button" id="loadconfig-ok" class="primary">Load</button></div>
+</dialog>
+
+<dialog id="revert-dialog">
+  <div class="settings-head"><h2>Revert orders</h2></div>
+  <p class="ex-sub">Choose what to revert back to. This replaces the order quantities and rebuy suggestions.</p>
+  <label>Apply to <select id="revert-scope"></select></label>
+  <div class="revert-opts">
+    <button type="button" id="revert-to-save" class="revert-opt">
+      <b>&#8617; Most recent save</b>
+      <small id="revert-save-when">No saved configuration yet</small>
+    </button>
+    <button type="button" id="revert-to-original" class="revert-opt">
+      <b>&#9100; Original Excel file</b>
+      <small>The order quantities as first imported from the spreadsheet (clears all rebuys)</small>
+    </button>
+  </div>
+  <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
+</dialog>
+
+<script src="app.js?v=107"></script>
+</body>
+</html>

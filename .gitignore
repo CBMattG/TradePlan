@@ -1,0 +1,30 @@
+# ---------------------------------------------------------------------------
+# LIVE PLAN DATA — never tracked. This is production data the user edits daily
+# between sessions. Keeping it out of git means branch switches / checkouts can
+# NEVER swap or overwrite the real orders/proposed/settings files.
+# Back it up via the app's in-built "Save config" (data/configs/*.json) and the
+# portable zip — NOT via git.
+# ---------------------------------------------------------------------------
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller / portable build artifacts
+build/
+dist/
+*.spec
+Tradeplan-portable*.zip
+
+# Temp upload files staged for parsing (e.g. _salesfile.xlsx)
+_*.xlsx
+_*.json
+static/_*.json
+
+# Editor / OS cruft
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
