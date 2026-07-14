@@ -30,6 +30,12 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 ## Working style
 - **Don't start the preview / restart the user's server to verify unless asked** — they run their own server on :8765 and restarting disrupts their session. Rely on code review + offline checks by default.
 
+## Version control (git)
+- Repo initialised; **code + docs are tracked, `data/` is gitignored** (see `.gitignore`). Git must never touch live plan data — branch switches/checkouts only move code, so the user's running server + `data/` are always safe.
+- **Solo workflow:** small/low-risk changes (a settings option, label, colour, single-feature edit) are committed **directly on `main`** — no branch needed. Use a **branch** only for risky or long-running work where the user needs the stable version runnable meanwhile; merge to `main` and delete the branch when done. **Do not create per-feature "forks"/folder copies** — they fragment the live data and invite the data-loss juggling this project is prone to.
+- **Data backup is NOT git** — it's the app's "Save config" (`data/configs/*.json`) + the portable zip. Keep it that way.
+- Commit in small, working increments with a clear message. Only commit/branch when the user asks, or when finishing a discrete change they've approved.
+
 ## Patterns (copy an existing one)
 - **Data imports** (ASP/landed/buying/duty share one shape): server `aggregate_X`/`parse_X` (`/api/parse-X`) + `apply_X` (`/api/apply-X`, writes `master.json` per year by code); client `XFileChosen`→`openXDialog` (preview)→`applyXUpdates`→`applyXToMemory`; state stamped in `SETTINGS.X_updated_at`. The upload button is a **tile in the "File Imports" settings tab** — register it in `IMPORT_DEFS` (`id`/`label`/`input`/`when()`); `renderUploadAges` renders all tiles into `#imports-groups`, coloured by group cadence.
 - **Editable per-product chips** (ASP/FOB/Landed) follow `aspChip`+`editAspInline`: a pill coloured by a `*_src` tag that click-edits via `prompt()` → `apply-*`.
