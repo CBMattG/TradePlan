@@ -1267,8 +1267,6 @@ dialog fieldset { min-width: 0; }
   border-radius: var(--r-card); box-shadow: var(--shadow-card); padding: 10px 20px 9px; }
 .arr-mcard b { display: block; font-size: 22px; line-height: 1.1; }
 .arr-mcard span { font-size: 11px; color: var(--dim); }
-.arr-day { margin-bottom: 20px; }
-.arr-day-head { font-weight: 600; font-size: 13px; margin: 0 2px 8px; }
 .arr-card { background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);
   border-radius: var(--r-card); box-shadow: var(--shadow-card); padding: 12px 16px; margin-bottom: 10px; }
 .arr-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -1300,3 +1298,22 @@ dialog fieldset { min-width: 0; }
 #btn-arr-export { font: inherit; font-size: 12.5px; padding: 7px 15px; cursor: pointer;
   border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
 #btn-arr-export:hover { border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+
+/* Arrivals: alternating week blocks (mirrors the export's week banding) */
+.arr-week { border-radius: var(--r-card); padding: 12px 14px 6px; margin: 0 -14px 12px; }
+.arr-week.wband { background: rgba(10, 132, 255, .055); }
+[data-theme="dark"] .arr-week.wband { background: rgba(90, 200, 250, .06); }
+.arr-week-head { display: flex; align-items: baseline; gap: 10px; font-weight: 700; font-size: 13.5px; margin: 0 2px 10px; }
+.arr-week-head .awh-sub { font-weight: 500; font-size: 11.5px; color: var(--dim); }
+.arr-week-head .awh-n { margin-left: auto; font-weight: 600; font-size: 11px; color: var(--dim);
+  background: var(--pill-bg); border: 1px solid var(--pill-brd); border-radius: 999px; padding: 2px 10px; }
+.arr-day-head { font-weight: 600; font-size: 12px; color: var(--dim); margin: 0 2px 6px; }
+.arr-week .arr-card:last-child { margin-bottom: 6px; }
+
+/* Arrivals: consistent product-table columns across every card */
+.arr-lines { table-layout: fixed; }
+.arr-lines th:nth-child(1) { width: 150px; }   /* Product */
+.arr-lines th:nth-child(3) { width: 130px; }   /* Season (Description takes the rest) */
+.arr-lines th:nth-child(4) { width: 100px; }   /* Arrival units */
+.arr-lines th:nth-child(5) { width: 100px; }   /* Current stock */
+.arr-lines td { overflow-wrap: anywhere; }

@@ -4115,24 +4115,49 @@ function arrBodyHtml() {
   const { booked, awaiting } = arrFilteredEvents();
   const mcards = arrMonthCounts(booked).map(m =>
     `<div class="arr-mcard"><b>${m.count}</b><span>${m.label} containers</span></div>`).join('');
-  // booked cards grouped by arrival date
-  let days = '', cur = '';
-  for (const ev of booked) {
-    if (ev.date !== cur) {
-      if (cur) days += '</div>';
-      cur = ev.date;
-      const wk = isoToWeek(ev.date);
-      days += `<div class="arr-day"><div class="arr-day-head">${arrDow(ev.date)} ${fmtDate(ev.date)}${wk ? ` · W${wk}` : ''}</div>`;
+  // booked cards grouped into Mon–Sun week blocks (alternating band shading, like
+  // the export), each holding its day sub-groups
+  const days = arrWeekBlocks(booked, w => {
+    const n = new Set(w.events.map(e => e.leg.container || e.po)).size;
+    return `${n} container${n === 1 ? '' : 's'}`;
+  }, evs => {
+    let inner = '', cur = '';
+    for (const ev of evs) {
+      if (ev.date !== cur) { cur = ev.date; inner += `<div class="arr-day-head">${arrDow(ev.date)} ${fmtDate(ev.date)}</div>`; }
+      inner += arrCardHtml(ev);
     }
-    days += arrCardHtml(ev);
-  }
-  if (cur) days += '</div>';
-  if (!booked.length) days = `<div class="empty">${q ? 'No upcoming containers match the filter.' : 'No future-dated containers in the Qlik export.'}</div>`;
+    return inner;
+  }) || `<div class="empty">${q ? 'No upcoming containers match the filter.' : 'No future-dated containers in the Qlik export.'}</div>`;
   const await_ = awaiting.length
     ? `<details class="arr-awaiting"><summary>${awaiting.length} outstanding PO${awaiting.length === 1 ? '' : 's'} awaiting a container booking</summary>`
-      + awaiting.map(arrCardHtml).join('') + '</details>'
+      + arrWeekBlocks(awaiting, w => `${w.events.length} PO${w.events.length === 1 ? '' : 's'}`, evs => evs.map(arrCardHtml).join(''))
+      + '</details>'
     : '';
   return `<div class="arr-mcards">${mcards}</div>${days}${await_}`;
+}
+// Monday of a date's calendar week + display label (plan week number when in-year,
+// else just the w/c date — e.g. an overdue PO due back in a prior year).
+function arrWeekInfo(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - (dt.getUTCDay() + 6) % 7);
+  const mon = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+  const wk = isoToWeek(iso);
+  return { key: mon, label: wk ? `Week ${wk}` : `w/c ${fmtDate(mon)}`, sub: wk ? `w/c ${fmtDate(mon)}` : '' };
+}
+// Wrap sorted events into alternately-shaded week blocks. `counts(w)` renders the
+// block's count chip, `body(events)` its cards. Returns '' when there are no events.
+function arrWeekBlocks(events, counts, body) {
+  const weeks = [];
+  for (const ev of events) {
+    const wi = ev.date ? arrWeekInfo(ev.date) : { key: 'none', label: 'No due date', sub: '' };
+    if (!weeks.length || weeks[weeks.length - 1].key !== wi.key) weeks.push({ ...wi, events: [] });
+    weeks[weeks.length - 1].events.push(ev);
+  }
+  return weeks.map((w, i) =>
+    `<div class="arr-week${i % 2 ? ' wband' : ''}"><div class="arr-week-head">${esc(w.label)}`
+    + (w.sub ? `<span class="awh-sub">${esc(w.sub)}</span>` : '')
+    + `<span class="awh-n">${counts(w)}</span></div>${body(w.events)}</div>`).join('');
 }
 // Export the page (as filtered on screen) to a shareable .xlsx — the client sends
 // its already-joined rows so the workbook always matches what the user is looking at.
