@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=77">
+<link rel="stylesheet" href="style.css?v=79">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -18,6 +18,7 @@
   <nav id="tabs">
     <button class="tab active" data-view="plan">Plan</button>
     <button class="tab" data-view="summary">Summary</button>
+    <button class="tab" data-view="arrivals" title="Upcoming container arrivals — Qlik bookings joined to WEBSA open PO balances">Arrivals</button>
   </nav>
   <div id="topbar-right">
     <span id="save-status" title="Changes save automatically"></span>
@@ -446,6 +447,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=107"></script>
+<script src="app.js?v=109"></script>
 </body>
 </html>

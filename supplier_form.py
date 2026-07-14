@@ -552,6 +552,135 @@ def export_forecast(rows, year=None, week1=None):
     return bio
 
 
+def export_arrivals(payload):
+    """"Upcoming Containers" workbook shared from the Arrivals page. One row per
+    outstanding product line, flat and autofiltered so the team can sort/pivot:
+    sheet 1 = booked Qlik containers by arrival date, sheet 2 = outstanding POs
+    awaiting a booking. `payload` is the client's already-joined view (its
+    buildArrivalEvents(), filtered as shown on screen), so the export always
+    matches the page exactly."""
+    wb = Workbook()
+    center = Alignment(horizontal="center", vertical="center")
+    left = Alignment(horizontal="left", vertical="center")
+
+    def _date(iso):
+        try:
+            y, m, d = (int(x) for x in str(iso)[:10].split("-"))
+            return date(y, m, d)
+        except (ValueError, AttributeError, TypeError):
+            return None
+
+    C_WEEK_BAND = "FFE9F0F9"   # soft blue – shades every other calendar week's rows
+    week_rule = Side(style="medium", color="FFA9BFDB")   # stronger rule where a new week starts
+
+    def sheet(ws, title_txt, cols, rows, note):
+        ws.cell(row=1, column=1, value=title_txt).font = Font(name=FONT, size=13, bold=True)
+        ws.cell(row=2, column=1, value=note).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+        hr = 4  # header row
+        for c, (label, width, _) in enumerate(cols, start=1):
+            cell = ws.cell(row=hr, column=c, value=label)
+            cell.font = Font(name=FONT, size=9, bold=True)
+            cell.fill = _fill(C_SUBHDR)
+            cell.border = BORDER
+            cell.alignment = center
+            ws.column_dimensions[get_column_letter(c)].width = width
+        r = hr + 1  # first data row
+        prev_group = object()
+        prev_week = object()
+        band = False
+        band_fill = _fill(C_WEEK_BAND)
+        for row in rows:
+            new_group = row.get("_group") != prev_group
+            prev_group = row.get("_group")
+            # calendar week of the row's date drives the alternating shading —
+            # all rows arriving in the same Mon–Sun week share one band
+            dv = row.get("date")
+            wk_key = dv.isocalendar()[:2] if isinstance(dv, date) else None
+            new_week = wk_key != prev_week
+            if new_week:
+                band = not band
+                prev_week = wk_key
+            for c, (_, _, k) in enumerate(cols, start=1):
+                v = row.get(k)
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.font = Font(name=FONT, size=9)
+                cell.alignment = left if isinstance(v, str) else center
+                if isinstance(v, date):
+                    cell.number_format = "dd/mm/yy"
+                elif isinstance(v, (int, float)):
+                    cell.number_format = "#,##0"
+                # payment / overdue status text colouring (matches the page's badges)
+                if k == "status" and isinstance(v, str) and v:
+                    up = v.upper()
+                    if "NOT" in up:
+                        cell.font = Font(name=FONT, size=9, bold=True, color="FFC55A11")  # orange – NOT PAID
+                    elif "PAID" in up:
+                        cell.font = Font(name=FONT, size=9, bold=True, color="FF1A7E34")  # green – PAID
+                elif k == "overdue" and v == "OVERDUE":
+                    cell.font = Font(name=FONT, size=9, bold=True, color="FFB23B2C")      # red – overdue PO
+                if band:
+                    cell.fill = band_fill
+                if new_week:      # strong rule where a new arrival week begins
+                    cell.border = Border(top=week_rule)
+                elif new_group:   # thin rule per container/PO group within the week
+                    cell.border = Border(top=thin)
+            r += 1
+        ws.freeze_panes = ws.cell(row=hr + 1, column=1)
+        ws.auto_filter.ref = f"A{hr}:{get_column_letter(len(cols))}{max(r - 1, hr)}"
+
+    booked_cols = [
+        ("Arrival", 9, "date"), ("Wk", 5, "week"), ("PO", 11, "po"),
+        ("Supplier", 30, "supplier"), ("Container", 14, "container"), ("Status", 12, "status"),
+        ("ETD", 9, "etd"), ("ETA UK Port", 11, "etaPort"), ("Delivery to CB", 13, "deliveryCB"),
+        ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
+        ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
+    ]
+    rows = []
+    for ev in payload.get("booked") or []:
+        for ln in ev.get("lines") or [{}]:
+            rows.append({
+                "_group": (ev.get("po") or "") + (ev.get("container") or ""),
+                "date": _date(ev.get("date")), "week": ev.get("week"), "po": ev.get("po", ""),
+                "supplier": ev.get("supplier", ""), "container": ev.get("container", ""),
+                "status": (ev.get("status") or "") + (" · SPLIT" if ev.get("split") else ""),
+                "etd": _date(ev.get("etd")), "etaPort": _date(ev.get("etaPort")),
+                "deliveryCB": _date(ev.get("deliveryCB")),
+                "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
+                "qty": ln.get("qty"), "stock": ln.get("stock"),
+            })
+    months = " · ".join(f"{m.get('label')}: {m.get('count')}" for m in (payload.get("months") or []))
+    note = (f"Generated {payload.get('generated', '')} · balance units = ordered − delivered (WEBSA Open PO)"
+            " · arrival = delivery-to-CB, else UK-port ETA (Qlik)")
+    if months:
+        note += f" · containers by month — {months}"
+    ws = wb.active
+    ws.title = "Upcoming Containers"
+    sheet(ws, "Upcoming container arrivals", booked_cols, rows, note)
+
+    await_cols = [
+        ("WEBSA Due", 10, "date"), ("PO", 11, "po"), ("Supplier", 30, "supplier"), ("Overdue", 9, "overdue"),
+        ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
+        ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
+    ]
+    arows = []
+    for ev in payload.get("awaiting") or []:
+        for ln in ev.get("lines") or [{}]:
+            arows.append({
+                "_group": ev.get("po", ""),
+                "date": _date(ev.get("date")), "po": ev.get("po", ""), "supplier": ev.get("supplier", ""),
+                "overdue": "OVERDUE" if ev.get("overdue") else "",
+                "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
+                "qty": ln.get("qty"), "stock": ln.get("stock"),
+            })
+    sheet(wb.create_sheet("Awaiting Booking"), "Outstanding POs awaiting a container booking", await_cols, arows,
+          "POs with outstanding balance but no dated container in the Qlik export — dates shown are WEBSA due dates.")
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 # ---------------------------------------------------------------------------
 def parse_supplier_form(path_or_bytes):
     """Read a scheduling form and return {sku_code: {week: qty}} from the

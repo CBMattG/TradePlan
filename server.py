@@ -303,6 +303,27 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def export_arrivals(self):
+        """Return the Arrivals page as an .xlsx — the client sends its already-joined
+        upcoming-container rows (respecting the on-screen filter)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        try:
+            bio = supplier_form.export_arrivals(body)
+            data = bio.getvalue()
+        except Exception as exc:
+            self.send_json({"error": f"export failed: {exc}"}, 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", 'attachment; filename="Upcoming Containers.xlsx"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/save":
@@ -325,6 +346,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.export_suppliers_zip(parse_qs(parsed.query))
         elif parsed.path == "/api/export-forecast":
             self.export_forecast(parse_qs(parsed.query))
+        elif parsed.path == "/api/export-arrivals":
+            self.export_arrivals()
         elif parsed.path == "/api/import-supplier":
             self.import_supplier(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-asp":

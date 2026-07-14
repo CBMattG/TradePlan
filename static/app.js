@@ -4018,12 +4018,175 @@ function refreshBuildYearBtn() {
 }
 
 /* ---------------- view switching / init ---------------- */
+/* ================= Arrivals view: upcoming container arrivals =================
+   Joins the two global PO uploads (WEBSA Open PO lines <-> Qlik container bookings)
+   with the loaded year's master (name / season / current stock by product code) —
+   the live replacement for the manual "Container Arrivals Summary" workbook.
+   Balance units = ordered − delivered (WEBSA outstanding); arrival date =
+   delivery-to-CB else UK-port ETA (same convention as the Plan's PO row). */
+let ARR_FILTER = '';
+const ARR_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function arrTodayIso() { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; }
+function arrDow(iso) { const [y, m, d] = iso.split('-').map(Number); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m - 1, d)).getUTCDay()]; }
+
+// Booked = every future-dated Qlik container leg (one card per PO+leg; a split PO
+// appears on each of its containers). Awaiting = outstanding WEBSA POs with no dated
+// booking at all — shown by due date, flagged overdue when that's already past.
+function buildArrivalEvents() {
+  const today = arrTodayIso();
+  const skuByCode = new Map(M.skus.map(s => [s.code, s]));
+  const poLines = po => (((PO_WEBSA.pos[po] || {}).lines) || [])
+    .filter(l => l.outstanding > 0 && l.code !== 'POMARKETING')
+    .map(l => ({ code: l.code, qty: l.outstanding, due: l.due, sku: skuByCode.get(l.code) || null }));
+  const booked = [], awaiting = [];
+  for (const po in PO_CONTAINERS.dates) {
+    const dated = (PO_CONTAINERS.dates[po] || []).filter(l => l.deliveryCB || l.etaPort);
+    for (const leg of dated) {
+      const date = leg.deliveryCB || leg.etaPort;
+      if (date < today) continue;
+      booked.push({ po, date, leg, split: dated.length > 1, lines: poLines(po),
+        supplier: (PO_WEBSA.pos[po] && PO_WEBSA.pos[po].supplier) || leg.supplier || '' });
+    }
+  }
+  for (const po in PO_WEBSA.pos) {
+    const legs = PO_CONTAINERS.dates && PO_CONTAINERS.dates[po];
+    if (legs && legs.some(l => l.deliveryCB || l.etaPort)) continue;
+    const lines = poLines(po);
+    if (!lines.length) continue;
+    const due = lines.map(l => l.due).find(Boolean) || '';
+    awaiting.push({ po, date: due, lines, overdue: !!due && due < today, supplier: PO_WEBSA.pos[po].supplier || '' });
+  }
+  booked.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : a.po < b.po ? -1 : 1);
+  awaiting.sort((a, b) => (a.date || '9999') < (b.date || '9999') ? -1 : 1);
+  return { booked, awaiting };
+}
+function arrMatch(ev, q) {
+  if (!q) return true;
+  if (ev.po.toLowerCase().includes(q) || (ev.supplier || '').toLowerCase().includes(q)) return true;
+  if (ev.leg && (ev.leg.container || '').toLowerCase().includes(q)) return true;
+  return ev.lines.some(l => l.code.toLowerCase().includes(q) || (l.sku && l.sku.name.toLowerCase().includes(q)));
+}
+function arrLinesHtml(lines) {
+  if (!lines.length) return '<div class="arr-nolines">No outstanding product lines on the WEBSA report for this PO.</div>';
+  const num = n => Math.round(n).toLocaleString('en-GB');
+  const tot = lines.reduce((a, l) => a + l.qty, 0);
+  return '<table class="arr-lines"><thead><tr><th>Product</th><th>Description</th><th>Season</th>'
+    + '<th class="r">Balance units</th><th class="r">Current stock</th></tr></thead><tbody>'
+    + lines.map(l => `<tr><td class="arr-code">${esc(l.code)}</td><td>${esc(l.sku ? l.sku.name : '—')}</td>`
+      + `<td>${esc(l.sku ? (l.sku.season || '—') : '—')}</td><td class="r"><b>${num(l.qty)}</b></td>`
+      + `<td class="r">${l.sku ? num(l.sku.stock_now || 0) : '—'}</td></tr>`).join('')
+    + (lines.length > 1 ? `</tbody><tfoot><tr><td colspan="3">Total</td><td class="r"><b>${num(tot)}</b></td><td></td></tr></tfoot></table>` : '</tbody></table>');
+}
+function arrCardHtml(ev) {
+  const lg = ev.leg || {};
+  const st = (lg.status || '').toUpperCase();
+  const badge = ev.leg
+    ? `<span class="arr-badge ${st.includes('NOT') ? 'arr-notpaid' : 'arr-paid'}">${esc(lg.status || '—')}</span>`
+    : `<span class="arr-badge ${ev.overdue ? 'arr-over' : 'arr-notpaid'}">${ev.overdue ? 'OVERDUE — NOT BOOKED' : 'NOT BOOKED'}</span>`;
+  const dates = ev.leg
+    ? `ETD ${fmtDate(lg.etd)} → UK port ${fmtDate(lg.etaPort)} → CB ${fmtDate(lg.deliveryCB)}`
+    : `WEBSA due ${fmtDate(ev.date || null)}`;
+  return `<div class="arr-card"><div class="arr-card-head">`
+    + `<span class="po-chip po-clk" data-po="${esc(ev.po)}">${esc(ev.po)}</span>`
+    + `<span class="arr-sup">${esc(ev.supplier || '—')}</span>${badge}`
+    + (ev.split ? '<span class="arr-badge arr-splitb" title="This PO ships across more than one container — the balance shown is the whole PO\'s">SPLIT SHIPMENT</span>' : '')
+    + (lg.container ? `<span class="arr-cno">${esc(lg.container)}</span>` : '')
+    + `<span class="arr-dates">${dates}</span></div>`
+    + arrLinesHtml(ev.lines) + '</div>';
+}
+function arrFilteredEvents() {
+  const q = ARR_FILTER.trim().toLowerCase();
+  const all = buildArrivalEvents();
+  return { booked: all.booked.filter(ev => arrMatch(ev, q)), awaiting: all.awaiting.filter(ev => arrMatch(ev, q)) };
+}
+// Physical upcoming containers per 'YYYY-MM' (dedup by container no; PO as fallback key).
+function arrMonthCounts(booked) {
+  const byMonth = new Map();
+  for (const ev of booked) {
+    const k = ev.date.slice(0, 7);
+    if (!byMonth.has(k)) byMonth.set(k, new Set());
+    byMonth.get(k).add(ev.leg.container || ev.po);
+  }
+  return [...byMonth.keys()].sort().map(k => ({ label: ARR_MONTHS[+k.slice(5) - 1], count: byMonth.get(k).size }));
+}
+function arrBodyHtml() {
+  const q = ARR_FILTER.trim().toLowerCase();
+  const { booked, awaiting } = arrFilteredEvents();
+  const mcards = arrMonthCounts(booked).map(m =>
+    `<div class="arr-mcard"><b>${m.count}</b><span>${m.label} containers</span></div>`).join('');
+  // booked cards grouped by arrival date
+  let days = '', cur = '';
+  for (const ev of booked) {
+    if (ev.date !== cur) {
+      if (cur) days += '</div>';
+      cur = ev.date;
+      const wk = isoToWeek(ev.date);
+      days += `<div class="arr-day"><div class="arr-day-head">${arrDow(ev.date)} ${fmtDate(ev.date)}${wk ? ` · W${wk}` : ''}</div>`;
+    }
+    days += arrCardHtml(ev);
+  }
+  if (cur) days += '</div>';
+  if (!booked.length) days = `<div class="empty">${q ? 'No upcoming containers match the filter.' : 'No future-dated containers in the Qlik export.'}</div>`;
+  const await_ = awaiting.length
+    ? `<details class="arr-awaiting"><summary>${awaiting.length} outstanding PO${awaiting.length === 1 ? '' : 's'} awaiting a container booking</summary>`
+      + awaiting.map(arrCardHtml).join('') + '</details>'
+    : '';
+  return `<div class="arr-mcards">${mcards}</div>${days}${await_}`;
+}
+// Export the page (as filtered on screen) to a shareable .xlsx — the client sends
+// its already-joined rows so the workbook always matches what the user is looking at.
+async function exportArrivals() {
+  const { booked, awaiting } = arrFilteredEvents();
+  const line = l => ({ code: l.code, name: l.sku ? l.sku.name : '', season: l.sku ? (l.sku.season || '') : '',
+    qty: l.qty, stock: l.sku ? Math.round(l.sku.stock_now || 0) : null });
+  const flt = ARR_FILTER.trim();
+  const payload = {
+    generated: `${arrTodayIso()}${flt ? ` · filtered: "${flt}"` : ''}`,
+    months: arrMonthCounts(booked),
+    booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier,
+      container: ev.leg.container || '', status: ev.leg.status || '', split: ev.split,
+      etd: ev.leg.etd || null, etaPort: ev.leg.etaPort || null, deliveryCB: ev.leg.deliveryCB || null,
+      lines: ev.lines.map(line) })),
+    awaiting: awaiting.map(ev => ({ date: ev.date || null, po: ev.po, supplier: ev.supplier, overdue: ev.overdue,
+      lines: ev.lines.map(line) })),
+  };
+  const status = document.getElementById('save-status');
+  status.textContent = 'Building arrivals workbook…';
+  try {
+    const r = await fetch('/api/export-arrivals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!r.ok) throw new Error('server ' + r.status);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `Upcoming Containers ${arrTodayIso()}.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    status.textContent = 'Exported upcoming containers';
+  } catch (e) { status.textContent = 'Export failed!'; alert('Arrivals export failed: ' + e.message); }
+}
+function renderArrivals() {
+  const main = document.getElementById('main');
+  if (!poDataReady()) {
+    main.innerHTML = '<div class="arr-wrap"><div class="empty">Upload the WEBSA Open PO and Qlik Container exports (Settings → File Imports) to build this page.</div></div>';
+    return;
+  }
+  main.innerHTML = `<div class="arr-wrap"><div class="arr-top"><h2>Upcoming containers</h2>`
+    + `<input id="arr-search" type="search" placeholder="Filter by PO, product, supplier, container…" value="${esc(ARR_FILTER)}">`
+    + `<button id="btn-arr-export" title="Download this page as an Excel workbook to share with the team — respects the current filter">Export xlsx</button>`
+    + `<span class="arr-note">Balance units = ordered − delivered (WEBSA Open PO) · arrival = delivery-to-CB, else UK-port ETA (Qlik) · current stock as of the last weekly data import · click a PO for full detail</span></div>`
+    + `<div id="arr-body">${arrBodyHtml()}</div></div>`;
+  const inp = document.getElementById('arr-search');
+  inp.addEventListener('input', () => { ARR_FILTER = inp.value; document.getElementById('arr-body').innerHTML = arrBodyHtml(); });
+  document.getElementById('btn-arr-export').addEventListener('click', exportArrivals);
+}
+
 function setView(v) {
   currentView = v;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
   document.getElementById('sidebar').style.display = v === 'plan' ? '' : 'none';
   document.getElementById('main').classList.toggle('plan', v === 'plan');
   if (v === 'plan') renderPlan();
+  else if (v === 'arrivals') renderArrivals();
   else renderSummary();
 }
 
