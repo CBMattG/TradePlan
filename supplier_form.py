@@ -573,10 +573,33 @@ def export_arrivals(payload):
     C_WEEK_BAND = "FFE9F0F9"   # soft blue – shades every other calendar week's rows
     week_rule = Side(style="medium", color="FFA9BFDB")   # stronger rule where a new week starts
 
-    def sheet(ws, title_txt, cols, rows, note):
+    def sheet(ws, title_txt, cols, rows, note, months=None):
         ws.cell(row=1, column=1, value=title_txt).font = Font(name=FONT, size=13, bold=True)
         ws.cell(row=2, column=1, value=note).font = Font(name=FONT, size=9, italic=True, color="FF808080")
         hr = 4  # header row
+        if months:
+            # prominent per-month totals — one row per month actually present in the
+            # data, so the block tracks whatever window the Qlik file covers
+            ws.cell(row=4, column=1, value="Monthly totals").font = Font(name=FONT, size=10, bold=True)
+            for i, (label, ncont, units) in enumerate(months):
+                rr = 5 + i
+                lc = ws.cell(row=rr, column=1, value=label)
+                lc.font = Font(name=FONT, size=10, bold=True)
+                lc.alignment = left
+                for col in range(1, 4):   # fill every cell of the merge-to-be
+                    ws.cell(row=rr, column=col).fill = _fill(C_REF_HDR)
+                    ws.cell(row=rr, column=col).border = BORDER
+                cc = ws.cell(row=rr, column=4, value=f"{ncont} container{'s' if ncont != 1 else ''}")
+                cc.font = Font(name=FONT, size=10, bold=True)
+                cc.border = BORDER
+                uc = ws.cell(row=rr, column=5, value=f"{units:,} arrival units")
+                uc.font = Font(name=FONT, size=10)
+                uc.alignment = left
+                for col in range(5, 8):
+                    ws.cell(row=rr, column=col).border = BORDER
+                ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=3)
+                ws.merge_cells(start_row=rr, start_column=5, end_row=rr, end_column=7)
+            hr = 5 + len(months) + 1
         for c, (label, width, _) in enumerate(cols, start=1):
             cell = ws.cell(row=hr, column=c, value=label)
             cell.font = Font(name=FONT, size=9, bold=True)
@@ -648,14 +671,26 @@ def export_arrivals(payload):
                 "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
                 "qty": ln.get("qty"), "stock": ln.get("stock"),
             })
-    months = " · ".join(f"{m.get('label')}: {m.get('count')}" for m in (payload.get("months") or []))
-    note = (f"Generated {payload.get('generated', '')} · balance units = ordered − delivered (WEBSA Open PO)"
+    # monthly totals derived from the rows themselves, so the block always follows
+    # the arrival dates actually present in the uploaded Qlik file (months with no
+    # arrivals simply don't appear); containers deduped by container no (PO fallback)
+    MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+                   "July", "August", "September", "October", "November", "December"]
+    mon = {}
+    for row in rows:
+        dv = row.get("date")
+        if not isinstance(dv, date):
+            continue
+        g = mon.setdefault((dv.year, dv.month), {"cont": set(), "units": 0.0})
+        g["cont"].add(row.get("container") or row.get("po"))
+        g["units"] += row.get("qty") or 0
+    month_totals = [(f"{MONTH_NAMES[m - 1]} {y}", len(g["cont"]), int(round(g["units"])))
+                    for (y, m), g in sorted(mon.items())]
+    note = (f"Generated {payload.get('generated', '')} · arrival units = ordered − delivered (WEBSA Open PO)"
             " · arrival = delivery-to-CB, else UK-port ETA (Qlik)")
-    if months:
-        note += f" · containers by month — {months}"
     ws = wb.active
     ws.title = "Upcoming Containers"
-    sheet(ws, "Upcoming container arrivals", booked_cols, rows, note)
+    sheet(ws, "Upcoming container arrivals", booked_cols, rows, note, months=month_totals)
 
     await_cols = [
         ("WEBSA Due", 10, "date"), ("PO", 11, "po"), ("Supplier", 30, "supplier"), ("Overdue", 9, "overdue"),
