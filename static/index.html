@@ -239,11 +239,13 @@
       <input type="file" id="landed-file" accept=".xlsx" hidden>
       <input type="file" id="buying-file" accept=".xlsx" hidden>
       <input type="file" id="duty-file" accept=".xlsx" hidden>
+      <input type="file" id="wksales-file" accept=".xlsx" hidden>
       <div id="po-status" class="muted-note imp-status"></div>
       <div id="asp-status" class="muted-note imp-status"></div>
       <div id="landed-status" class="muted-note imp-status"></div>
       <div id="buying-status" class="muted-note imp-status"></div>
       <div id="duty-status" class="muted-note imp-status"></div>
+      <div id="wksales-status" class="muted-note imp-status"></div>
     </div>
 
     <!-- DATA -->
@@ -356,6 +358,18 @@
   </div>
 </dialog>
 
+<dialog id="wksales-dialog">
+  <div class="settings-head"><h2>Update weekly actual sales</h2></div>
+  <div id="wksales-summary"></div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Sales week:</span>
+    <select id="wksales-week"></select></div>
+  <p id="wksales-week-note" class="muted-note"></p>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="wksales-cancel">Cancel</button>
+    <button type="button" id="wksales-apply" class="primary">Apply &amp; save</button>
+  </div>
+</dialog>
+
 <dialog id="buying-dialog">
   <div class="settings-head"><h2>Update catalogue status &amp; purchases</h2></div>
   <div id="buying-summary"></div>
@@ -447,6 +461,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=111"></script>
+<script src="app.js?v=112"></script>
 </body>
 </html>

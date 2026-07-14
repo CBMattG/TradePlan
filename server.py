@@ -362,6 +362,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
             self.apply_buying(parse_qs(parsed.query))
+        elif parsed.path == "/api/parse-wksales":
+            self.parse_wksales()
+        elif parsed.path == "/api/apply-wksales":
+            self.apply_wksales(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-duty":
             self.parse_duty()
         elif parsed.path == "/api/apply-duty":
@@ -876,6 +880,83 @@ class Handler(SimpleHTTPRequestHandler):
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    # ---- weekly actual sales (the "WKnn Sales" export: Product SKU + Sales TY £) ----
+    @staticmethod
+    def aggregate_wksales(raw):
+        """Read a weekly sales export → {code: sales £ this week}. Finds the header row
+        containing 'Product SKU' and 'Sales TY'; duplicate codes are summed."""
+        import io
+        import warnings
+        import openpyxl
+        out, n = {}, 0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            ws = wb.active
+            code_c = sales_c = hdr = None
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if hdr is None:
+                    lower = [str(c or "").strip().lower() for c in row]
+                    if "product sku" in lower and "sales ty" in lower:
+                        hdr, code_c, sales_c = i, lower.index("product sku"), lower.index("sales ty")
+                    continue
+                code = str(row[code_c] or "").strip() if len(row) > code_c else ""
+                val = row[sales_c] if len(row) > sales_c else None
+                if not code or not isinstance(val, (int, float)):
+                    continue
+                out[code] = out.get(code, 0.0) + float(val)
+                n += 1
+            if hdr is None:
+                raise ValueError("Couldn't find a header row with 'Product SKU' and 'Sales TY'.")
+        return out, n
+
+    def parse_wksales(self):
+        """Parse an uploaded weekly sales export and return per-SKU sales £. Nothing
+        changes yet — the client previews (converting £ → units by ASP) then applies."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            sales, count = self.aggregate_wksales(self.rfile.read(length))
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        self.send_json({"ok": True, "sales": sales, "fileRows": count})
+
+    def apply_wksales(self, qs):
+        """Write one week's actual sales units into the year's master.json (matched by
+        code; units already converted client-side via each SKU's ASP) and advance the
+        actuals/forecast boundary: data_week = max(data_week, week+1)."""
+        try:
+            ydir, year = year_dir(qs)
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            week = int(body.get("week") or 0)
+            units = body.get("units") or {}
+            if not (1 <= week <= 53):
+                self.send_json({"ok": False, "error": f"week {week} out of range"}, 400)
+                return
+            mpath = ydir / "master.json"
+            master = read_json(mpath, None)
+            if not master:
+                self.send_json({"ok": False, "error": f"no master.json for {year}"}, 500)
+                return
+            n = 0
+            for s in master["skus"]:
+                u = units.get(s.get("code"))
+                if u is None:
+                    continue
+                act = s.get("actual") or [0] * 53
+                while len(act) < 53:
+                    act.append(0)
+                act[week - 1] = u
+                s["actual"] = act
+                n += 1
+            new_dw = max(int(master.get("data_week") or 1), week + 1)
+            master["data_week"] = new_dw
+            mpath.write_text(json.dumps(master), encoding="utf-8")
+            self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw, "year": year})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

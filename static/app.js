@@ -2013,13 +2013,14 @@ const IMPORT_DEFS = [
   { id: 'websa',  label: 'WEBSA Open PO',  input: 'po-file',         when: () => (PO_WEBSA && PO_WEBSA.importedAt) || null },
   { id: 'qlik',   label: 'Qlik Container', input: 'containers-file', when: () => (PO_CONTAINERS && PO_CONTAINERS.importedAt) || null },
   { id: 'buying', label: 'Buying Report',  input: 'buying-file',     when: () => (SETTINGS && SETTINGS.buying_updated_at) || null },
+  { id: 'wksales', label: 'Weekly Sales',  input: 'wksales-file',    when: () => (SETTINGS && SETTINGS.wksales_updated_at) || null },
   { id: 'asp',    label: 'Sales / ASP',    input: 'asp-file',        when: () => (SETTINGS && SETTINGS.asp_updated_at) || null },
   { id: 'landed', label: 'Landed Costs',   input: 'landed-file',     when: () => (SETTINGS && SETTINGS.landed_updated_at) || null },
   { id: 'duty',   label: 'Duty Rates',     input: 'duty-file',       when: () => (SETTINGS && SETTINGS.duty_updated_at) || null },
 ];
 const IMPORT_DEF = Object.fromEntries(IMPORT_DEFS.map(d => [d.id, d]));
 const DEFAULT_IMPORT_GROUPS = [
-  { name: 'Weekly',  cadence: 'weekly',  items: ['websa', 'qlik', 'buying'] },
+  { name: 'Weekly',  cadence: 'weekly',  items: ['websa', 'qlik', 'buying', 'wksales'] },
   { name: 'Monthly', cadence: 'monthly', items: ['asp', 'landed', 'duty'] },
 ];
 // Persisted groups (SETTINGS.import_groups), validated so every import appears exactly once.
@@ -3029,6 +3030,106 @@ function applyDutyToMemory(map, years) {
   for (const s of M.skus) { const r = map[s.code]; if (r != null) { s.duty_rate = +r; n++; } }
   if (currentView === 'plan') renderPlan(); else setView(currentView);   // refresh the est-landed chips
   return n;
+}
+
+/* ---------- weekly actual sales upload (the "WKnn Sales" export) ----------
+   File = Product SKU + Sales TY (£ for ONE week). Applies to the VIEWED year only:
+   sets each matched SKU's actual[week] (units = £ / ASP, so the Sales Value row
+   reproduces the file's £ exactly) and advances data_week to week+1 — which is what
+   flips that week from forecast to actuals in the value/YTD/outturn boundaries. */
+let WKSALES_PARSED = null;   // { map:{code:£}, fileRows, fname, week }
+async function wksalesFileChosen(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const status = document.getElementById('wksales-status');
+  status.textContent = 'Reading ' + file.name + '…';
+  try {
+    const r = await fetch('/api/parse-wksales', { method: 'POST', body: await file.arrayBuffer() });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Could not read the file: ' + (j.error || 'unknown')); return; }
+    const mWk = /wk\s*0?(\d{1,2})/i.exec(file.name);   // "WK28 Sales.xlsx" → 28
+    const week = mWk ? +mWk[1] : (+M.data_week || SETTINGS.current_week || 1);
+    WKSALES_PARSED = { map: j.sales || {}, fileRows: j.fileRows, fname: file.name, week };
+    status.textContent = '';
+    openWksalesDialog();
+  } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
+}
+// £ → units per matched SKU (needs an ASP); returns {units:{code}, matched, noAsp:[], totalVal}
+function wksalesUnits() {
+  const p = WKSALES_PARSED, units = {}, noAsp = [];
+  let matched = 0, totalVal = 0;
+  for (const s of M.skus) {
+    const v = p.map[s.code];
+    if (v == null) continue;
+    matched++;
+    if (+s.asp > 0) { units[s.code] = Math.round((v / s.asp) * 100) / 100; totalVal += v; }
+    else noAsp.push(s.code);
+  }
+  return { units, matched, noAsp, totalVal };
+}
+function openWksalesDialog() {
+  const p = WKSALES_PARSED; if (!p) return;
+  const { matched, noAsp, totalVal } = wksalesUnits();
+  const appCodes = new Set(M.skus.map(s => s.code));
+  const unmatched = Object.keys(p.map).filter(c => !appCodes.has(c));
+  const wkSel = document.getElementById('wksales-week');
+  wkSel.innerHTML = Array.from({ length: WEEKS }, (_, i) =>
+    `<option value="${i + 1}"${i + 1 === p.week ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
+  document.getElementById('wksales-summary').innerHTML =
+    `<p>From <b>${esc(p.fname)}</b>: <b>${matched}</b> of ${YEAR}'s ${M.skus.length} products matched `
+    + `(${p.fileRows} rows in the file) · <b>${fmtGBP(totalVal)}</b> weekly sales to apply to <b>${esc(YEAR)}</b>.</p>`
+    + `<p class="muted-note">Sales £ are converted to units with each product's ASP. Products not in the file keep their `
+    + `existing value for the chosen week (0 for a new week).`
+    + (noAsp.length ? ` <b>${noAsp.length}</b> matched product(s) skipped — no ASP set: ${esc(noAsp.slice(0, 8).join(', '))}${noAsp.length > 8 ? '…' : ''}.` : '')
+    + `</p>`
+    + (unmatched.length ? `<details class="muted-note"><summary>${unmatched.length} file code(s) not in the ${esc(YEAR)} plan</summary>${esc(unmatched.join(', '))}</details>` : '');
+  wksalesWeekNote();
+  document.getElementById('wksales-apply').disabled = matched === 0;
+  document.getElementById('wksales-dialog').showModal();
+}
+function wksalesWeekNote() {
+  const wk = +document.getElementById('wksales-week').value;
+  const dw = +M.data_week || 1;
+  const el = document.getElementById('wksales-week-note');
+  if (wk < dw) el.innerHTML = `<b>Week ${wk} already has actuals</b> — applying will overwrite them.`;
+  else if (wk > dw) el.innerHTML = `Heads-up: the next week expecting actuals is <b>week ${dw}</b> — applying week ${wk} leaves ${wk - dw === 1 ? `week ${dw}` : `weeks ${dw}–${wk - 1}`} un-actualised.`;
+  else el.innerHTML = `Week ${wk} is the next week expecting actuals — the actuals boundary will advance to week ${wk + 1}.`;
+}
+async function applyWksalesUpdates() {
+  const p = WKSALES_PARSED; if (!p) return;
+  const week = +document.getElementById('wksales-week').value;
+  const { units, matched } = wksalesUnits();
+  if (!matched) return;
+  const status = document.getElementById('save-status'); status.textContent = 'Saving weekly sales…';
+  try {
+    const r = await fetch('/api/apply-wksales?year=' + encodeURIComponent(YEAR),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week, units }) });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
+    applyWksalesToMemory(units, week, j.dataWeek);
+    SETTINGS.wksales_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
+    document.getElementById('wksales-dialog').close();
+    document.getElementById('settings-dialog').close();
+    status.textContent = `Week ${week} actual sales saved (${YEAR})`;
+    alert(`Week ${week} actual sales saved for ${YEAR}.\n\n${j.applied} products updated · actuals boundary now week ${j.dataWeek}.`);
+    WKSALES_PARSED = null;
+  } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
+}
+function applyWksalesToMemory(units, week, dataWeek) {
+  for (const s of M.skus) {
+    const u = units[s.code];
+    if (u == null) continue;
+    if (!s.actual) s.actual = zeros();
+    s.actual[week - 1] = u;
+  }
+  M.data_week = dataWeek;
+  // live year: let the date-derived current week advance now the boundary allows it
+  const dateWk = highlightWeek();
+  if (dateWk) SETTINGS.current_week = Math.min(dateWk, M.data_week || dateWk);
+  buildModeledForecasts();   // models anchor on this-year actuals — refresh them
+  computeAll(); renderSidebar();
+  if (currentView === 'plan') renderPlan(); else setView(currentView);
 }
 
 // ASP provenance for a SKU: 'upload' (sales file), 'manual' (hand-edited), or 'orig'
@@ -4487,6 +4588,10 @@ async function init() {
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);
   document.getElementById('duty-cancel').addEventListener('click', () => document.getElementById('duty-dialog').close());
   document.getElementById('duty-apply').addEventListener('click', applyDutyUpdates);
+  document.getElementById('wksales-file').addEventListener('change', wksalesFileChosen);
+  document.getElementById('wksales-cancel').addEventListener('click', () => document.getElementById('wksales-dialog').close());
+  document.getElementById('wksales-apply').addEventListener('click', applyWksalesUpdates);
+  document.getElementById('wksales-week').addEventListener('change', wksalesWeekNote);
   document.getElementById('asp-compare').addEventListener('click', e => {
     const tr = e.target.closest('.asp-cmp-row'); if (tr) aspChooseBasis(tr.dataset.basis);
   });
