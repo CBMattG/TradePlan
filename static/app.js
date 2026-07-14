@@ -849,7 +849,7 @@ function skuRowsHtml(sku, idx) {
       + `<span>variance <b class="${cls}">${sign}${fmtGBP(Math.abs(vv))} (${sign}${Math.abs(pct).toFixed(0)}%)</b></span></div>`;
   }
   let h = `<tr class="${headCls}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><div class="skh-main">${img}<div class="skh-body">`
-    + `<div class="skh-line1"><span class="code">${esc(sku.code)}</span><span class="nm"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
+    + `<div class="skh-line1"><span class="code">${esc(sku.code)}</span><span class="nm"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
     + statsHtml
     + ytdHtml
     + `</div></div></div></td></tr>`;
@@ -2912,17 +2912,18 @@ function openBuyingDialog() {
   const matched = M.skus.filter(s => p.map[s.code]);
   const changes = matched.filter(s => p.map[s.code].status && p.map[s.code].status !== s.status)
     .map(s => ({ code: s.code, name: s.name || '', from: s.status || 'Unknown', to: p.map[s.code].status }));
-  let live = 0, notlive = 0, ospN = 0;
+  let live = 0, notlive = 0, ospN = 0, stkN = 0;
   for (const s of matched) {
     const r = p.map[s.code];
     if (r.status === 'Live') live++; else if (r.status === 'Not Live') notlive++;
     if (r.osPurchases != null && r.osPurchases !== (s.os_purchases || 0)) ospN++;
+    if (r.stock != null && r.stock !== (+s.stock_now || 0)) stkN++;
   }
   document.getElementById('buying-years').innerHTML = YEARS.slice().sort().map(y =>
     `<label class="asp-yr"><input type="checkbox" value="${y}"${y >= String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
   document.getElementById('buying-summary').innerHTML =
     `<p>From <b>${esc(p.fname)}</b>: <b>${matched.length}</b> of ${YEAR}'s ${M.skus.length} products matched (WEBSA rows only; ${p.fileSkus} in the file).</p>`
-    + `<p class="muted-note">Status in file: <b>${live}</b> Live · <b>${notlive}</b> Not Live. <b>${changes.length}</b> status change(s), <b>${ospN}</b> outstanding-purchase update(s).</p>`;
+    + `<p class="muted-note">Status in file: <b>${live}</b> Live · <b>${notlive}</b> Not Live. <b>${changes.length}</b> status change(s), <b>${ospN}</b> outstanding-purchase update(s), <b>${stkN}</b> live-stock update(s) (Stock now refreshes from this report).</p>`;
   const badgeCls = st => st === 'Live' ? 'live' : st === 'Not Live' ? 'notlive' : 'unknown';
   const rows = changes.slice(0, 400).map(c =>
     `<div class="bc-row"><span class="bc-code">${esc(c.code)}</span><span class="bc-name" title="${esc(c.name)}">${esc(c.name)}</span>`
@@ -2961,6 +2962,7 @@ function applyBuyingToMemory(map, years) {
     let touched = false;
     if (rec.status) { s.status = rec.status; touched = true; }
     if (rec.osPurchases != null) { s.os_purchases = rec.osPurchases; touched = true; }
+    if (rec.stock != null) { s.stock_now = rec.stock; touched = true; }   // live warehouse stock
     if (touched) n++;
   }
   computeAll(); renderSidebar();
@@ -3033,11 +3035,14 @@ function applyDutyToMemory(map, years) {
 }
 
 /* ---------- weekly actual sales upload (the "WKnn Sales" export) ----------
-   File = Product SKU + Sales TY (£ for ONE week). Applies to the VIEWED year only:
-   sets each matched SKU's actual[week] (units = £ / ASP, so the Sales Value row
-   reproduces the file's £ exactly) and advances data_week to week+1 — which is what
-   flips that week from forecast to actuals in the value/YTD/outturn boundaries. */
-let WKSALES_PARSED = null;   // { map:{code:£}, fileRows, fname, week }
+   File = Product SKU + Sales TY (£) + Qty TY (units) for ONE week. Applies to the
+   VIEWED year only: sets each matched SKU's actual[week] (units straight from the
+   file's Qty TY), stamps its weekly ASP (Sales TY / Qty TY, shown as a chip beside
+   the main ASP pill), closes the week's stock (running_stock = stock_now + arrivals
+   − sold, so the app trusts its own imports without waiting for import_data), and
+   advances data_week to week+1 — which is what flips that week from forecast to
+   actuals in the value/YTD/outturn boundaries. */
+let WKSALES_PARSED = null;   // { map:{code:{val,qty}}, fileRows, fname, week }
 async function wksalesFileChosen(e) {
   const file = e.target.files[0];
   e.target.value = '';
@@ -3055,22 +3060,25 @@ async function wksalesFileChosen(e) {
     openWksalesDialog();
   } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
 }
-// £ → units per matched SKU (needs an ASP); returns {units:{code}, matched, noAsp:[], totalVal}
+// Per matched SKU: units straight from the file's Qty TY, plus that week's realised
+// ASP (Sales TY / Qty TY) for the chip beside the main ASP pill.
 function wksalesUnits() {
-  const p = WKSALES_PARSED, units = {}, noAsp = [];
-  let matched = 0, totalVal = 0;
+  const p = WKSALES_PARSED, units = {}, wkasp = {};
+  let matched = 0, totalVal = 0, totalQty = 0;
   for (const s of M.skus) {
-    const v = p.map[s.code];
-    if (v == null) continue;
+    const r = p.map[s.code];
+    if (r == null) continue;
     matched++;
-    if (+s.asp > 0) { units[s.code] = Math.round((v / s.asp) * 100) / 100; totalVal += v; }
-    else noAsp.push(s.code);
+    units[s.code] = r.qty;
+    totalQty += r.qty;
+    totalVal += r.val || 0;
+    if (r.qty > 0 && r.val > 0) wkasp[s.code] = Math.round((r.val / r.qty) * 100) / 100;
   }
-  return { units, matched, noAsp, totalVal };
+  return { units, wkasp, matched, totalVal, totalQty };
 }
 function openWksalesDialog() {
   const p = WKSALES_PARSED; if (!p) return;
-  const { matched, noAsp, totalVal } = wksalesUnits();
+  const { matched, totalVal, totalQty } = wksalesUnits();
   const appCodes = new Set(M.skus.map(s => s.code));
   const unmatched = Object.keys(p.map).filter(c => !appCodes.has(c));
   const wkSel = document.getElementById('wksales-week');
@@ -3078,11 +3086,11 @@ function openWksalesDialog() {
     `<option value="${i + 1}"${i + 1 === p.week ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
   document.getElementById('wksales-summary').innerHTML =
     `<p>From <b>${esc(p.fname)}</b>: <b>${matched}</b> of ${YEAR}'s ${M.skus.length} products matched `
-    + `(${p.fileRows} rows in the file) · <b>${fmtGBP(totalVal)}</b> weekly sales to apply to <b>${esc(YEAR)}</b>.</p>`
-    + `<p class="muted-note">Sales £ are converted to units with each product's ASP. Products not in the file keep their `
-    + `existing value for the chosen week (0 for a new week).`
-    + (noAsp.length ? ` <b>${noAsp.length}</b> matched product(s) skipped — no ASP set: ${esc(noAsp.slice(0, 8).join(', '))}${noAsp.length > 8 ? '…' : ''}.` : '')
-    + `</p>`
+    + `(${p.fileRows} rows in the file) · <b>${Math.round(totalQty).toLocaleString('en-GB')}</b> units / <b>${fmtGBP(totalVal)}</b> to apply to <b>${esc(YEAR)}</b>.</p>`
+    + `<p class="muted-note">Units come straight from the file's <b>Qty TY</b>; each seller's weekly ASP (Sales ÷ Qty) is stamped `
+    + `on its ASP chip. The week's closing stock is derived from current stock + arrivals − sales, so upload <b>Weekly Sales `
+    + `before the Buying Report</b> each week (the Buying Report then refreshes live stock for the new week). Products not in `
+    + `the file keep their existing value for the chosen week (0 for a new week).</p>`
     + (unmatched.length ? `<details class="muted-note"><summary>${unmatched.length} file code(s) not in the ${esc(YEAR)} plan</summary>${esc(unmatched.join(', '))}</details>` : '');
   wksalesWeekNote();
   document.getElementById('wksales-apply').disabled = matched === 0;
@@ -3099,15 +3107,15 @@ function wksalesWeekNote() {
 async function applyWksalesUpdates() {
   const p = WKSALES_PARSED; if (!p) return;
   const week = +document.getElementById('wksales-week').value;
-  const { units, matched } = wksalesUnits();
+  const { units, wkasp, matched } = wksalesUnits();
   if (!matched) return;
   const status = document.getElementById('save-status'); status.textContent = 'Saving weekly sales…';
   try {
     const r = await fetch('/api/apply-wksales?year=' + encodeURIComponent(YEAR),
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week, units }) });
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week, units, wkasp }) });
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
-    applyWksalesToMemory(units, week, j.dataWeek);
+    applyWksalesToMemory(units, wkasp, week, j.dataWeek, j.stockClosed);
     SETTINGS.wksales_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
     document.getElementById('wksales-dialog').close();
     document.getElementById('settings-dialog').close();
@@ -3116,12 +3124,19 @@ async function applyWksalesUpdates() {
     WKSALES_PARSED = null;
   } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
 }
-function applyWksalesToMemory(units, week, dataWeek) {
+function applyWksalesToMemory(units, wkasp, week, dataWeek, stockClosed) {
   for (const s of M.skus) {
     const u = units[s.code];
-    if (u == null) continue;
-    if (!s.actual) s.actual = zeros();
-    s.actual[week - 1] = u;
+    if (u != null) {
+      if (!s.actual) s.actual = zeros();
+      s.actual[week - 1] = u;
+    }
+    if (wkasp[s.code] != null) { s.asp_wk = wkasp[s.code]; s.asp_wk_week = week; }
+    if (stockClosed) {   // close the week's stock for EVERY sku (unsold lines sold 0)
+      if (!s.running_stock) s.running_stock = zeros();
+      const ord = (ORDERS[s.id] || [])[week - 1] || 0;
+      s.running_stock[week - 1] = Math.max(0, (+s.stock_now || 0) + ord - (u || 0));
+    }
   }
   M.data_week = dataWeek;
   // live year: let the date-derived current week advance now the boundary allows it
@@ -3139,6 +3154,17 @@ function aspChip(sku) {
   const src = aspSrc(sku);
   const lbl = { orig: 'not yet updated — click to set', upload: 'from sales upload', manual: 'manually set' }[src];
   return `<button class="asp-chip asp-${src}" data-asp-sku="${esc(sku.id)}" title="Average Selling Price — ${lbl}. Click to edit by hand.">ASP £${(+sku.asp || 0).toFixed(2)}</button>`;
+}
+// Display-only chip: the realised ASP from the last weekly-sales upload (Sales TY ÷
+// Qty TY), tinted vs the main ASP so weekly price drift is visible at a glance.
+function wkAspChip(sku) {
+  const wa = +sku.asp_wk;
+  if (!(wa > 0)) return '';
+  const base = +sku.asp || 0;
+  const pct = base > 0 ? ((wa - base) / base) * 100 : 0;
+  const cls = pct > 2 ? 'wa-up' : pct < -2 ? 'wa-down' : 'wa-flat';
+  const vs = base > 0 ? ` — ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% vs the ASP in use (£${base.toFixed(2)})` : '';
+  return `<span class="wkasp-chip ${cls}" title="Realised ASP in the week-${sku.asp_wk_week || '?'} sales file (Sales ÷ Qty)${vs}.">Wk £${wa.toFixed(2)}</span>`;
 }
 // Years a manual price edit applies to: the year being viewed and all later (forecast) years.
 function manualAspYears() { return YEARS.filter(y => y >= String(YEAR)); }

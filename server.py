@@ -725,9 +725,9 @@ class Handler(SimpleHTTPRequestHandler):
     # ---- catalogue status + outstanding purchases (from the "Buying Report") ----
     @staticmethod
     def aggregate_buying(raw):
-        """Read a Buying Report → {code: {status, osPurchases}} for WEBSA rows only.
+        """Read a Buying Report → {code: {status, osPurchases, stock}} for WEBSA rows only.
         Columns: B=product code, D=location (keep only 'WEBSA'), E=catalog status
-        (LIVE/NOT LIVE → Live/Not Live), M=OS Purchases."""
+        (LIVE/NOT LIVE → Live/Not Live), H=Stock (live warehouse stock), M=OS Purchases."""
         import io
         import warnings
         import openpyxl
@@ -756,6 +756,9 @@ class Handler(SimpleHTTPRequestHandler):
                 st = norm_status(row[4])                        # E  catalog status
                 if st:
                     rec["status"] = st
+                stk = row[7] if len(row) > 7 else None          # H  live warehouse stock
+                if isinstance(stk, (int, float)):
+                    rec["stock"] = float(stk)
                 osp = row[12] if len(row) > 12 else None        # M  OS Purchases
                 if isinstance(osp, (int, float)):
                     rec["osPurchases"] = round(float(osp))
@@ -801,6 +804,9 @@ class Handler(SimpleHTTPRequestHandler):
                         touched = True
                     if rec.get("osPurchases") is not None:
                         s["os_purchases"] = rec["osPurchases"]
+                        touched = True
+                    if rec.get("stock") is not None:
+                        s["stock_now"] = rec["stock"]
                         touched = True
                     if touched:
                         n += 1
@@ -883,11 +889,11 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
-    # ---- weekly actual sales (the "WKnn Sales" export: Product SKU + Sales TY £) ----
+    # ---- weekly actual sales (the "WKnn Sales" export: Product SKU / Sales TY £ / Qty TY units) ----
     @staticmethod
     def aggregate_wksales(raw):
-        """Read a weekly sales export → {code: sales £ this week}. Finds the header row
-        containing 'Product SKU' and 'Sales TY'; duplicate codes are summed."""
+        """Read a weekly sales export → {code: {"val": £, "qty": units}}. Finds the header
+        row containing 'Product SKU', 'Sales TY' and 'Qty TY'; duplicate codes are summed."""
         import io
         import warnings
         import openpyxl
@@ -896,21 +902,26 @@ class Handler(SimpleHTTPRequestHandler):
             warnings.simplefilter("ignore")
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
             ws = wb.active
-            code_c = sales_c = hdr = None
+            code_c = sales_c = qty_c = hdr = None
             for i, row in enumerate(ws.iter_rows(values_only=True)):
                 if hdr is None:
                     lower = [str(c or "").strip().lower() for c in row]
-                    if "product sku" in lower and "sales ty" in lower:
-                        hdr, code_c, sales_c = i, lower.index("product sku"), lower.index("sales ty")
+                    if "product sku" in lower and "sales ty" in lower and "qty ty" in lower:
+                        hdr = i
+                        code_c, sales_c, qty_c = lower.index("product sku"), lower.index("sales ty"), lower.index("qty ty")
                     continue
                 code = str(row[code_c] or "").strip() if len(row) > code_c else ""
                 val = row[sales_c] if len(row) > sales_c else None
-                if not code or not isinstance(val, (int, float)):
+                qty = row[qty_c] if len(row) > qty_c else None
+                if not code or not isinstance(qty, (int, float)):
                     continue
-                out[code] = out.get(code, 0.0) + float(val)
+                rec = out.setdefault(code, {"val": 0.0, "qty": 0.0})
+                rec["qty"] += float(qty)
+                if isinstance(val, (int, float)):
+                    rec["val"] += float(val)
                 n += 1
             if hdr is None:
-                raise ValueError("Couldn't find a header row with 'Product SKU' and 'Sales TY'.")
+                raise ValueError("Couldn't find a header row with 'Product SKU', 'Sales TY' and 'Qty TY'.")
         return out, n
 
     def parse_wksales(self):
@@ -925,15 +936,21 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"ok": True, "sales": sales, "fileRows": count})
 
     def apply_wksales(self, qs):
-        """Write one week's actual sales units into the year's master.json (matched by
-        code; units already converted client-side via each SKU's ASP) and advance the
-        actuals/forecast boundary: data_week = max(data_week, week+1)."""
+        """Write one week's actual sales units (file's 'Qty TY') into the year's
+        master.json, stamp each seller's weekly ASP (asp_wk = Sales TY / Qty TY),
+        and advance the actuals/forecast boundary: data_week = max(data_week, week+1).
+        When the week is being NEWLY historicalised, also close its stock:
+        running_stock[week-1] = stock_now + committed arrivals − units sold — so the
+        stock row trusts the app's own imports instead of waiting for import_data.
+        (Re-applying an already-actualised week leaves running_stock alone: stock_now
+        has moved on since, so a recompute would be wrong.)"""
         try:
             ydir, year = year_dir(qs)
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             week = int(body.get("week") or 0)
             units = body.get("units") or {}
+            wkasp = body.get("wkasp") or {}
             if not (1 <= week <= 53):
                 self.send_json({"ok": False, "error": f"week {week} out of range"}, 400)
                 return
@@ -942,21 +959,35 @@ class Handler(SimpleHTTPRequestHandler):
             if not master:
                 self.send_json({"ok": False, "error": f"no master.json for {year}"}, 500)
                 return
+            orders = read_json(ydir / "orders.json", {}) or {}
+            old_dw = int(master.get("data_week") or 1)
+            close_stock = week >= old_dw   # this upload moves the boundary past `week`
             n = 0
             for s in master["skus"]:
-                u = units.get(s.get("code"))
-                if u is None:
-                    continue
-                act = s.get("actual") or [0] * 53
-                while len(act) < 53:
-                    act.append(0)
-                act[week - 1] = u
-                s["actual"] = act
-                n += 1
-            new_dw = max(int(master.get("data_week") or 1), week + 1)
+                code = s.get("code")
+                u = units.get(code)
+                if u is not None:
+                    act = s.get("actual") or [0] * 53
+                    while len(act) < 53:
+                        act.append(0)
+                    act[week - 1] = u
+                    s["actual"] = act
+                    n += 1
+                if wkasp.get(code) is not None:
+                    s["asp_wk"] = wkasp[code]
+                    s["asp_wk_week"] = week
+                if close_stock:
+                    rs = s.get("running_stock") or [0] * 53
+                    while len(rs) < 53:
+                        rs.append(0)
+                    ord_w = (orders.get(s.get("id")) or [0] * 53)[week - 1]
+                    rs[week - 1] = max(0.0, float(s.get("stock_now") or 0) + float(ord_w or 0) - float(u or 0))
+                    s["running_stock"] = rs
+            new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
             mpath.write_text(json.dumps(master), encoding="utf-8")
-            self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw, "year": year})
+            self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw,
+                            "year": year, "stockClosed": close_stock})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

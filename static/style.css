@@ -1317,3 +1317,13 @@ dialog fieldset { min-width: 0; }
 .arr-lines th:nth-child(4) { width: 100px; }   /* Arrival units */
 .arr-lines th:nth-child(5) { width: 100px; }   /* Current stock */
 .arr-lines td { overflow-wrap: anywhere; }
+
+/* Weekly-sales realised ASP chip (display-only, beside the main ASP pill) */
+.wkasp-chip { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid transparent;
+  margin-right: 5px; white-space: nowrap; line-height: 1.4; cursor: default; }
+.wkasp-chip.wa-up   { background: #e3f3e6; border-color: #9fcfa8; color: #1d6b34; }
+.wkasp-chip.wa-down { background: #fdecea; border-color: #f0b8b0; color: #b23b2c; }
+.wkasp-chip.wa-flat { background: #eef1f6; border-color: #cdd6e2; color: #5f7387; }
+[data-theme="dark"] .wkasp-chip.wa-up   { background: #16352b; border-color: #225a43; color: #6fd49a; }
+[data-theme="dark"] .wkasp-chip.wa-down { background: #3a2220; border-color: #5a2c28; color: #ff8b7d; }
+[data-theme="dark"] .wkasp-chip.wa-flat { background: #262b36; border-color: #3a4250; color: #9aa7b8; }
