@@ -1128,12 +1128,12 @@ dialog fieldset { min-width: 0; }
 #settings-dialog .stab { border: 1px solid var(--pill-brd); background: var(--pill-bg); border-radius: var(--r-pill); margin-bottom: 0; }
 #settings-dialog .stab.active { background: var(--sel-bg); border-color: var(--sel-brd); color: var(--sel-ink); box-shadow: var(--sel-glow); }
 
-/* action buttons in Settings (not the tabs / not the tiny band-delete) → pills */
-#settings-dialog button:not(.stab):not(.band-del) {
+/* action buttons in Settings (not the tabs / not the tiny band-delete / not the freshness-coloured import tiles) → pills */
+#settings-dialog button:not(.stab):not(.band-del):not(.imp-tile) {
   font: inherit; font-size: 12.5px; padding: 6px 13px; border-radius: var(--r-pill);
   border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); cursor: pointer;
 }
-#settings-dialog button:not(.stab):not(.band-del):hover { border-color: var(--sel-brd); background: var(--hover-bg); }
+#settings-dialog button:not(.stab):not(.band-del):not(.imp-tile):hover { border-color: var(--sel-brd); background: var(--hover-bg); }
 #settings-dialog button.primary { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: var(--sel-glow); }
 #settings-dialog button.danger { background: transparent; color: var(--bad); border-color: #e8b4ae; }
 
