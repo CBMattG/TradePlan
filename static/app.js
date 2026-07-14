@@ -4027,6 +4027,7 @@ function refreshBuildYearBtn() {
 let ARR_FILTER = '';
 const ARR_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 function arrTodayIso() { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; }
+function arrTodayUk() { const n = new Date(); return `${String(n.getDate()).padStart(2, '0')}-${String(n.getMonth() + 1).padStart(2, '0')}-${n.getFullYear()}`; }   // DD-MM-YYYY for export note + filename
 function arrDow(iso) { const [y, m, d] = iso.split('-').map(Number); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m - 1, d)).getUTCDay()]; }
 
 // Booked = every future-dated Qlik container leg (one card per PO+leg; a split PO
@@ -4141,7 +4142,7 @@ async function exportArrivals() {
     qty: l.qty, stock: l.sku ? Math.round(l.sku.stock_now || 0) : null });
   const flt = ARR_FILTER.trim();
   const payload = {
-    generated: `${arrTodayIso()}${flt ? ` · filtered: "${flt}"` : ''}`,
+    generated: `${arrTodayUk()}${flt ? ` · filtered: "${flt}"` : ''}`,
     months: arrMonthCounts(booked),
     booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier,
       container: ev.leg.container || '', status: ev.leg.status || '', split: ev.split,
@@ -4158,7 +4159,7 @@ async function exportArrivals() {
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `Upcoming Containers ${arrTodayIso()}.xlsx`;
+    a.href = url; a.download = `Upcoming Containers ${arrTodayUk()}.xlsx`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
     status.textContent = 'Exported upcoming containers';

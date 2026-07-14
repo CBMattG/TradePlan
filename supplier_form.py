@@ -629,7 +629,7 @@ def export_arrivals(payload):
                 cell.font = Font(name=FONT, size=9)
                 cell.alignment = left if isinstance(v, str) else center
                 if isinstance(v, date):
-                    cell.number_format = "dd/mm/yy"
+                    cell.number_format = "dd-mm-yyyy"
                 elif isinstance(v, (int, float)):
                     cell.number_format = "#,##0"
                 # payment / overdue status text colouring (matches the page's badges)
