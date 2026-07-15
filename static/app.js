@@ -862,9 +862,12 @@ function skuRowsHtml(sku, idx) {
       + `<span>variance <b class="${cls}">${sign}${fmtGBP(Math.abs(vv))} (${sign}${Math.abs(pct).toFixed(0)}%)</b></span></div>`;
   }
   let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car" title="Click to expand / collapse this product">▶</span><div class="skh-main">${img}<div class="skh-body">`
-    + `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
-    + statsHtml
-    + ytdHtml
+    + `<div class="skh-left">`
+    +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
+    +   `<div class="skh-pills">${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}</div>`
+    +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}</div>`
+    + `</div>`
+    + `<div class="skh-right">${statsHtml}${ytdHtml}</div>`
     + `</div></div></div></td></tr>`;
   const committed = ORDERS[sku.id] || EMPTY53;
   const proposed = proposedArr0;

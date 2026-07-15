@@ -1391,7 +1391,15 @@ tr.skuhead.acc-open .acc-car { transform: rotate(90deg); }
    caps it to the visible viewport (minus sidebar) so the wrap happens on screen. */
 .skuhead-inner { position: sticky; left: 0; display: inline-flex; align-items: center;
   max-width: min(1250px, calc(100vw - 330px)); }
-.skuhead .skh-body { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 18px; min-width: 0; }
+/* banner = two condensed left-aligned columns: identity + pill rows | stats + YTD.
+   Pills group by kind — status & ASPs on one row, FOB/landed costs on the next. */
+.skuhead .skh-body { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px 34px; min-width: 0; }
+.skh-left { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; flex-shrink: 0; max-width: 100%; }
+.skh-right { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; }
+.skh-right .skh-stats { flex-wrap: wrap; }
+.skh-pills { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.skh-pills .asp-chip, .skh-pills .cost-chip, .skh-pills .est-chip, .skh-pills .wkasp-chip { margin: 0; }
+.skh-pills .badge { margin: 0; }
 .skuhead .skh-stats { margin: 0; }
 .skuhead .sku-ytd { margin: 0; }
 .skh-cover { border-radius: 9px; padding: 0 8px; }
