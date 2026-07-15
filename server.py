@@ -939,11 +939,12 @@ class Handler(SimpleHTTPRequestHandler):
         """Write one week's actual sales units (file's 'Qty TY') into the year's
         master.json, stamp each seller's weekly ASP (asp_wk = Sales TY / Qty TY),
         and advance the actuals/forecast boundary: data_week = max(data_week, week+1).
-        When the week is being NEWLY historicalised, also close its stock:
-        running_stock[week-1] = stock_now + committed arrivals − units sold — so the
-        stock row trusts the app's own imports instead of waiting for import_data.
-        (Re-applying an already-actualised week leaves running_stock alone: stock_now
-        has moved on since, so a recompute would be wrong.)"""
+        Closing stock is CHAINED for every SKU (sold or not) from the uploaded week
+        through the last actualised week: running_stock[w] = previous week's closing
+        + committed arrivals − actual units sold. Chaining from the prior week's
+        closing (not the live stock_now snapshot) keeps the figure consistent with
+        the grid's own history and safe to re-derive — re-applying a past week
+        simply re-chains it and every later actualised week."""
         try:
             ydir, year = year_dir(qs)
             length = int(self.headers.get("Content-Length", 0))
@@ -961,33 +962,34 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             orders = read_json(ydir / "orders.json", {}) or {}
             old_dw = int(master.get("data_week") or 1)
-            close_stock = week >= old_dw   # this upload moves the boundary past `week`
+            closed_through = max(week, old_dw - 1)   # re-chain any later actualised weeks too
             n = 0
             for s in master["skus"]:
                 code = s.get("code")
                 u = units.get(code)
+                act = s.get("actual") or [0] * 53
+                while len(act) < 53:
+                    act.append(0)
                 if u is not None:
-                    act = s.get("actual") or [0] * 53
-                    while len(act) < 53:
-                        act.append(0)
                     act[week - 1] = u
-                    s["actual"] = act
                     n += 1
+                s["actual"] = act
                 if wkasp.get(code) is not None:
                     s["asp_wk"] = wkasp[code]
                     s["asp_wk_week"] = week
-                if close_stock:
-                    rs = s.get("running_stock") or [0] * 53
-                    while len(rs) < 53:
-                        rs.append(0)
-                    ord_w = (orders.get(s.get("id")) or [0] * 53)[week - 1]
-                    rs[week - 1] = max(0.0, float(s.get("stock_now") or 0) + float(ord_w or 0) - float(u or 0))
-                    s["running_stock"] = rs
+                rs = s.get("running_stock") or [0] * 53
+                while len(rs) < 53:
+                    rs.append(0)
+                ordv = orders.get(s.get("id")) or [0] * 53
+                for w in range(week, closed_through + 1):
+                    prev = rs[w - 2] if w >= 2 else float(s.get("stock_now") or 0)
+                    rs[w - 1] = max(0.0, float(prev or 0) + float(ordv[w - 1] or 0) - float(act[w - 1] or 0))
+                s["running_stock"] = rs
             new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
             mpath.write_text(json.dumps(master), encoding="utf-8")
             self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw,
-                            "year": year, "stockClosed": close_stock})
+                            "year": year, "closedThrough": closed_through})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

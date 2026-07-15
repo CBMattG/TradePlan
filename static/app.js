@@ -3203,9 +3203,9 @@ function openWksalesDialog() {
     `<p>From <b>${esc(p.fname)}</b>: <b>${matched}</b> of ${YEAR}'s ${M.skus.length} products matched `
     + `(${p.fileRows} rows in the file) · <b>${Math.round(totalQty).toLocaleString('en-GB')}</b> units / <b>${fmtGBP(totalVal)}</b> to apply to <b>${esc(YEAR)}</b>.</p>`
     + `<p class="muted-note">Units come straight from the file's <b>Qty TY</b>; each seller's weekly ASP (Sales ÷ Qty) is stamped `
-    + `on its ASP chip. The week's closing stock is derived from current stock + arrivals − sales, so upload <b>Weekly Sales `
-    + `before the Buying Report</b> each week (the Buying Report then refreshes live stock for the new week). Products not in `
-    + `the file keep their existing value for the chosen week (0 for a new week).</p>`
+    + `on its ASP chip. Each product's closing stock for the week is chained as <b>previous week's closing + arrivals − sales</b> `
+    + `(re-uploading a past week re-chains every later week too). Products not in the file keep their existing sales for the `
+    + `chosen week (0 for a new week).</p>`
     + (unmatched.length ? `<details class="muted-note"><summary>${unmatched.length} file code(s) not in the ${esc(YEAR)} plan</summary>${esc(unmatched.join(', '))}</details>` : '');
   wksalesWeekNote();
   document.getElementById('wksales-apply').disabled = matched === 0;
@@ -3230,7 +3230,7 @@ async function applyWksalesUpdates() {
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week, units, wkasp }) });
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
-    applyWksalesToMemory(units, wkasp, week, j.dataWeek, j.stockClosed);
+    applyWksalesToMemory(units, wkasp, week, j.dataWeek, j.closedThrough);
     SETTINGS.wksales_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
     document.getElementById('wksales-dialog').close();
     document.getElementById('settings-dialog').close();
@@ -3239,18 +3239,19 @@ async function applyWksalesUpdates() {
     WKSALES_PARSED = null;
   } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
 }
-function applyWksalesToMemory(units, wkasp, week, dataWeek, stockClosed) {
+function applyWksalesToMemory(units, wkasp, week, dataWeek, closedThrough) {
   for (const s of M.skus) {
     const u = units[s.code];
-    if (u != null) {
-      if (!s.actual) s.actual = zeros();
-      s.actual[week - 1] = u;
-    }
+    if (!s.actual) s.actual = zeros();
+    if (u != null) s.actual[week - 1] = u;
     if (wkasp[s.code] != null) { s.asp_wk = wkasp[s.code]; s.asp_wk_week = week; }
-    if (stockClosed) {   // close the week's stock for EVERY sku (unsold lines sold 0)
-      if (!s.running_stock) s.running_stock = zeros();
-      const ord = (ORDERS[s.id] || [])[week - 1] || 0;
-      s.running_stock[week - 1] = Math.max(0, (+s.stock_now || 0) + ord - (u || 0));
+    // chain the closing stock (every sku; unsold = 0 sales) from the uploaded week
+    // through the last actualised week — mirrors the server's apply_wksales
+    if (!s.running_stock) s.running_stock = zeros();
+    const ord = ORDERS[s.id] || EMPTY53;
+    for (let w = week; w <= (closedThrough || week); w++) {
+      const prev = w >= 2 ? (+s.running_stock[w - 2] || 0) : (+s.stock_now || 0);
+      s.running_stock[w - 1] = Math.max(0, prev + (ord[w - 1] || 0) - (s.actual[w - 1] || 0));
     }
   }
   M.data_week = dataWeek;
