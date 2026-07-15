@@ -71,6 +71,12 @@ let saveTimer = null;
 const DEFAULT_ROWS = ['ly', 'forecast', 'orders', 'proposed', 'stock', 'cover'];
 const _savedRows = loadPref('tp_visibleRows');
 let visible = new Set(Array.isArray(_savedRows) && _savedRows.length ? _savedRows : DEFAULT_ROWS);
+// Plan-page product ordering within a supplier + which product accordions are open
+const SUP_SORTS = ['orig', 'value', 'az'];
+let supSort = SUP_SORTS.includes(loadPref('tp_supSort')) ? loadPref('tp_supSort') : 'orig';
+let openSkus = new Set(Array.isArray(loadPref('tp_openSkus')) ? loadPref('tp_openSkus') : []);
+let accForceOpen = false;    // search active → matching products render expanded
+let reopenDD = null;         // keep a toolbar dropdown open across a renderPlan()
 
 const ROWDEFS = [
   { key: 'ly',       label: 'LY Sales',            fmt: fmtU },
@@ -831,12 +837,19 @@ function skuRowsHtml(sku, idx) {
     sku.cbm ? sku.cbm.toFixed(3) + ' cbm' : null,
   ].filter(Boolean).join(' · ');
   const osp = sku.os_purchases;
+  const open = accForceOpen || openSkus.has(sku.id);
+  const proposedArr0 = (PROPOSED && PROPOSED.get(sku.id)) || EMPTY53;
+  const propUnits = proposedArr0.reduce((a, b) => a + b, 0);
+  const coverNow = r.cover[Math.max(0, (SETTINGS.current_week || 1) - 1)];
+  const cb = coverBand(coverNow);
   const statsHtml = `<div class="skh-stats">`
     + `<span class="skh-stat"><span class="skh-stat-l">Stock now</span><b>${Math.round(sku.stock_now).toLocaleString()}</b></span>`
     + `<span class="skh-stat"><span class="skh-stat-l">On purchase</span><b>${osp != null ? Math.round(osp).toLocaleString() : '—'}</b></span>`
+    + `<span class="skh-stat"><span class="skh-stat-l">Cover now</span><b class="skh-cover" style="background:${cb.bg};color:${textOnColor(cb.bg)}">${fmt1(coverNow)} wks</b></span>`
+    + (propUnits > 0.5 ? `<span class="skh-prop" title="This product has uncommitted proposed rebuy stock">● rebuy ${fmtU(propUnits)}</span>` : '')
     + `</div>`;
   const img = sku.image ? `<img src="${esc(sku.image)}" loading="lazy" onerror="this.remove()">` : '';
-  const headCls = (sku.status === 'Not Live' ? 'skuhead notlive' : 'skuhead') + (aspSrc(sku) === 'orig' ? ' asp-stale' : '');
+  const headCls = (sku.status === 'Not Live' ? 'skuhead notlive' : 'skuhead') + (aspSrc(sku) === 'orig' ? ' asp-stale' : '') + (open ? ' acc-open' : '');
   // YTD-to-most-recent-actual-week (week before current): actual sales £ vs forecast £
   const aw = cur - 1;
   let ytdHtml = '';
@@ -848,17 +861,18 @@ function skuRowsHtml(sku, idx) {
       + `<span>actual <b>${fmtGBP(actual)}</b></span><span>forecast <b>${fmtGBP(fcast)}</b></span>`
       + `<span>variance <b class="${cls}">${sign}${fmtGBP(Math.abs(vv))} (${sign}${Math.abs(pct).toFixed(0)}%)</b></span></div>`;
   }
-  let h = `<tr class="${headCls}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><div class="skh-main">${img}<div class="skh-body">`
+  let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}" title="Click to ${open ? 'collapse' : 'expand'} this product's weekly grid"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car">▶</span><div class="skh-main">${img}<div class="skh-body">`
     + `<div class="skh-line1"><span class="code">${esc(sku.code)}</span><span class="nm"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
     + statsHtml
     + ytdHtml
     + `</div></div></div></td></tr>`;
   const committed = ORDERS[sku.id] || EMPTY53;
-  const proposed = (PROPOSED && PROPOSED.get(sku.id)) || EMPTY53;
+  const proposed = proposedArr0;
+  const rowOpen = `<tr data-skurow="${esc(sku.id)}"${open ? '' : ' class="acc-hide"'}>`;
   for (const def of ROWDEFS) {
     if (!visible.has(def.key)) continue;
     const src = def.key === 'orders' ? committed : def.key === 'proposed' ? proposed : r[def.key];
-    h += `<tr><td class="lbl">${def.label}</td>`;
+    h += `${rowOpen}<td class="lbl">${def.label}</td>`;
     let tot = 0;
     for (let w = 0; w < WEEKS; w++) {
       const v = src[w]; tot += v;
@@ -894,7 +908,7 @@ function skuRowsHtml(sku, idx) {
 }
 
 /* ---------------- supplier summary panel (visual subtotals) ---------------- */
-function sparkline(arr, color, cur, label, fmt, ghost) {
+function sparkline(arr, color, cur, label, fmt, ghost, extraAttrs) {
   const w = 160, h = 32, n = arr.length, gap = 0.8;
   const bw = (w - (n - 1) * gap) / n;
   const hasGhost = ghost && ghost.some(v => Math.abs(v) > 0);
@@ -906,9 +920,10 @@ function sparkline(arr, color, cur, label, fmt, ghost) {
     const x = i * (bw + gap), y = h - bh, isCur = (i + 1) === cur;
     bars += `<rect${isCur ? ' class="spk-cur"' : ''} x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${bw.toFixed(2)}" height="${Math.max(0, bh).toFixed(2)}" `
           + `${isCur ? '' : `fill="${color}" opacity="0.8"`}></rect>`;
-    // transparent full-height hit target so the whole week column is hoverable
+    // transparent full-height hit target so the whole week column is hoverable;
+    // extraAttrs(i) can add this-week/LY/cumulative data for the rich tooltip
     hits += `<rect class="spk-hit" x="${(x - gap / 2).toFixed(2)}" y="0" width="${(bw + gap).toFixed(2)}" height="${h}" `
-          + `fill="transparent" data-w="${i + 1}" data-l="${esc(label)}" data-v="${esc(fmt(arr[i]))}"></rect>`;
+          + `fill="transparent" data-w="${i + 1}" data-l="${esc(label)}" data-v="${esc(fmt(arr[i]))}"${extraAttrs ? extraAttrs(i) : ''}></rect>`;
   }
   // faint dashed last-year line behind the bars (stock-holding card only)
   let ghostEl = '';
@@ -940,10 +955,10 @@ function deltaChip(cur, prev, fmt, lyYear, pre, invert, extra) {
   return `<span class="sc-delta ${dir}" title="${pre ? pre + ' ' : ''}vs ${lyYear}: ${fmtSigned(d, fmt)} (${pctTxt})">`
     + `${preEl}${arrow} <span class="scd-val">${fmtSigned(d, fmt)}</span> <span class="scd-pct">${pctTxt}</span>${extra || ''}</span>`;
 }
-function supCard(label, total, arr, color, sub, cur, fmt, delta, ghost) {
+function supCard(label, total, arr, color, sub, cur, fmt, delta, ghost, extraAttrs) {
   return `<div class="sup-card" style="--c:${color}">
     <div class="sc-top"><span class="sc-label">${label}</span><span class="sc-total">${total}</span></div>
-    ${sparkline(arr, color, cur, label, fmt, ghost)}
+    ${sparkline(arr, color, cur, label, fmt, ghost, extraAttrs)}
     <div class="sc-sub"><span class="scs-txt">${sub}</span>${delta || ''}</div></div>`;
 }
 // Weekly sales line chart for the Summary tab. `sales` = realised/stock-capped sales-value
@@ -1042,12 +1057,25 @@ function supplierPanelHtml(t, supName) {
   const cbmD   = ly ? deltaChip(cbm, sum(ly.cbm), fmt1, lyN, null, false, cbmExtra) : '';
   const shvD   = ly ? deltaChip(avg(t.shv), avg(ly.shv), fmtGBP, lyN, 'avg', true) : '';   // avg holding (invert: less stock = green)
   const g = (GHOST_ON && ly) ? ly : null;    // last-year trend line on every card when enabled
+  // Rich per-week tooltip data on every card: this-week TY + LY-same-week, plus running
+  // cumulatives of both through the hovered week. The Stock Holding card additionally
+  // carries the SALES cumulatives so the tooltip can judge stock-vs-sales health
+  // (more sales on less stock = good, more stock on less sales = bad).
+  const cum = a => { let s = 0; return a.map(v => (s += v)); };
+  const mkAttrs = (tyArr, lyArr, fk, extra) => {
+    const cty = cum(tyArr), cly = lyArr ? cum(lyArr) : null;
+    return i => ` data-fk="${fk}" data-ty="${tyArr[i]}" data-cty="${cty[i]}"`
+      + (lyArr ? ` data-ly="${lyArr[i]}" data-cly="${cly[i]}"` : '')
+      + (extra ? extra(i) : '');
+  };
+  const salesTyCum = cum(t.sales), salesLyCum = ly ? cum(ly.sales) : null;
+  const shvExtra = i => ` data-inv="1" data-csty="${salesTyCum[i]}"` + (salesLyCum ? ` data-csly="${salesLyCum[i]}"` : '');
   return [
-    supCard('Sales', fmtGBP(sales), t.sales, '#0b5fff', `peak ${fmtGBP(pSales.v)} · W${pSales.w}`, cur, fmtGBP, salesD, g && g.sales),
-    supCard('Order FOB', fmtGBP(fob), t.fob, '#16a085', `${fmtU(units)} units to order`, cur, fmtGBP, fobD, g && g.fob),
-    supCard('Order Units', fmtU(units), t.units, '#8e44ad', orderWks ? `ordered across ${orderWks} week${orderWks > 1 ? 's' : ''}` : 'no orders planned', cur, fmtU, unitsD, g && g.units),
-    supCard('Order CBM', fmt1(cbm), t.cbm, '#e67e22', `≈ ${(cbm / SETTINGS.container_cbm).toFixed(1)} containers`, cur, fmt1, cbmD, g && g.cbm),
-    supCard('Stock Holding', fmtGBP(pShv.v), t.shv, '#c0392b', `peak value · W${pShv.w}`, cur, fmtGBP, shvD, g && g.shv),
+    supCard('Sales', fmtGBP(sales), t.sales, '#0b5fff', `peak ${fmtGBP(pSales.v)} · W${pSales.w}`, cur, fmtGBP, salesD, g && g.sales, mkAttrs(t.sales, ly && ly.sales, 'gbp')),
+    supCard('Order FOB', fmtGBP(fob), t.fob, '#16a085', `${fmtU(units)} units to order`, cur, fmtGBP, fobD, g && g.fob, mkAttrs(t.fob, ly && ly.fob, 'gbp')),
+    supCard('Order Units', fmtU(units), t.units, '#8e44ad', orderWks ? `ordered across ${orderWks} week${orderWks > 1 ? 's' : ''}` : 'no orders planned', cur, fmtU, unitsD, g && g.units, mkAttrs(t.units, ly && ly.units, 'u')),
+    supCard('Order CBM', fmt1(cbm), t.cbm, '#e67e22', `≈ ${(cbm / SETTINGS.container_cbm).toFixed(1)} containers`, cur, fmt1, cbmD, g && g.cbm, mkAttrs(t.cbm, ly && ly.cbm, '1')),
+    supCard('Stock Holding', fmtGBP(pShv.v), t.shv, '#c0392b', `peak value · W${pShv.w}`, cur, fmtGBP, shvD, g && g.shv, mkAttrs(t.shv, ly && ly.shv, 'gbp', shvExtra)),
   ].join('');
 }
 function combinedSupAgg(supName) {     // supplier panel reflects committed + proposed
@@ -1392,9 +1420,45 @@ function initSparkTooltip() {
     if (poTip) {
       tip.innerHTML = poTip;
     } else if (spk) {
-      const w = +spk.dataset.w;
-      tip.innerHTML = `<div class="st-wk">Week ${w} · w/c ${weekDate(w)}</div>`
-                    + `<div class="st-val">${esc(spk.dataset.l)}: <b>${esc(spk.dataset.v)}</b></div>`;
+      const w = +spk.dataset.w, d = spk.dataset;
+      if (!d.fk) {   // plain sparkline (no rich data): label + value only
+        tip.innerHTML = `<div class="st-wk">Week ${w} · w/c ${weekDate(w)}</div>`
+                      + `<div class="st-val">${esc(d.l)}: <b>${esc(d.v)}</b></div>`;
+      } else {
+        // supplier KPI card: this week vs LY same week + cumulatives-to-week vs LY
+        const fmt = { gbp: fmtGBP, u: fmtU, 1: fmt1 }[d.fk] || fmtGBP;
+        const lyYr = (LY_CACHE && LY_CACHE.year) || 'LY';
+        const ty = +d.ty, cty = +d.cty;
+        const hasLy = d.ly != null;
+        const ly = +d.ly, cly = +d.cly;
+        const pct = (a, b) => b ? `${a - b >= 0 ? '+' : '−'}${Math.abs(((a - b) / b) * 100).toFixed(0)}%` : (a ? 'new' : '0%');
+        const varTxt = (a, b) => `${fmtSigned(a - b, fmt)} (${pct(a, b)})`;
+        let h = `<div class="st-wk">Week ${w} · w/c ${weekDate(w)} — ${esc(d.l)}</div>`
+              + `<div class="st-val">This week: <b>${fmt(ty)}</b>`
+              + (hasLy ? ` <span class="st-lywk">· ${lyYr} same week: ${fmt(ly)}</span>` : '') + `</div>`
+              + `<div class="st-cum-head">Cumulative to W${w}</div>`
+              + `<div class="st-cum">This year: <b>${fmt(cty)}</b></div>`;
+        if (hasLy) {
+          h += `<div class="st-cum">${lyYr}: <b>${fmt(cly)}</b></div>`;
+          if (d.inv) {
+            // Stock Holding: judge the variance against SALES over the same weeks —
+            // more sales on less stock = green, more stock on less sales = red
+            const csty = +d.csty, csly = +d.csly;
+            const stockUp = cty > cly, salesUp = csty >= csly;
+            const cls = (!stockUp && salesUp) ? 'st-var-up' : (stockUp && !salesUp) ? 'st-var-down' : 'st-var-flat';
+            const note = (!stockUp && salesUp) ? 'less stock, more sales ✓'
+                       : (stockUp && !salesUp) ? 'more stock, less sales ✗'
+                       : stockUp ? 'more stock, more sales' : 'less stock, less sales';
+            h += `<div class="st-cum st-cum-var">Stock vs ${lyYr}: <b class="${cls}">${varTxt(cty, cly)}</b></div>`
+               + `<div class="st-cum">Sales vs ${lyYr}: <b>${varTxt(csty, csly)}</b></div>`
+               + `<div class="st-cum st-note ${cls}">${note}</div>`;
+          } else {
+            const cls = cty >= cly ? 'st-var-up' : 'st-var-down';
+            h += `<div class="st-cum st-cum-var">Variance: <b class="${cls}">${varTxt(cty, cly)}</b></div>`;
+          }
+        }
+        tip.innerHTML = h;
+      }
     } else {
       const w = +sl.dataset.w, sales = +sl.dataset.sales, fc = +sl.dataset.fc, stock = +sl.dataset.stock, cont = +sl.dataset.cont;
       const csales = +sl.dataset.csales, cfc = +sl.dataset.cfc;
@@ -1450,15 +1514,27 @@ function renderPlan() {
     `<b>${allSkus.length}</b> products · <b class="c-live">${liveN} Live</b> · <b class="c-notlive">${notN} Not Live</b>${unkN ? ` · ${unkN} unknown` : ''}`,
     sup.email ? `<b>${esc(sup.email)}</b>` : null,
   ].filter(Boolean).join(' &nbsp;·&nbsp; ');
-  const sfOpts = { all: 'All', live: 'Live', notlive: 'Not Live' };
-  const statusFilterHtml = `<div id="status-filter"><span class="sf-lbl">Rebuy status:</span>` +
-    Object.keys(sfOpts).map(k => `<button class="sfbtn${statusFilter === k ? ' on' : ''}" data-sf="${k}">${sfOpts[k]}</button>`).join('') +
-    `</div>`;
+  // product ordering within the supplier: original import order / sales value / A–Z
+  if (supSort === 'value') {
+    const val = k => { const rr = RES.get(k.id); return rr ? rr.value.reduce((a, b) => a + b, 0) : 0; };
+    skus = skus.slice().sort((a, b) => val(b) - val(a));
+  } else if (supSort === 'az') {
+    skus = skus.slice().sort((a, b) => a.code.localeCompare(b.code));
+  }
+  accForceOpen = !!term;   // searching → matching products render expanded
+
+  const sfOpts = { all: `All (${allSkus.length})`, live: `Live (${liveN})`, notlive: `Not Live (${notN})` };
   const allOn = ROWDEFS.every(d => visible.has(d.key));
-  const chips = `<span class="tg-lbl">Rows:</span>` +
-    `<button class="chip all${allOn ? ' on' : ''}" data-row="__all__">All</button>` +
-    ROWDEFS.map(d =>
-      `<button class="chip${visible.has(d.key) ? ' on' : ''}" data-row="${d.key}">${d.label}</button>`).join('');
+  const statusDD = `<details class="dd" id="dd-status"><summary>Status: <b>${sfOpts[statusFilter] || sfOpts.all}</b> ▾</summary><div class="dd-pop">`
+    + Object.keys(sfOpts).map(k => `<label><input type="radio" name="dd-sf" class="sfbtn" data-sf="${k}"${statusFilter === k ? ' checked' : ''}> ${sfOpts[k]}</label>`).join('')
+    + `</div></details>`;
+  const rowsDD = `<details class="dd" id="dd-rows"><summary>Rows: <b>${visible.size} of ${ROWDEFS.length}</b> ▾</summary><div class="dd-pop">`
+    + `<label class="dd-all"><input type="checkbox" class="chip" data-row="__all__"${allOn ? ' checked' : ''}> <b>All rows</b></label><hr>`
+    + ROWDEFS.map(d => `<label><input type="checkbox" class="chip" data-row="${d.key}"${visible.has(d.key) ? ' checked' : ''}> ${d.label}</label>`).join('')
+    + `</div></details>`;
+  const sortSeg = `<span class="seg" title="Product order within this supplier">`
+    + [['orig', 'Original'], ['value', 'Value'], ['az', 'A–Z']].map(([k, l]) =>
+      `<button class="srtbtn${supSort === k ? ' on' : ''}" data-srt="${k}">${l}</button>`).join('') + `</span>`;
 
   const t = combinedSupAgg(sup.name);
   const CC = SETTINGS.container_cbm || 68, rbMode = (SETTINGS.rebuy && SETTINGS.rebuy.mode) || 'full';
@@ -1485,45 +1561,54 @@ function renderPlan() {
     const growthNote = gp ? ` · <b>${gp > 0 ? '+' : ''}${gp}%</b> YoY growth applied` : '';
     seasonBanner = `<div id="season-banner">🌦️ <b>Seasonality model active</b> (${YEAR}) — future Sales Forecast re-modelled at ${Math.round(seasonStrengthFor(YEAR) * 100)}% strength${growthNote}${se.useWeather ? ' · ' + esc(weatherSummary()) : ''}. <a id="season-revert-link">Revert to original</a> · <a id="season-edit-link">adjust</a></div>`;
   }
+  const allOpen = skus.length > 0 && skus.every(k => accForceOpen || openSkus.has(k.id));
+  const rebuyDD = `<details class="dd" id="dd-rebuy"><summary>⟳ Rebuy: <b>${rbMode === 'full' ? `Full ${CC}` : 'Partial'}</b> · ${rebuyScope === 'sup' ? 'supplier' : 'year'} ▾</summary><div class="dd-pop">`
+    + `<div class="dd-sec">Container basket</div>`
+    + `<label><input type="radio" name="dd-rm" class="rb-mode" data-mode="full"${rbMode === 'full' ? ' checked' : ''}> Full ${CC} CBM</label>`
+    + `<label><input type="radio" name="dd-rm" class="rb-mode" data-mode="partial"${rbMode === 'partial' ? ' checked' : ''}> Allow partial</label>`
+    + `<hr><div class="dd-sec">Run / clear / commit apply to</div>`
+    + `<label><input type="radio" name="dd-rs" class="rb-scope" data-scope="sup"${rebuyScope === 'sup' ? ' checked' : ''}> This supplier</label>`
+    + `<label><input type="radio" name="dd-rs" class="rb-scope" data-scope="all"${rebuyScope === 'all' ? ' checked' : ''}> Whole year</label>`
+    + `</div></details>`;
+  const moreDD = `<details class="dd dd-right" id="dd-more"><summary title="Export / import / container dates / revert">⋯</summary><div class="dd-pop dd-menu">`
+    + `<button id="btn-export-sup" title="Download this supplier's order-planning form, including proposed rebuys (Excel)">&#x2913; Export to Excel</button>`
+    + `<button id="btn-export-multi" title="Export all suppliers or a selection — one form each, delivered as a single .zip">&#x2913; Export multiple…</button>`
+    + `<button id="btn-import-sup" title="Upload an edited form to confirm those orders">&#x2911; Import from Excel</button>`
+    + (poDataReady() ? `<button id="btn-sup-retime" title="Re-time this supplier's committed stock arrivals to their PO arrival weeks (booked Qlik container date, else PO due date)">&#8635; Apply Qlik Container Dates</button>${PO_APPLY_UNDO ? `<button id="btn-sup-retime-undo" title="Undo the last container re-time (${esc(PO_APPLY_UNDO.label)})">&#8624; Undo re-time</button>` : ''}` : '')
+    + `<hr><button id="btn-revert-orders" class="danger" title="Revert all ${YEAR} orders — choose the most recent saved configuration or the original imported file">&#8634; Revert orders</button>`
+    + `</div></details>`;
   main.innerHTML = `
     ${seasonBanner}
     <div id="totals-band">${totalsHtml()}</div>
-    <div class="sup-head">
-      <div class="sup-head-main"><h1>${esc(sup.name)}</h1><div class="meta">${meta}</div></div>
-      <div class="sup-actions">
-        <button id="btn-export-sup" title="Download this supplier's order-planning form, including proposed rebuys (Excel)">&#x2913; Export to Excel</button>
-        <button id="btn-export-multi" title="Export all suppliers or a selection — one form each, delivered as a single .zip">&#x2913; Export multiple…</button>
-        <button id="btn-import-sup" title="Upload an edited form to confirm those orders">&#x2911; Import from Excel</button>
-        ${poDataReady() ? `<button id="btn-sup-retime" class="rt-btn" title="Re-time this supplier's committed stock arrivals to their PO arrival weeks — booked Qlik container date, or the PO due date where no container is booked yet (this supplier only). Undo is right here.">&#8635; Apply Qlik Container Dates</button>${PO_APPLY_UNDO ? `<button id="btn-sup-retime-undo" class="rt-undo" title="Undo the last container re-time (${esc(PO_APPLY_UNDO.label)})">&#8624; Undo</button>` : ''}` : ''}
-        <button id="btn-revert-orders" class="danger" title="Revert all ${YEAR} orders — choose the most recent saved configuration or the original imported file">&#8634; Revert orders</button>
+    <div id="plan-toolbar">
+      <div class="ptb-row1"><h1>${esc(sup.name)}</h1><div class="meta">${meta}</div></div>
+      <div class="ptb-row2">
+        ${sortSeg}
+        ${statusDD}
+        ${rowsDD}
+        ${rebuyDD}
+        <button id="btn-acc-all" class="tbtn" title="${allOpen ? 'Collapse every product to its summary strip' : 'Expand every product to its full weekly grid'}">${allOpen ? '⌃ Collapse all' : '⌄ Expand all'}</button>
+        <span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span>
+        <span class="spacer"></span>
+        <button id="btn-run-rebuy" class="tbtn" title="(Re)build the Proposed Rebuy row for ${scopeWord} from the current committed orders.">&#8635; Run rebuy</button>
+        <button id="btn-clear-prop" class="tbtn"${scoped.units ? '' : ' disabled'} title="Remove proposed rebuy suggestions for ${scopeWord}">Clear</button>
+        <button id="btn-commit-all" class="tbtn primary"${scoped.units ? '' : ' disabled'} title="Add ${scopeWord}'s proposed rebuys (teal row) to Committed Orders as confirmed orders">&#10003; Commit ${fmtU(scoped.units)}</button>
+        ${moreDD}
         <input type="file" id="import-file" accept=".xlsx" hidden>
       </div>
     </div>
-    <div id="rebuy-bar">
-      <span class="rb-ctl-lbl">Rebuy suggestions (teal row):</span>
-      <button class="rb-mode${rbMode === 'full' ? ' on' : ''}" data-mode="full">Full ${CC} CBM</button>
-      <button class="rb-mode${rbMode === 'partial' ? ' on' : ''}" data-mode="partial">Allow partial</button>
-      <span class="rb-scope-lbl">Apply to:</span>
-      <button class="rb-scope${rebuyScope === 'sup' ? ' on' : ''}" data-scope="sup" title="Run / clear / commit suggestions for the selected supplier only">This supplier</button>
-      <button class="rb-scope${rebuyScope === 'all' ? ' on' : ''}" data-scope="all" title="Run / clear / commit suggestions across every supplier for the whole year">Whole year</button>
-      <span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span>
-      <span class="spacer"></span>
-      <button id="btn-run-rebuy" title="(Re)build the Proposed Rebuy row for ${scopeWord} from the current committed orders. Commit some orders, then re-run to see the plan adjust.">&#8635; Run rebuy${rebuyScope === 'sup' ? ' (supplier)' : ' (year)'}</button>
-      <button id="btn-clear-prop"${scoped.units ? '' : ' disabled'} title="Remove proposed rebuy suggestions for ${scopeWord}">Clear suggestions</button>
-      <button id="btn-commit-all" class="primary"${scoped.units ? '' : ' disabled'} title="Add ${scopeWord}'s proposed rebuys (teal row) to Committed Orders as confirmed orders">&#10003; Commit ${fmtU(scoped.units)} suggested</button>
-    </div>
-    <div id="control-bar">${statusFilterHtml}<div id="row-toggles">${chips}</div></div>
     ${LY_CACHE ? `<div id="sup-panel-head"><label class="ghost-toggle" title="Overlay each card with a faint dashed ${LY_CACHE.year} trend line"><input type="checkbox" id="ghost-chk"${GHOST_ON ? ' checked' : ''}><span>${LY_CACHE.year} trend</span></label></div>` : ''}
     <div id="sup-panel">${supplierPanelHtml(t, sup.name)}</div>
     <div class="gridwrap"><table class="grid"><thead>${headerRow(proposedWeekSet(skus))}${poRowHtml(sup.name)}</thead>
       <tbody>${body}</tbody>
       <tfoot>${supCbmFooterHtml(sup.name, CC, highlightWeek())}</tfoot></table></div>`;
+  if (reopenDD) { const dd = document.getElementById(reopenDD); if (dd) dd.open = true; reopenDD = null; }
 
   const ghostChk = main.querySelector('#ghost-chk');
   if (ghostChk) ghostChk.addEventListener('change', e => {
     GHOST_ON = e.target.checked; savePref('tp_ghost', GHOST_ON); refreshSupplierPanel();
   });
-  main.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+  main.querySelectorAll('.chip').forEach(c => c.addEventListener('change', () => {
     const k = c.dataset.row;
     if (k === '__all__') {
       const allOn = ROWDEFS.every(d => visible.has(d.key));
@@ -1532,13 +1617,37 @@ function renderPlan() {
       visible.has(k) ? visible.delete(k) : visible.add(k);
     }
     savePref('tp_visibleRows', [...visible]);
+    reopenDD = 'dd-rows';   // keep the Rows popover open while ticking
     renderPlan();
   }));
-  main.querySelectorAll('.sfbtn').forEach(b => b.addEventListener('click', () => {
+  main.querySelectorAll('.sfbtn').forEach(b => b.addEventListener('change', () => {
     statusFilter = b.dataset.sf;
     savePref('tp_statusFilter', statusFilter);
     renderPlan();
   }));
+  main.querySelectorAll('.srtbtn').forEach(b => b.addEventListener('click', () => {
+    supSort = b.dataset.srt;
+    savePref('tp_supSort', supSort);
+    renderPlan();
+  }));
+  // product accordion: click a header strip to expand/collapse its grid rows in place
+  main.querySelectorAll('tr.skuhead[data-acc]').forEach(hr => hr.addEventListener('click', e => {
+    if (e.target.closest('button, input, a, .asp-chip, .cost-chip, .est-chip, .wkasp-chip, img')) return;
+    const id = hr.dataset.acc;
+    const nowOpen = !hr.classList.contains('acc-open');
+    hr.classList.toggle('acc-open', nowOpen);
+    if (nowOpen) openSkus.add(id); else openSkus.delete(id);
+    savePref('tp_openSkus', [...openSkus]);
+    main.querySelectorAll(`tr[data-skurow="${CSS.escape(id)}"]`).forEach(rr => rr.classList.toggle('acc-hide', !nowOpen));
+  }));
+  document.getElementById('btn-acc-all').addEventListener('click', () => {
+    const shown = skus.map(k => k.id);
+    const everyOpen = shown.length && shown.every(id => accForceOpen || openSkus.has(id));
+    if (everyOpen) shown.forEach(id => openSkus.delete(id));
+    else shown.forEach(id => openSkus.add(id));
+    savePref('tp_openSkus', [...openSkus]);
+    renderPlan();
+  });
   document.getElementById('btn-export-sup').addEventListener('click', () => exportSupplier(sup.name));
   document.getElementById('btn-export-multi').addEventListener('click', openExportDialog);
   document.getElementById('btn-import-sup').addEventListener('click', () => document.getElementById('import-file').click());
@@ -1548,8 +1657,9 @@ function renderPlan() {
   { const ub = document.getElementById('btn-sup-retime-undo'); if (ub) ub.addEventListener('click', undoRetime); }
   const scopeArg = () => rebuyScope === 'sup' ? sup.name : null;
   const scopeTag = () => rebuyScope === 'sup' ? titleCase(sup.name) : 'whole year';
-  main.querySelectorAll('.rb-scope').forEach(b => b.addEventListener('click', () => {
-    rebuyScope = b.dataset.scope; savePref('tp_rebuyScope', rebuyScope); renderPlan();
+  main.querySelectorAll('.rb-scope').forEach(b => b.addEventListener('change', () => {
+    rebuyScope = b.dataset.scope; savePref('tp_rebuyScope', rebuyScope);
+    reopenDD = 'dd-rebuy'; renderPlan();
   }));
   document.getElementById('btn-commit-all').addEventListener('click', () => commitRebuy(scopeArg()));
   document.getElementById('btn-run-rebuy').addEventListener('click', () => {
@@ -1560,8 +1670,9 @@ function renderPlan() {
     clearProposed(scopeArg()); computeAll(); markDirty(); renderPlan();
     document.getElementById('save-status').textContent = `Suggestions cleared · ${scopeTag()}`;
   });
-  main.querySelectorAll('.rb-mode').forEach(b => b.addEventListener('click', () => {
-    SETTINGS.rebuy.mode = b.dataset.mode; resetProposed(); computeAll(); markDirty(); renderPlan();
+  main.querySelectorAll('.rb-mode').forEach(b => b.addEventListener('change', () => {
+    SETTINGS.rebuy.mode = b.dataset.mode; resetProposed(); computeAll(); markDirty();
+    reopenDD = 'dd-rebuy'; renderPlan();
   }));
   const rv = document.getElementById('season-revert-link');
   if (rv) rv.addEventListener('click', () => { delete seasonYears()[String(YEAR)]; markDirty(); applySeasonality(); });
