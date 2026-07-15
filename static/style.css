@@ -1330,7 +1330,9 @@ dialog fieldset { min-width: 0; }
 
 /* ==================== PLAN REFRESH: consolidated toolbar + product accordion ==================== */
 /* one glass toolbar replaces the supplier header + rebuy bar + filter bar */
-#plan-toolbar { background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);
+/* relative + high z-index so the Status/Rows/Rebuy popovers stack ABOVE the grid's
+   sticky header/label cells (z-index 2–4) and stay clickable */
+#plan-toolbar { position: relative; z-index: 50; background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);
   border-radius: var(--r-card); box-shadow: var(--shadow-card); padding: 10px 14px; margin: 10px 0; }
 #plan-toolbar .ptb-row1 { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 #plan-toolbar h1 { font-size: 17px; margin: 0; }
@@ -1376,14 +1378,20 @@ details.dd.dd-right .dd-pop { left: auto; right: 0; }
 
 /* ---- product accordion ---- */
 tr.acc-hide { display: none; }
-.grid tr.skuhead { cursor: pointer; }
-.grid tr.skuhead:hover .skuhead-inner { filter: brightness(1.04); }
+/* only the image / code / name / caret toggle — pointer + hover live on those parts */
+.skuhead .acc-hit, .skuhead .acc-car { cursor: pointer; }
+.skuhead .acc-hit:hover { color: var(--accent); }
+.skuhead img.acc-hit:hover, .skuhead .acc-car:hover { filter: brightness(1.15); }
 .acc-car { display: inline-block; align-self: center; font-size: 10px; color: var(--dim);
   margin-right: 8px; transition: transform .15s; }
 tr.skuhead.acc-open .acc-car { transform: rotate(90deg); }
-/* slim strip: header groups flow inline and wrap instead of stacking */
-.skuhead-inner { display: flex; align-items: center; }
-.skuhead .skh-body { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 18px; }
+/* slim strip: header groups flow inline and wrap instead of stacking — but keep the
+   original left-pin: sticky + inline sizing so the whole banner (image, code, name,
+   chips, stats, YTD) stays visible while scrolling across the 53 weeks. Max-width
+   caps it to the visible viewport (minus sidebar) so the wrap happens on screen. */
+.skuhead-inner { position: sticky; left: 0; display: inline-flex; align-items: center;
+  max-width: min(1250px, calc(100vw - 330px)); }
+.skuhead .skh-body { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 18px; min-width: 0; }
 .skuhead .skh-stats { margin: 0; }
 .skuhead .sku-ytd { margin: 0; }
 .skh-cover { border-radius: 9px; padding: 0 8px; }

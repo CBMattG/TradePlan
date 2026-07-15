@@ -848,7 +848,7 @@ function skuRowsHtml(sku, idx) {
     + `<span class="skh-stat"><span class="skh-stat-l">Cover now</span><b class="skh-cover" style="background:${cb.bg};color:${textOnColor(cb.bg)}">${fmt1(coverNow)} wks</b></span>`
     + (propUnits > 0.5 ? `<span class="skh-prop" title="This product has uncommitted proposed rebuy stock">● rebuy ${fmtU(propUnits)}</span>` : '')
     + `</div>`;
-  const img = sku.image ? `<img src="${esc(sku.image)}" loading="lazy" onerror="this.remove()">` : '';
+  const img = sku.image ? `<img class="acc-hit" src="${esc(sku.image)}" loading="lazy" onerror="this.remove()" title="Click to expand / collapse this product">` : '';
   const headCls = (sku.status === 'Not Live' ? 'skuhead notlive' : 'skuhead') + (aspSrc(sku) === 'orig' ? ' asp-stale' : '') + (open ? ' acc-open' : '');
   // YTD-to-most-recent-actual-week (week before current): actual sales £ vs forecast £
   const aw = cur - 1;
@@ -861,8 +861,8 @@ function skuRowsHtml(sku, idx) {
       + `<span>actual <b>${fmtGBP(actual)}</b></span><span>forecast <b>${fmtGBP(fcast)}</b></span>`
       + `<span>variance <b class="${cls}">${sign}${fmtGBP(Math.abs(vv))} (${sign}${Math.abs(pct).toFixed(0)}%)</b></span></div>`;
   }
-  let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}" title="Click to ${open ? 'collapse' : 'expand'} this product's weekly grid"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car">▶</span><div class="skh-main">${img}<div class="skh-body">`
-    + `<div class="skh-line1"><span class="code">${esc(sku.code)}</span><span class="nm"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
+  let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car" title="Click to expand / collapse this product">▶</span><div class="skh-main">${img}<div class="skh-body">`
+    + `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span> ${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}<button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
     + statsHtml
     + ytdHtml
     + `</div></div></div></td></tr>`;
@@ -1630,9 +1630,10 @@ function renderPlan() {
     savePref('tp_supSort', supSort);
     renderPlan();
   }));
-  // product accordion: click a header strip to expand/collapse its grid rows in place
+  // product accordion: only the image, code, name and caret toggle the grid rows —
+  // the rest of the banner (chips, stats, YTD) is inert so nothing mis-clicks
   main.querySelectorAll('tr.skuhead[data-acc]').forEach(hr => hr.addEventListener('click', e => {
-    if (e.target.closest('button, input, a, .asp-chip, .cost-chip, .est-chip, .wkasp-chip, img')) return;
+    if (!e.target.closest('.acc-hit, .acc-car')) return;
     const id = hr.dataset.acc;
     const nowOpen = !hr.classList.contains('acc-open');
     hr.classList.toggle('acc-open', nowOpen);
