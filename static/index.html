@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=86">
+<link rel="stylesheet" href="style.css?v=87">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -240,16 +240,25 @@
       <input type="file" id="buying-file" accept=".xlsx" hidden>
       <input type="file" id="duty-file" accept=".xlsx" hidden>
       <input type="file" id="wksales-file" accept=".xlsx" hidden>
+      <input type="file" id="chanidx-file" accept=".xlsx" hidden>
       <div id="po-status" class="muted-note imp-status"></div>
       <div id="asp-status" class="muted-note imp-status"></div>
       <div id="landed-status" class="muted-note imp-status"></div>
       <div id="buying-status" class="muted-note imp-status"></div>
       <div id="duty-status" class="muted-note imp-status"></div>
       <div id="wksales-status" class="muted-note imp-status"></div>
+      <div id="chanidx-status" class="muted-note imp-status"></div>
     </div>
 
     <!-- DATA -->
     <div class="stab-panel hidden" data-panel="data">
+      <fieldset>
+        <legend>Sales channels</legend>
+        <small>Customers from the forecasting workbook's CustomerIndex, heaviest first. Assign each to a channel
+        (Marketplace / DSV / Direct / Ex-Works) — the Plan's per-product "⇄ Channels" breakdown and the Summary's
+        channel split follow this mapping. Unassigned customers report as <b>Unmapped</b>.</small>
+        <div id="chan-map-wrap"></div>
+      </fieldset>
       <fieldset>
         <legend>Manual selling prices</legend>
         <small>Edit any product's ASP by hand — e.g. new products not in the sales file. <b>Previous</b> shows the price before the last update and <b>Var %</b> the change from it (e.g. how the most recent upload moved each price). Hand-edited prices are tagged <b>manual</b>; products still on their original imported price are tagged <b>not updated</b> (and highlighted in the supplier screen). Changes apply to the current year and later forecast years.</small>
@@ -358,6 +367,14 @@
   </div>
 </dialog>
 
+<dialog id="channel-dialog">
+  <div class="settings-head"><h2 id="channel-title">Channel split</h2></div>
+  <div id="channel-body"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="channel-close">Close</button>
+  </div>
+</dialog>
+
 <dialog id="wksales-dialog">
   <div class="settings-head"><h2>Update weekly actual sales</h2></div>
   <div id="wksales-summary"></div>
@@ -461,6 +478,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=117"></script>
+<script src="app.js?v=118"></script>
 </body>
 </html>

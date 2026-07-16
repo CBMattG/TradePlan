@@ -10,6 +10,7 @@ let ORDERS = {};         // sku id -> [53] order quantities  (the editable input
 let IMPORTED = {};       // snapshot of Excel-imported orders (for "changed" markers)
 let PO_WEBSA = null;     // { pos:{PO#:{supplier,lines:[{code,ordered,delivered,outstanding,due}]}}, codes, rows }
 let PO_CONTAINERS = null;// { dates:{PO#:[{deliveryCB,etaPort,etd,status,container,shipment,supplier}]}, unparsed, truncated, rows }
+let CHANNEL_INDEX = null; // { skus:{code:[{c,r,p}]}, customers:{no:name}, importedAt } — CustomerIndex import (global)
 let PO_UNMATCHED = null;  // snapshot list for the "no PO" review cycle
 let poCycleIdx = -1;      // cursor into PO_UNMATCHED
 let poReviewActive = false;
@@ -865,7 +866,7 @@ function skuRowsHtml(sku, idx) {
     + `<div class="skh-left">`
     +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
     +   `<div class="skh-pills">${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}</div>`
-    +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}</div>`
+    +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
     + `</div>`
     + `<div class="skh-right">${statsHtml}${ytdHtml}</div>`
     + `</div></div></div></td></tr>`;
@@ -1687,6 +1688,7 @@ function renderPlan() {
   main.querySelectorAll('.sku-explain').forEach(b => b.addEventListener('click', () => explainSku(b.dataset.sku)));
   main.querySelectorAll('.asp-chip').forEach(b => b.addEventListener('click', () => editAspInline(b.dataset.aspSku)));
   main.querySelectorAll('.cost-chip').forEach(b => b.addEventListener('click', () => editCostInline(b.dataset.costSku, b.dataset.costK)));
+  main.querySelectorAll('.chan-chip').forEach(b => b.addEventListener('click', () => openChannelDialog(b.dataset.chanSku)));
   bindOrderInputs(main);
   const cw = main.querySelector('thead th.curwk');
   if (cw) cw.scrollIntoView({ block: 'nearest', inline: 'center' });
@@ -1918,6 +1920,7 @@ function renderSummary() {
       ${salesChart(g.sales, gCont, g.shv, g.fcSales, { h: 150 })}
       ${chartLegend}
     </div>
+    ${chanSummaryHtml()}
     <h2 class="sect">Weekly totals — ${YEAR}</h2>
     ${weeklyTable([
       ['Sales £', g.sales, fmtGBP],
@@ -2132,11 +2135,12 @@ const IMPORT_DEFS = [
   { id: 'asp',    label: 'Sales / ASP',    input: 'asp-file',        when: () => (SETTINGS && SETTINGS.asp_updated_at) || null },
   { id: 'landed', label: 'Landed Costs',   input: 'landed-file',     when: () => (SETTINGS && SETTINGS.landed_updated_at) || null },
   { id: 'duty',   label: 'Duty Rates',     input: 'duty-file',       when: () => (SETTINGS && SETTINGS.duty_updated_at) || null },
+  { id: 'chanidx', label: 'Channel Index', input: 'chanidx-file',   when: () => (CHANNEL_INDEX && CHANNEL_INDEX.importedAt) || null },
 ];
 const IMPORT_DEF = Object.fromEntries(IMPORT_DEFS.map(d => [d.id, d]));
 const DEFAULT_IMPORT_GROUPS = [
   { name: 'Weekly',  cadence: 'weekly',  items: ['websa', 'qlik', 'buying', 'wksales'] },
-  { name: 'Monthly', cadence: 'monthly', items: ['asp', 'landed', 'duty'] },
+  { name: 'Monthly', cadence: 'monthly', items: ['asp', 'landed', 'duty', 'chanidx'] },
 ];
 // Persisted groups (SETTINGS.import_groups), validated so every import appears exactly once.
 function importGroups() {
@@ -2213,6 +2217,7 @@ function dropImport(beforeId, targetGi) {
   renderUploadAges();
 }
 function openSettings() {
+  renderChanMap();
   const dlg = document.getElementById('settings-dialog');
   document.getElementById('po-status').textContent = poStatusText();
   renderUploadAges();
@@ -4261,6 +4266,150 @@ function refreshBuildYearBtn() {
 }
 
 /* ---------------- view switching / init ---------------- */
+/* ================= Sales channels (CustomerIndex import) =================
+   The CBON forecasting workbook's 'CustomerIndex' sheet gives, per SKU, each
+   customer's historical share of unit sales (Ratio) and that customer's selling
+   price. Customers roll up to four channels via a user-maintained mapping in
+   Settings (SETTINGS.channel_map) — Marketplace / DSV / Direct / Ex-Works;
+   anything unassigned reports as Unmapped. Split units = year forecast × ratio;
+   split value = units × customer price (falling back to the SKU's ASP). */
+const CHANNELS = ['Marketplace', 'DSV', 'Direct', 'Ex-Works'];
+function chanReady() { return !!(CHANNEL_INDEX && CHANNEL_INDEX.skus); }
+function chanMap() { if (!SETTINGS.channel_map) SETTINGS.channel_map = {}; return SETTINGS.channel_map; }
+function custChannel(c) { return chanMap()[c] || 'Unmapped'; }
+function custName(c) { return (CHANNEL_INDEX && CHANNEL_INDEX.customers && CHANNEL_INDEX.customers[c]) || ''; }
+// normalised customer rows for one SKU: [{c, name, ratio, price}] (ratios sum to 1)
+function skuChannelRows(sku) {
+  const rows = chanReady() ? CHANNEL_INDEX.skus[sku.code] : null;
+  if (!rows || !rows.length) return null;
+  const tot = rows.reduce((a, r) => a + r.r, 0);
+  if (!(tot > 0)) return null;
+  return rows.map(r => ({ c: r.c, name: custName(r.c), ratio: r.r / tot, price: r.p })).sort((a, b) => b.ratio - a.ratio);
+}
+// aggregate a SKU's rows to channel level: {name: {ratio, price(weighted), custs:[...]}}
+function skuChannelSplit(sku) {
+  const rows = skuChannelRows(sku);
+  if (!rows) return null;
+  const ch = {};
+  for (const r of rows) {
+    const k = custChannel(r.c);
+    const g = ch[k] || (ch[k] = { ratio: 0, pxr: 0, custs: [] });
+    g.ratio += r.ratio;
+    g.pxr += (r.price != null ? r.price : sku.asp || 0) * r.ratio;
+    g.custs.push(r);
+  }
+  for (const g of Object.values(ch)) g.price = g.ratio ? g.pxr / g.ratio : 0;
+  return ch;
+}
+function chanChip(sku) {
+  if (!chanReady() || !CHANNEL_INDEX.skus[sku.code]) return '';
+  return `<button class="chan-chip" data-chan-sku="${esc(sku.id)}" title="Channel split — forecast units & value allocated by each customer's historical share. Click for the breakdown.">⇄ Channels</button>`;
+}
+function openChannelDialog(id) {
+  const sku = skuById.get(id);
+  if (!sku) return;
+  const split = skuChannelSplit(sku);
+  const body = document.getElementById('channel-body');
+  if (!split) { body.innerHTML = '<p class="muted-note">No channel index rows for this product.</p>'; }
+  else {
+    const r = RES.get(id) || {};
+    const fcTot = (r.forecast || []).reduce((a, b) => a + b, 0);
+    const names = [...CHANNELS.filter(c => split[c]), ...(split.Unmapped ? ['Unmapped'] : [])];
+    const blended = Object.values(split).reduce((a, g) => a + g.pxr, 0);
+    const rowsH = names.map(n => {
+      const g = split[n];
+      const u = fcTot * g.ratio;
+      const custs = g.custs.map(c =>
+        `<div class="chd-cust"><span>${esc(c.name || c.c)}</span><span>${(c.ratio * 100).toFixed(1)}%</span><span>${c.price != null ? '£' + c.price.toFixed(2) : '– (ASP)'}</span></div>`).join('');
+      return `<div class="chd-ch${n === 'Unmapped' ? ' chd-unm' : ''}">
+        <div class="chd-head"><b>${esc(n)}</b><span>${(g.ratio * 100).toFixed(1)}% of units</span>
+          <span>${fmtU(u)} units</span><span>${fmtGBP(u * g.price)}</span><span>avg £${g.price.toFixed(2)}</span></div>
+        <div class="chd-custs">${custs}</div></div>`;
+    }).join('');
+    const vsAsp = sku.asp > 0 ? ((blended - sku.asp) / sku.asp) * 100 : null;
+    body.innerHTML = `<p class="muted-note">${esc(sku.code)} — full-year forecast <b>${fmtU(fcTot)}</b> units, allocated by
+      each customer's historical unit share. Blended channel ASP <b>£${blended.toFixed(2)}</b>${vsAsp != null ? ` (${vsAsp >= 0 ? '+' : ''}${vsAsp.toFixed(1)}% vs the ASP in use £${(+sku.asp).toFixed(2)})` : ''}.
+      ${split.Unmapped ? 'Assign customers to channels in Settings → Data → Sales channels.' : ''}</p>` + rowsH;
+  }
+  document.getElementById('channel-title').textContent = `${sku.code} — channel split`;
+  document.getElementById('channel-dialog').showModal();
+}
+// whole-plan channel table for the Summary tab (forecast plan units × ratio × price)
+function chanSummaryHtml() {
+  if (!chanReady()) return '';
+  const agg = {};
+  let totU = 0, totV = 0, missing = 0;
+  for (const sku of M.skus) {
+    const rows = skuChannelRows(sku);
+    const r = RES.get(sku.id);
+    const fcTot = r ? r.forecast.reduce((a, b) => a + b, 0) : 0;
+    if (!fcTot) continue;
+    if (!rows) { missing++; continue; }
+    for (const c of rows) {
+      const k = custChannel(c.c);
+      const g = agg[k] || (agg[k] = { u: 0, v: 0 });
+      const u = fcTot * c.ratio;
+      g.u += u;
+      g.v += u * (c.price != null ? c.price : sku.asp || 0);
+      totU += u;
+      g.v && 0;
+    }
+  }
+  totV = Object.values(agg).reduce((a, g) => a + g.v, 0);
+  if (!totU) return '';
+  const names = [...CHANNELS.filter(c => agg[c]), ...(agg.Unmapped ? ['Unmapped'] : [])];
+  const rows = names.map(n => {
+    const g = agg[n];
+    return `<tr${n === 'Unmapped' ? ' class="chs-unm"' : ''}><td>${esc(n)}</td>
+      <td class="r">${fmtU(g.u)}</td><td class="r">${(100 * g.u / totU).toFixed(1)}%</td>
+      <td class="r">${fmtGBP(g.v)}</td><td class="r">${(100 * g.v / (totV || 1)).toFixed(1)}%</td>
+      <td class="r">£${(g.v / (g.u || 1)).toFixed(2)}</td></tr>`;
+  }).join('');
+  return `<div class="sum-grand chan-sum">
+    <div class="sum-sec-title">Channel split — full-year forecast (units × customer share × channel price)</div>
+    <table class="chs-tbl"><thead><tr><th>Channel</th><th class="r">Units</th><th class="r">% units</th>
+      <th class="r">Sales value</th><th class="r">% value</th><th class="r">Blended ASP</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    <div class="muted-note">${agg.Unmapped ? 'Unmapped customers — assign them to channels in Settings → Data → Sales channels. ' : ''}${missing ? missing + ' forecast products have no channel index rows (fall entirely outside the split).' : ''}</div></div>`;
+}
+// Settings → Data: customer → channel mapping editor
+function renderChanMap() {
+  const wrap = document.getElementById('chan-map-wrap');
+  if (!wrap) return;
+  if (!chanReady()) { wrap.innerHTML = '<p class="muted-note">Upload the forecasting workbook (Settings → File Imports → Channel Index) to list customers.</p>'; return; }
+  const weight = {};
+  for (const rows of Object.values(CHANNEL_INDEX.skus))
+    for (const r of rows) weight[r.c] = (weight[r.c] || 0) + r.r;
+  const custs = Object.keys(weight).sort((a, b) => weight[b] - weight[a]);
+  wrap.innerHTML = `<table class="chm-tbl"><thead><tr><th>Customer</th><th>Name</th><th class="r">Weight</th><th>Channel</th></tr></thead><tbody>` +
+    custs.map(c => `<tr><td>${esc(c)}</td><td>${esc(custName(c) || '—')}</td><td class="r">${weight[c].toFixed(1)}</td>
+      <td><select class="chm-sel" data-cust="${esc(c)}">${['Unmapped', ...CHANNELS].map(n =>
+        `<option${custChannel(c) === n ? ' selected' : ''}>${n}</option>`).join('')}</select></td></tr>`).join('') +
+    `</tbody></table>`;
+  wrap.querySelectorAll('.chm-sel').forEach(sel => sel.addEventListener('change', () => {
+    if (sel.value === 'Unmapped') delete chanMap()[sel.dataset.cust];
+    else chanMap()[sel.dataset.cust] = sel.value;
+    markDirty();
+  }));
+}
+async function chanFileChosen(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const status = document.getElementById('chanidx-status');
+  status.textContent = 'Reading ' + file.name + '…';
+  try {
+    const r = await fetch('/api/parse-channelindex', { method: 'POST', body: await file.arrayBuffer() });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Could not read the file: ' + (j.error || 'unknown')); return; }
+    const data = await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json();
+    CHANNEL_INDEX = data.channelIndex || null;
+    status.textContent = `Channel index loaded: ${j.skus} SKUs · ${j.rows} customer shares · ${j.customers} customer names.`;
+    renderUploadAges(); renderChanMap();
+    if (currentView === 'plan') renderPlan();
+  } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
+}
+
 /* ================= Arrivals view: upcoming container arrivals =================
    Joins the two global PO uploads (WEBSA Open PO lines <-> Qlik container bookings)
    with the loaded year's master (name / season / current stock by product code) —
@@ -4579,6 +4728,7 @@ async function loadYear(year) {
   M = data.master;
   ORDERS = data.orders || {};
   PO_WEBSA = data.poWebsa || null;          // global PO ↔ container linking (shared across years)
+  CHANNEL_INDEX = data.channelIndex || null;
   PO_CONTAINERS = data.poContainers || null;
   SETTINGS = Object.assign({
     multiplier: M.multiplier || 1,
@@ -4730,6 +4880,8 @@ async function init() {
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);
   document.getElementById('duty-cancel').addEventListener('click', () => document.getElementById('duty-dialog').close());
   document.getElementById('duty-apply').addEventListener('click', applyDutyUpdates);
+  document.getElementById('chanidx-file').addEventListener('change', chanFileChosen);
+  document.getElementById('channel-close').addEventListener('click', () => document.getElementById('channel-dialog').close());
   document.getElementById('wksales-file').addEventListener('change', wksalesFileChosen);
   document.getElementById('wksales-cancel').addEventListener('click', () => document.getElementById('wksales-dialog').close());
   document.getElementById('wksales-apply').addEventListener('click', applyWksalesUpdates);

@@ -199,6 +199,7 @@ class Handler(SimpleHTTPRequestHandler):
                 # global PO ↔ container linking data (shared across years; null until uploaded)
                 "poWebsa": with_imported_at(DATA / "po_websa.json"),
                 "poContainers": with_imported_at(DATA / "po_containers.json"),
+                "channelIndex": with_imported_at(DATA / "channel_index.json"),
             })
         elif parsed.path == "/api/imported-orders":
             ydir, _ = year_dir(qs)
@@ -362,6 +363,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
             self.apply_buying(parse_qs(parsed.query))
+        elif parsed.path == "/api/parse-channelindex":
+            self.parse_channelindex()
         elif parsed.path == "/api/parse-wksales":
             self.parse_wksales()
         elif parsed.path == "/api/apply-wksales":
@@ -888,6 +891,59 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    # ---- channel index (the CBON Forecast workbook's CustomerIndex sheet) ----
+    @staticmethod
+    def aggregate_channelindex(raw):
+        """Read the forecasting workbook -> per-SKU per-customer unit ratios + selling
+        prices ('CustomerIndex' sheet), plus customer names where the workbook has them
+        ('Add-ons pc'). Zero-ratio rows are dropped. Returns
+        { skus: {code: [{c: customerNo, r: ratio, p: price|null}]}, customers: {no: name} }."""
+        import io
+        import warnings
+        import openpyxl
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            if "CustomerIndex" not in wb.sheetnames:
+                raise ValueError("No 'CustomerIndex' sheet in this workbook.")
+            skus, rows = {}, 0
+            it = wb["CustomerIndex"].iter_rows(values_only=True)
+            next(it, None)                                     # header
+            for row in it:
+                code = str(row[0] or "").strip()
+                cust = str(row[1] or "").strip()
+                ratio = row[2] if len(row) > 2 else None
+                if not code or not cust or not isinstance(ratio, (int, float)) or ratio <= 0:
+                    continue
+                price = row[3] if len(row) > 3 else None
+                skus.setdefault(code, []).append({
+                    "c": cust, "r": round(float(ratio), 6),
+                    "p": round(float(price), 4) if isinstance(price, (int, float)) else None})
+                rows += 1
+            customers = {}
+            if "Add-ons pc" in wb.sheetnames:
+                it = wb["Add-ons pc"].iter_rows(values_only=True)
+                next(it, None)
+                for row in it:
+                    no = str(row[0] or "").strip()
+                    nm = str(row[1] or "").strip()
+                    if no and nm:
+                        customers[no] = nm
+        return {"skus": skus, "customers": customers}, rows
+
+    def parse_channelindex(self):
+        """Parse + persist the channel index (GLOBAL, like the PO uploads)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            data, rows = self.aggregate_channelindex(self.rfile.read(length))
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        data["importedAt"] = datetime.now().isoformat(timespec="seconds")
+        (DATA / "channel_index.json").write_text(json.dumps(data), encoding="utf-8")
+        self.send_json({"ok": True, "skus": len(data["skus"]), "rows": rows,
+                        "customers": len(data["customers"])})
 
     # ---- weekly actual sales (the "WKnn Sales" export: Product SKU / Sales TY £ / Qty TY units) ----
     @staticmethod

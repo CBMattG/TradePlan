@@ -1413,3 +1413,29 @@ tr.skuhead.acc-open .acc-car { transform: rotate(90deg); }
 #spark-tip .st-var-down { color: #ff8b7d; }
 #spark-tip .st-var-flat { color: #e0b65a; }
 #spark-tip .st-note { font-style: italic; }
+
+/* ---- sales channels (CustomerIndex) ---- */
+.chan-chip { font: inherit; font-size: 11px; padding: 1px 8px; border-radius: 10px; cursor: pointer;
+  border: 1px solid #b9a7e0; background: #efe9fb; color: #5b3fa8; white-space: nowrap; line-height: 1.4; }
+.chan-chip:hover { filter: brightness(0.96); }
+[data-theme="dark"] .chan-chip { background: #2b2440; border-color: #4a3d6e; color: #b9a7e0; }
+#channel-dialog { width: min(720px, 94vw); }
+.chd-ch { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; margin-bottom: 8px; }
+.chd-ch.chd-unm { border-style: dashed; opacity: .85; }
+.chd-head { display: flex; gap: 16px; align-items: baseline; font-size: 12.5px; }
+.chd-head b { font-size: 13.5px; }
+.chd-head span { color: var(--dim); }
+.chd-custs { margin-top: 5px; }
+.chd-cust { display: grid; grid-template-columns: 1fr 70px 90px; gap: 8px; font-size: 11.5px;
+  color: var(--dim); padding: 1px 0 1px 12px; }
+.chd-cust span:nth-child(2), .chd-cust span:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+.chs-tbl, .chm-tbl { border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+.chs-tbl th, .chm-tbl th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim); padding: 3px 12px 3px 0; border-bottom: 1px solid var(--line); }
+.chs-tbl td, .chm-tbl td { padding: 4px 12px 4px 0; border-bottom: 1px solid var(--gridline); }
+.chs-tbl .r, .chm-tbl .r { text-align: right; font-variant-numeric: tabular-nums; }
+.chs-tbl tr.chs-unm td { color: var(--dim); font-style: italic; }
+.chm-tbl { width: 100%; }
+#chan-map-wrap { max-height: 320px; overflow: auto; margin-top: 6px; }
+.chm-sel { font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--text); }
