@@ -359,3 +359,10 @@ Excel's order quantities too:
 - Carriage cost by carrier (hidden 'Carriage Costs' tabs)
 - Lost Sales Calculator / Monthly Variance tabs
 - Product image gallery (the app shows the primary PIM image per SKU)
+
+## Restarting the server
+Windows lets a second server start while an old one still owns the port, so a "restart"
+can leave a STALE process answering requests (symptoms: new features visible in the page
+but their endpoints failing / new data missing). If a restart doesn't seem to take
+effect: close the old console window first — if in doubt, Task Manager -> end all
+`python` processes, then run run.bat once (same applies to the PromoPlan app on 8766).
