@@ -10,7 +10,7 @@ let ORDERS = {};         // sku id -> [53] order quantities  (the editable input
 let IMPORTED = {};       // snapshot of Excel-imported orders (for "changed" markers)
 let PO_WEBSA = null;     // { pos:{PO#:{supplier,lines:[{code,ordered,delivered,outstanding,due}]}}, codes, rows }
 let PO_CONTAINERS = null;// { dates:{PO#:[{deliveryCB,etaPort,etd,status,container,shipment,supplier}]}, unparsed, truncated, rows }
-let CHANNEL_INDEX = null; // { skus:{code:[{c,r,p}]}, customers:{no:name}, importedAt } — CustomerIndex import (global)
+let CHANNEL_INDEX = null; // { skus:{code:[{c,r,p}]}, customers:{no:name}, importedAt } — Channel Sales import (global)
 let PO_UNMATCHED = null;  // snapshot list for the "no PO" review cycle
 let poCycleIdx = -1;      // cursor into PO_UNMATCHED
 let poReviewActive = false;
@@ -4266,12 +4266,12 @@ function refreshBuildYearBtn() {
 }
 
 /* ---------------- view switching / init ---------------- */
-/* ================= Sales channels (CustomerIndex import) =================
-   The CBON forecasting workbook's 'CustomerIndex' sheet gives, per SKU, each
-   customer's historical share of unit sales (Ratio) and that customer's selling
-   price. Customers roll up to four channels via a user-maintained mapping in
+/* ================= Sales channels (Channel Sales import) =================
+   The 'Channel Sales' export gives, per SKU, each customer's units (TY + LY) and
+   selling price. The importer turns units into a historical unit-share weight per
+   customer; customers roll up to four channels via a user-maintained mapping in
    Settings (SETTINGS.channel_map) — Marketplace / DSV / Direct / Ex-Works;
-   anything unassigned reports as Unmapped. Split units = year forecast × ratio;
+   anything unassigned reports as Unmapped. Split units = year forecast × share;
    split value = units × customer price (falling back to the SKU's ASP). */
 const CHANNELS = ['Marketplace', 'DSV', 'Direct', 'Ex-Works'];
 function chanReady() { return !!(CHANNEL_INDEX && CHANNEL_INDEX.skus); }
@@ -4376,7 +4376,7 @@ function chanSummaryHtml() {
 function renderChanMap() {
   const wrap = document.getElementById('chan-map-wrap');
   if (!wrap) return;
-  if (!chanReady()) { wrap.innerHTML = '<p class="muted-note">Upload the forecasting workbook (Settings → File Imports → Channel Index) to list customers.</p>'; return; }
+  if (!chanReady()) { wrap.innerHTML = '<p class="muted-note">Upload the Channel Sales export (Settings → File Imports → Channel Index) to list customers.</p>'; return; }
   const weight = {};
   for (const rows of Object.values(CHANNEL_INDEX.skus))
     for (const r of rows) weight[r.c] = (weight[r.c] || 0) + r.r;

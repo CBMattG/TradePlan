@@ -892,44 +892,98 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
-    # ---- channel index (the CBON Forecast workbook's CustomerIndex sheet) ----
+    # ---- channel index (per-SKU per-customer unit share + selling price) ----
     @staticmethod
     def aggregate_channelindex(raw):
-        """Read the forecasting workbook -> per-SKU per-customer unit ratios + selling
-        prices ('CustomerIndex' sheet), plus customer names where the workbook has them
-        ('Add-ons pc'). Zero-ratio rows are dropped. Returns
-        { skus: {code: [{c: customerNo, r: ratio, p: price|null}]}, customers: {no: name} }."""
+        """Build the per-SKU per-customer channel index. Returns
+        { skus: {code: [{c: customerCode, r: unit weight, p: price|null}]}, customers: {code: name} }
+        — the client renormalises `r` to shares summing to 1, so `r` is a raw weight, not a %.
+
+        Supports two file formats, auto-detected:
+        • NEW 'Channel Sales' export — a flat sheet with a header row containing
+          'Product SKU' and 'Customer Code'. Columns are matched by header name
+          (order-independent). Weight = Sales Qty TY + Sales Qty LY (combined
+          historical units, so both a customer's current-year and prior-year buying
+          count); price = this-year Average Selling Price, else LY Av Selling Price,
+          else null (→ SKU ASP). Rows with zero combined units are dropped.
+        • OLD forecasting workbook — a 'CustomerIndex' sheet (code, customer, ratio,
+          price) with customer names from an 'Add-ons pc' sheet."""
         import io
         import warnings
         import openpyxl
+
+        def num(v):
+            return float(v) if isinstance(v, (int, float)) else None
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-            if "CustomerIndex" not in wb.sheetnames:
-                raise ValueError("No 'CustomerIndex' sheet in this workbook.")
-            skus, rows = {}, 0
-            it = wb["CustomerIndex"].iter_rows(values_only=True)
-            next(it, None)                                     # header
-            for row in it:
-                code = str(row[0] or "").strip()
-                cust = str(row[1] or "").strip()
-                ratio = row[2] if len(row) > 2 else None
-                if not code or not cust or not isinstance(ratio, (int, float)) or ratio <= 0:
-                    continue
-                price = row[3] if len(row) > 3 else None
-                skus.setdefault(code, []).append({
-                    "c": cust, "r": round(float(ratio), 6),
-                    "p": round(float(price), 4) if isinstance(price, (int, float)) else None})
-                rows += 1
-            customers = {}
-            if "Add-ons pc" in wb.sheetnames:
-                it = wb["Add-ons pc"].iter_rows(values_only=True)
-                next(it, None)
+
+            # --- OLD format: explicit CustomerIndex sheet with pre-computed ratios ---
+            if "CustomerIndex" in wb.sheetnames:
+                skus, rows = {}, 0
+                it = wb["CustomerIndex"].iter_rows(values_only=True)
+                next(it, None)                                 # header
                 for row in it:
-                    no = str(row[0] or "").strip()
-                    nm = str(row[1] or "").strip()
-                    if no and nm:
-                        customers[no] = nm
+                    code = str(row[0] or "").strip()
+                    cust = str(row[1] or "").strip()
+                    ratio = row[2] if len(row) > 2 else None
+                    if not code or not cust or not isinstance(ratio, (int, float)) or ratio <= 0:
+                        continue
+                    price = row[3] if len(row) > 3 else None
+                    skus.setdefault(code, []).append({
+                        "c": cust, "r": round(float(ratio), 6),
+                        "p": round(float(price), 4) if isinstance(price, (int, float)) else None})
+                    rows += 1
+                customers = {}
+                if "Add-ons pc" in wb.sheetnames:
+                    it = wb["Add-ons pc"].iter_rows(values_only=True)
+                    next(it, None)
+                    for row in it:
+                        no = str(row[0] or "").strip()
+                        nm = str(row[1] or "").strip()
+                        if no and nm:
+                            customers[no] = nm
+                return {"skus": skus, "customers": customers}, rows
+
+            # --- NEW format: flat 'Channel Sales' export, columns matched by header ---
+            ws = wb.active
+            it = ws.iter_rows(values_only=True)
+            col = {}
+            for hdr in it:                                     # find + map the header row
+                lower = [str(c or "").strip().lower() for c in hdr]
+                if "product sku" in lower and "customer code" in lower:
+                    col = {name: i for i, name in enumerate(lower)}
+                    break
+            if not col:
+                raise ValueError("Couldn't find a header row with 'Product SKU' and 'Customer Code' "
+                                 "(and no 'CustomerIndex' sheet). Is this the Channel Sales export?")
+
+            def cell(row, name):
+                i = col.get(name)
+                return row[i] if (i is not None and i < len(row)) else None
+
+            skus, customers, rows = {}, {}, 0
+            for row in it:
+                code = str(cell(row, "product sku") or "").strip()
+                cust = str(cell(row, "customer code") or "").strip()
+                if not code or not cust:
+                    continue
+                name = str(cell(row, "customer name") or "").strip()
+                if name:
+                    customers[cust] = name
+                qty_ty = num(cell(row, "sales qty ty")) or 0.0
+                qty_ly = num(cell(row, "sales qty ly")) or 0.0
+                weight = qty_ty + qty_ly
+                if weight <= 0:                                # customer never bought this SKU → skip
+                    continue
+                price = num(cell(row, "average selling price"))
+                if not (price and price > 0):
+                    price = num(cell(row, "ly av selling price"))
+                skus.setdefault(code, []).append({
+                    "c": cust, "r": round(weight, 4),
+                    "p": round(price, 4) if (price and price > 0) else None})
+                rows += 1
         return {"skus": skus, "customers": customers}, rows
 
     def parse_channelindex(self):
