@@ -4404,7 +4404,9 @@ async function chanFileChosen(e) {
     if (!j.ok) { status.textContent = ''; alert('Could not read the file: ' + (j.error || 'unknown')); return; }
     const data = await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json();
     CHANNEL_INDEX = data.channelIndex || null;
-    status.textContent = `Channel index loaded: ${j.skus} SKUs · ${j.rows} customer shares · ${j.customers} customer names.`;
+    const basisTxt = j.basis === 'ly' ? ' · weighted by last-year units (start-of-year fallback)'
+      : j.basis === 'ty' ? ' · weighted by this-year units' : '';
+    status.textContent = `Channel index loaded: ${j.skus} SKUs · ${j.rows} customer shares · ${j.customers} customer names${basisTxt}.`;
     renderUploadAges(); renderChanMap();
     if (currentView === 'plan') renderPlan();
   } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }

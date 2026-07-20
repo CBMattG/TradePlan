@@ -892,22 +892,45 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
+    def live_year_data_week(self):
+        """`data_week` of the year that contains today (matched by each master's
+        week1_start), or None if no held year covers today. Used to gate the
+        channel-index weight basis: data_week < 2 means this year has no completed
+        week yet (a fresh January), so we lean on last year's channel mix."""
+        today = datetime.now().date()
+        for yd in DATA.iterdir():
+            if not yd.is_dir():
+                continue
+            m = read_json(yd / "master.json", None)
+            if not m:
+                continue
+            try:
+                y, mo, d = (int(x) for x in str(m.get("week1_start") or "").split("-"))
+                off = (today - datetime(y, mo, d).date()).days
+            except (ValueError, TypeError):
+                continue
+            if 0 <= off < 53 * 7:
+                return int(m.get("data_week") or 1)
+        return None
+
     # ---- channel index (per-SKU per-customer unit share + selling price) ----
     @staticmethod
-    def aggregate_channelindex(raw):
+    def aggregate_channelindex(raw, ty_ready=True):
         """Build the per-SKU per-customer channel index. Returns
-        { skus: {code: [{c: customerCode, r: unit weight, p: price|null}]}, customers: {code: name} }
-        — the client renormalises `r` to shares summing to 1, so `r` is a raw weight, not a %.
+        ( { skus: {code: [{c, r, p}]}, customers: {code: name} }, kept_rows, basis )
+        — the client renormalises `r` to shares summing to 1, so `r` is a raw weight.
 
-        Supports two file formats, auto-detected:
-        • NEW 'Channel Sales' export — a flat sheet with a header row containing
-          'Product SKU' and 'Customer Code'. Columns are matched by header name
-          (order-independent). Weight = Sales Qty TY + Sales Qty LY (combined
-          historical units, so both a customer's current-year and prior-year buying
-          count); price = this-year Average Selling Price, else LY Av Selling Price,
-          else null (→ SKU ASP). Rows with zero combined units are dropped.
-        • OLD forecasting workbook — a 'CustomerIndex' sheet (code, customer, ratio,
-          price) with customer names from an 'Add-ons pc' sheet."""
+        Weight basis (NEW 'Channel Sales' format): normally each customer's
+        **this-year units** (Sales Qty TY) — the current channel mix. When
+        `ty_ready` is False (start of a new year, before a full week of TY data),
+        weight by **last-year units** (Sales Qty LY) instead. Per SKU the basis
+        falls back to the other year when the preferred one has no units for that
+        product, so a line that only sold in one of the two years is still split
+        rather than dropped. Price = this-year Average Selling Price, else LY Av
+        Selling Price, else null (→ SKU ASP). Columns matched by header name.
+
+        OLD forecasting-workbook format (a 'CustomerIndex' sheet + 'Add-ons pc'
+        names, pre-computed ratios) stays supported as a fallback; basis 'ratio'."""
         import io
         import warnings
         import openpyxl
@@ -944,7 +967,7 @@ class Handler(SimpleHTTPRequestHandler):
                         nm = str(row[1] or "").strip()
                         if no and nm:
                             customers[no] = nm
-                return {"skus": skus, "customers": customers}, rows
+                return {"skus": skus, "customers": customers}, rows, "ratio"
 
             # --- NEW format: flat 'Channel Sales' export, columns matched by header ---
             ws = wb.active
@@ -963,7 +986,8 @@ class Handler(SimpleHTTPRequestHandler):
                 i = col.get(name)
                 return row[i] if (i is not None and i < len(row)) else None
 
-            skus, customers, rows = {}, {}, 0
+            # gather every customer row per SKU with both years' units + a price
+            raw_by_code, customers = {}, {}
             for row in it:
                 code = str(cell(row, "product sku") or "").strip()
                 cust = str(cell(row, "customer code") or "").strip()
@@ -972,32 +996,48 @@ class Handler(SimpleHTTPRequestHandler):
                 name = str(cell(row, "customer name") or "").strip()
                 if name:
                     customers[cust] = name
-                qty_ty = num(cell(row, "sales qty ty")) or 0.0
-                qty_ly = num(cell(row, "sales qty ly")) or 0.0
-                weight = qty_ty + qty_ly
-                if weight <= 0:                                # customer never bought this SKU → skip
+                ty = num(cell(row, "sales qty ty")) or 0.0
+                ly = num(cell(row, "sales qty ly")) or 0.0
+                if ty <= 0 and ly <= 0:                        # never bought this SKU → skip
                     continue
                 price = num(cell(row, "average selling price"))
                 if not (price and price > 0):
                     price = num(cell(row, "ly av selling price"))
-                skus.setdefault(code, []).append({
-                    "c": cust, "r": round(weight, 4),
-                    "p": round(price, 4) if (price and price > 0) else None})
-                rows += 1
-        return {"skus": skus, "customers": customers}, rows
+                raw_by_code.setdefault(code, []).append({"c": cust, "ty": ty, "ly": ly, "p": price})
+
+            primary, fallback = ("ty", "ly") if ty_ready else ("ly", "ty")
+            skus, rows = {}, 0
+            for code, lst in raw_by_code.items():
+                # per SKU use the preferred year's units; fall back to the other year
+                # only when the preferred year has no units for this product at all
+                use = primary if sum(r[primary] for r in lst) > 0 else fallback
+                for r in lst:
+                    w = r[use]
+                    if w <= 0:
+                        continue
+                    skus.setdefault(code, []).append({
+                        "c": r["c"], "r": round(w, 4),
+                        "p": round(r["p"], 4) if (r["p"] and r["p"] > 0) else None})
+                    rows += 1
+        return {"skus": skus, "customers": customers}, rows, primary
 
     def parse_channelindex(self):
-        """Parse + persist the channel index (GLOBAL, like the PO uploads)."""
+        """Parse + persist the channel index (GLOBAL, like the PO uploads). The weight
+        basis is this-year units, unless the live year has no completed week yet
+        (data_week < 2) — a fresh January — in which case last-year units are used."""
         try:
+            dw = self.live_year_data_week()
+            ty_ready = (dw is None) or (dw >= 2)   # ≥1 full week banked → trust this year
             length = int(self.headers.get("Content-Length", 0))
-            data, rows = self.aggregate_channelindex(self.rfile.read(length))
+            data, rows, basis = self.aggregate_channelindex(self.rfile.read(length), ty_ready=ty_ready)
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
             return
         data["importedAt"] = datetime.now().isoformat(timespec="seconds")
+        data["basis"] = basis
         (DATA / "channel_index.json").write_text(json.dumps(data), encoding="utf-8")
         self.send_json({"ok": True, "skus": len(data["skus"]), "rows": rows,
-                        "customers": len(data["customers"])})
+                        "customers": len(data["customers"]), "basis": basis})
 
     # ---- weekly actual sales (the "WKnn Sales" export: Product SKU / Sales TY £ / Qty TY units) ----
     @staticmethod
