@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=87">
+<link rel="stylesheet" href="style.css?v=88">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -27,9 +27,11 @@
     <select id="config-select" title="Load a saved configuration"><option value="">Load config&hellip;</option></select>
     <button id="btn-export" title="Export order quantities to CSV">Export CSV</button>
     <button id="btn-export-forecast" title="Export each product's weekly sales-unit forecast (53 weeks) to Excel">Forecast xlsx</button>
+    <button id="btn-history" title="Recent uploads &amp; edits — revert the last few changes">&#8635; History</button>
     <button id="btn-settings" title="Multiplier, current week, capacities">Settings</button>
   </div>
 </header>
+<div id="history-menu"></div>
 
 <div id="layout">
   <aside id="sidebar">
@@ -61,6 +63,7 @@
         <button type="button" class="stab" data-tab="supplier">Supplier forms</button>
         <button type="button" class="stab" data-tab="imports">File Imports</button>
         <button type="button" class="stab" data-tab="data">Data</button>
+        <button type="button" class="stab" data-tab="changelog">Changelog</button>
       </div>
     </div>
 
@@ -299,6 +302,21 @@
       </fieldset>
     </div>
 
+    <!-- CHANGELOG -->
+    <div class="stab-panel hidden" id="changelog-panel" data-panel="changelog">
+      <fieldset>
+        <legend>Change history</legend>
+        <small>Every file upload and data edit, newest first, with a date &amp; time stamp. The <b>&#8635; History</b> button in the top bar reverts the most recent changes quickly; the <b>most recent 5</b> changes can be reverted (older ones stay here for reference). Reverting restores the data exactly as it was immediately before that change.</small>
+        <div class="cl-filter">
+          <button type="button" class="cl-fbtn on" data-f="all">All</button>
+          <button type="button" class="cl-fbtn" data-f="upload">Uploads</button>
+          <button type="button" class="cl-fbtn" data-f="edit">Data edits</button>
+          <button type="button" class="cl-fbtn" data-f="revert">Reverts</button>
+        </div>
+        <div id="changelog-list" class="cl-list"></div>
+      </fieldset>
+    </div>
+
     <div class="dialog-actions">
       <span class="spacer"></span>
       <button value="cancel" type="button" id="btn-settings-cancel">Cancel</button>
@@ -478,6 +496,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=119"></script>
+<script src="app.js?v=121"></script>
 </body>
 </html>

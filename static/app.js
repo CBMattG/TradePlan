@@ -11,6 +11,9 @@ let IMPORTED = {};       // snapshot of Excel-imported orders (for "changed" mar
 let PO_WEBSA = null;     // { pos:{PO#:{supplier,lines:[{code,ordered,delivered,outstanding,due}]}}, codes, rows }
 let PO_CONTAINERS = null;// { dates:{PO#:[{deliveryCB,etaPort,etd,status,container,shipment,supplier}]}, unparsed, truncated, rows }
 let CHANNEL_INDEX = null; // { skus:{code:[{c,r,p}]}, customers:{no:name}, importedAt } — Channel Sales import (global)
+let CHANGELOG = [];       // change-log entries (newest first), fetched from /api/changelog
+let CHANGE_LABEL = null;  // one-shot label for the next data-edit save (else "Manual edits")
+function labelNextSave(lbl) { CHANGE_LABEL = lbl; }   // tag the next autosave with a semantic action name
 let PO_UNMATCHED = null;  // snapshot list for the "no PO" review cycle
 let poCycleIdx = -1;      // cursor into PO_UNMATCHED
 let poReviewActive = false;
@@ -596,8 +599,9 @@ function markDirty() {
 async function saveNow() {
   clearTimeout(saveTimer); saveTimer = null;
   try {
+    const label = CHANGE_LABEL || 'Manual edits'; CHANGE_LABEL = null;
     const r = await fetch('/api/save?year=' + encodeURIComponent(YEAR), { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orders: ORDERS, settings: SETTINGS, proposed: serializeProposed() }) });
+      body: JSON.stringify({ orders: ORDERS, settings: SETTINGS, proposed: serializeProposed(), changeLabel: label }) });
     const j = await r.json();
     document.getElementById('save-status').textContent = j.ok
       ? 'Saved ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
@@ -1666,12 +1670,14 @@ function renderPlan() {
     rebuyScope = b.dataset.scope; savePref('tp_rebuyScope', rebuyScope);
     reopenDD = 'dd-rebuy'; renderPlan();
   }));
-  document.getElementById('btn-commit-all').addEventListener('click', () => commitRebuy(scopeArg()));
+  document.getElementById('btn-commit-all').addEventListener('click', () => { labelNextSave(`Commit rebuy · ${scopeTag()}`); commitRebuy(scopeArg()); });
   document.getElementById('btn-run-rebuy').addEventListener('click', () => {
+    labelNextSave(`Run rebuy · ${scopeTag()}`);
     resetProposed(scopeArg()); computeAll(); markDirty(); renderPlan();
     document.getElementById('save-status').textContent = `Rebuy re-run · ${scopeTag()}`;
   });
   document.getElementById('btn-clear-prop').addEventListener('click', () => {
+    labelNextSave(`Clear suggestions · ${scopeTag()}`);
     clearProposed(scopeArg()); computeAll(); markDirty(); renderPlan();
     document.getElementById('save-status').textContent = `Suggestions cleared · ${scopeTag()}`;
   });
@@ -1984,7 +1990,7 @@ async function applySeasonality(opts = {}) {
 }
 
 /* ---------------- settings tabs + seasonal-curve diagnostic ---------------- */
-const SETTINGS_TABS = ['forecast', 'capacity', 'cover', 'rebuy', 'supplier', 'imports', 'data'];
+const SETTINGS_TABS = ['forecast', 'capacity', 'cover', 'rebuy', 'supplier', 'imports', 'data', 'changelog'];
 // Defaults mirror supplier_form.FORM_DEFAULTS (server-side). Percentages are stored
 // as fractions of order value (0.01 = 1%); the Settings inputs show them as whole %.
 const SUPPLIER_FORM_DEFAULTS = { sailing_days: 50, grace_days: 7, inland_days: 7, marketing_pct: 0.01, deposit_pct: 0.15 };
@@ -2218,6 +2224,7 @@ function dropImport(beforeId, targetGi) {
 }
 function openSettings() {
   renderChanMap();
+  fetchChangelog().then(renderChangelog);
   const dlg = document.getElementById('settings-dialog');
   document.getElementById('po-status').textContent = poStatusText();
   renderUploadAges();
@@ -4412,6 +4419,92 @@ async function chanFileChosen(e) {
   } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
 }
 
+/* ================= Change log + revert =================
+   The server logs every file upload ('upload') and data-edit save ('edit') with a
+   timestamp and a before-snapshot (kept for the most recent 5 revertable changes).
+   The topbar quick menu reverts the last few; the full history lives in
+   Settings → Changelog. Reverting restores the affected data files and reloads. */
+async function fetchChangelog() {
+  try { const j = await (await fetch('/api/changelog')).json(); CHANGELOG = (j && j.entries) || []; }
+  catch { CHANGELOG = []; }
+}
+function clTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso || '';
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })
+    + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+}
+function clKindChip(k) {
+  const m = { upload: ['cl-up', 'Upload'], edit: ['cl-ed', 'Edit'], revert: ['cl-rv', 'Revert'] };
+  const [c, t] = m[k] || ['cl-ed', k];
+  return `<span class="cl-kind ${c}">${esc(t)}</span>`;
+}
+function clRowHtml(e) {
+  const cnt = e.count > 1 ? ` <span class="cl-count">×${e.count}</span>` : '';
+  const rev = (e.revertable && !e.reverted)
+    ? `<button class="cl-revert" data-cl="${esc(e.id)}" title="Undo this change — restores the data exactly as it was immediately before it">↺ Revert</button>` : '';
+  const done = e.reverted ? '<span class="cl-done">reverted</span>' : '';
+  return `<div class="cl-row"><span class="cl-time">${clTime(e.ts)}</span>${clKindChip(e.kind)}`
+    + `<span class="cl-label">${esc(e.label)}${cnt}${e.detail ? `<span class="cl-detail">${esc(e.detail)}</span>` : ''}</span>${done}${rev}</div>`;
+}
+async function revertChange(id) {
+  const e = CHANGELOG.find(x => x.id === id);
+  if (!e) return;
+  if (!confirm(`Revert this change?\n\n${e.label} — ${clTime(e.ts)}\n\nThis restores the data exactly as it was immediately before the change. Anything done since will be undone.`)) return;
+  const status = document.getElementById('save-status'); status.textContent = 'Reverting…';
+  try {
+    const j = await (await fetch('/api/revert-change?id=' + encodeURIComponent(id), { method: 'POST' })).json();
+    if (!j.ok) { status.textContent = ''; alert('Revert failed: ' + (j.error || 'unknown')); return; }
+    await fetchChangelog();
+    await loadYear(YEAR);          // reload the viewed year + globals from the restored files
+    renderChangelog(); renderHistoryQuick();
+    status.textContent = 'Change reverted';
+    alert('Reverted: ' + e.label + '.');
+  } catch (err) { status.textContent = ''; alert('Revert error: ' + err.message); }
+}
+// topbar quick menu — the 5 most recent revertable changes
+function renderHistoryQuick() {
+  const pop = document.getElementById('history-menu');
+  if (!pop) return;
+  const recent = CHANGELOG.filter(e => e.revertable && !e.reverted).slice(0, 5);
+  const rows = recent.length ? recent.map(clRowHtml).join('') : '<div class="cl-empty">No revertable changes yet.</div>';
+  pop.innerHTML = `<div class="cl-qhead">Recent changes</div><div class="cl-qlist">${rows}</div>`
+    + `<div class="cl-qfoot"><a id="cl-fulllink">Full changelog →</a></div>`;
+  const fl = document.getElementById('cl-fulllink');
+  if (fl) fl.addEventListener('click', () => { closeHistoryMenu(); openSettings(); setSettingsTab('changelog'); renderChangelog(); });
+  pop.querySelectorAll('.cl-revert').forEach(b => b.addEventListener('click', () => revertChange(b.dataset.cl)));
+}
+let CL_FILTER = 'all';
+function renderChangelog() {
+  const wrap = document.getElementById('changelog-list');
+  if (!wrap) return;
+  document.querySelectorAll('#changelog-panel .cl-fbtn').forEach(b => b.classList.toggle('on', b.dataset.f === CL_FILTER));
+  const list = CHANGELOG.filter(e => CL_FILTER === 'all' || e.kind === CL_FILTER);
+  wrap.innerHTML = list.length ? list.map(clRowHtml).join('') : '<div class="cl-empty">Nothing logged in this view yet.</div>';
+  wrap.querySelectorAll('.cl-revert').forEach(b => b.addEventListener('click', () => revertChange(b.dataset.cl)));
+}
+function toggleHistoryMenu() {
+  const pop = document.getElementById('history-menu');
+  if (!pop) return;
+  if (pop.classList.contains('open')) { closeHistoryMenu(); return; }
+  fetchChangelog().then(() => {
+    renderHistoryQuick();
+    const r = document.getElementById('btn-history').getBoundingClientRect();
+    pop.style.top = (r.bottom + 6) + 'px';
+    pop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    pop.classList.add('open');
+    setTimeout(() => document.addEventListener('click', historyOutside), 0);
+  });
+}
+function closeHistoryMenu() {
+  const pop = document.getElementById('history-menu');
+  if (pop) pop.classList.remove('open');
+  document.removeEventListener('click', historyOutside);
+}
+function historyOutside(e) {
+  if (!e.target.closest('#history-menu') && e.target.id !== 'btn-history') closeHistoryMenu();
+}
+
 /* ================= Arrivals view: upcoming container arrivals =================
    Joins the two global PO uploads (WEBSA Open PO lines <-> Qlik container bookings)
    with the loaded year's master (name / season / current stock by product code) —
@@ -4845,6 +4938,9 @@ async function init() {
   document.getElementById('btn-theme').addEventListener('click', toggleTheme);
   updateThemeButton();
   document.getElementById('btn-settings').addEventListener('click', openSettings);
+  document.getElementById('btn-history').addEventListener('click', e => { e.stopPropagation(); toggleHistoryMenu(); });
+  document.querySelectorAll('#changelog-panel .cl-fbtn').forEach(b =>
+    b.addEventListener('click', () => { CL_FILTER = b.dataset.f; renderChangelog(); }));
   document.getElementById('btn-settings-cancel').addEventListener('click', () => document.getElementById('settings-dialog').close());
   document.getElementById('settings-form').addEventListener('submit', e => { e.preventDefault(); document.getElementById('settings-dialog').close(); applySettings(); });
   document.getElementById('btn-add-band').addEventListener('click', () => {

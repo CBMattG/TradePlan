@@ -154,6 +154,96 @@ def with_imported_at(path):
     return data
 
 
+# ---- change log + revert -------------------------------------------------
+# A timestamped history of file uploads and data edits. Each entry may carry a
+# "before" snapshot of the data files it touched, enabling a one-click revert.
+# The full history (metadata) is kept in changelog.json; to bound disk use we
+# keep the actual revert snapshots only for the most recent few changes.
+CHANGELOG_PATH = DATA / "changelog.json"
+SNAP_DIR = DATA / "change_snapshots"
+CHANGELOG_MAX = 300            # metadata entries kept in the full log
+CHANGELOG_KEEP_SNAPSHOTS = 5   # most-recent revertable changes that keep a snapshot
+COALESCE_WINDOW_S = 600        # merge same-label edits within 10 minutes into one entry
+
+
+def _read_changelog():
+    obj = read_json(CHANGELOG_PATH, None)
+    return obj if isinstance(obj, dict) and isinstance(obj.get("entries"), list) else {"entries": []}
+
+
+def _write_changelog(obj):
+    CHANGELOG_PATH.write_text(json.dumps(obj), encoding="utf-8")
+
+
+def _delete_snapshot(cid):
+    if not cid:
+        return
+    try:
+        (SNAP_DIR / (cid + ".json")).unlink()
+    except OSError:
+        pass
+
+
+def _prune_changelog(obj):
+    """Keep snapshots for only the most-recent CHANGELOG_KEEP_SNAPSHOTS revertable
+    entries (older ones stay in the log but lose their revert ability), and cap the
+    total number of metadata entries."""
+    kept = 0
+    for e in obj["entries"]:                       # newest first
+        if e.get("revertable") and e.get("snap"):
+            kept += 1
+            if kept > CHANGELOG_KEEP_SNAPSHOTS:
+                _delete_snapshot(e.get("id"))
+                e["revertable"] = False
+                e["snap"] = False
+    if len(obj["entries"]) > CHANGELOG_MAX:
+        for e in obj["entries"][CHANGELOG_MAX:]:
+            if e.get("snap"):
+                _delete_snapshot(e.get("id"))
+        obj["entries"] = obj["entries"][:CHANGELOG_MAX]
+
+
+def record_change(kind, label, detail, rel_files, coalesce_key=None):
+    """Log a change (kind 'upload'|'edit'), snapshotting the CURRENT contents of
+    rel_files (paths relative to DATA) BEFORE the caller mutates them. Consecutive
+    same-key changes within COALESCE_WINDOW_S merge into the first entry (keeping its
+    original snapshot) so a burst of manual edits is one revert point, not dozens."""
+    now = datetime.now()
+    obj = _read_changelog()
+    entries = obj["entries"]
+    if coalesce_key and entries:
+        top = entries[0]
+        try:
+            age = (now - datetime.fromisoformat(top.get("ts"))).total_seconds()
+        except (ValueError, TypeError):
+            age = 1e9
+        if (top.get("coalesceKey") == coalesce_key and top.get("revertable")
+                and not top.get("reverted") and age <= COALESCE_WINDOW_S):
+            top["ts"] = now.isoformat(timespec="seconds")
+            top["detail"] = detail
+            top["count"] = int(top.get("count", 1)) + 1
+            _write_changelog(obj)
+            return
+    cid = now.strftime("%Y%m%d%H%M%S%f")
+    snap = {}
+    for rel in rel_files:
+        p = DATA / rel
+        try:
+            snap[rel] = p.read_text(encoding="utf-8") if p.exists() else None
+        except OSError:
+            snap[rel] = None
+    SNAP_DIR.mkdir(exist_ok=True)
+    (SNAP_DIR / (cid + ".json")).write_text(json.dumps({"files": snap}), encoding="utf-8")
+    entries.insert(0, {
+        "id": cid, "ts": now.isoformat(timespec="seconds"), "kind": kind,
+        "label": label, "detail": detail, "files": list(rel_files),
+        "coalesceKey": coalesce_key, "revertable": True, "reverted": False,
+        "snap": True, "count": 1,
+    })
+    _prune_changelog(obj)
+    _write_changelog(obj)
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / "static"), **kwargs)
@@ -208,6 +298,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.export_supplier(parse_qs(parsed.query))
         elif parsed.path == "/api/configs":
             self.list_configs()
+        elif parsed.path == "/api/changelog":
+            self.send_json({"ok": True, "entries": _read_changelog()["entries"]})
         elif parsed.path == "/api/weather":
             q = parse_qs(parsed.query)
             try:
@@ -332,6 +424,13 @@ class Handler(SimpleHTTPRequestHandler):
                 ydir, _ = year_dir(parse_qs(parsed.query))
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length))
+                # log data edits (only real saves that carry the order layer — the
+                # silent proposed/stockbase housekeeping saves are not logged)
+                if "orders" in body:
+                    yr = ydir.name
+                    lbl = str(body.get("changeLabel") or "Manual edits")[:80]
+                    snapf = [f"{yr}/orders.json"] + ([f"{yr}/proposed.json"] if "proposed" in body else [])
+                    record_change("edit", lbl, f"{yr} plan", snapf, coalesce_key=f"{lbl}|{yr}")
                 if "orders" in body:
                     (ydir / "orders.json").write_text(json.dumps(body["orders"]), encoding="utf-8")
                 if "settings" in body:   # settings are global across years
@@ -373,6 +472,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_duty()
         elif parsed.path == "/api/apply-duty":
             self.apply_duty(parse_qs(parsed.query))
+        elif parsed.path == "/api/revert-change":
+            self.revert_change(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-po":
             self.parse_po()
         elif parsed.path == "/api/parse-containers":
@@ -615,6 +716,9 @@ class Handler(SimpleHTTPRequestHandler):
             src = body.get("src") or "upload"
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "Selling prices (ASP)", f"{', '.join(targets)} · {src}",
+                              [f"{y}/master.json" for y in targets])
             applied = {}
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -697,6 +801,9 @@ class Handler(SimpleHTTPRequestHandler):
             manual = set(body.get("manual") or [])
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "FOB & landed costs", ", ".join(targets),
+                              [f"{y}/master.json" for y in targets])
             applied = {}
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -790,6 +897,9 @@ class Handler(SimpleHTTPRequestHandler):
             buying = body.get("buying") or {}
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "Buying report", "catalogue status, stock & OS purchases · " + ", ".join(targets),
+                              [f"{y}/master.json" for y in targets])
             applied = {}
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -874,6 +984,9 @@ class Handler(SimpleHTTPRequestHandler):
             duty = body.get("duty") or {}
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "Duty rates", ", ".join(targets),
+                              [f"{y}/master.json" for y in targets])
             applied = {}
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -1035,6 +1148,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         data["importedAt"] = datetime.now().isoformat(timespec="seconds")
         data["basis"] = basis
+        record_change("upload", "Channel index", f"{len(data['skus'])} SKUs · {rows} shares · basis {basis}", ["channel_index.json"])
         (DATA / "channel_index.json").write_text(json.dumps(data), encoding="utf-8")
         self.send_json({"ok": True, "skus": len(data["skus"]), "rows": rows,
                         "customers": len(data["customers"]), "basis": basis})
@@ -1137,6 +1251,7 @@ class Handler(SimpleHTTPRequestHandler):
                 s["running_stock"] = rs
             new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
+            record_change("upload", f"Weekly sales · week {week}", f"{n} products · {year}", [f"{year}/master.json"])
             mpath.write_text(json.dumps(master), encoding="utf-8")
             self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw,
                             "year": year, "closedThrough": closed_through})
@@ -1266,12 +1381,59 @@ class Handler(SimpleHTTPRequestHandler):
         return {"dates": dates, "unparsed": unparsed[:300], "unparsedCount": len(unparsed),
                 "truncated": truncated[:300], "truncatedCount": len(truncated), "rows": n}
 
+    def revert_change(self, qs):
+        """Restore the data files a logged change touched, from its before-snapshot,
+        then log the revert itself (not revertable). Returns the affected years so the
+        client can reload."""
+        try:
+            cid = (qs.get("id") or [""])[0]
+            obj = _read_changelog()
+            entry = next((e for e in obj["entries"] if e.get("id") == cid), None)
+            if not entry:
+                self.send_json({"ok": False, "error": "change not found"}, 404)
+                return
+            if not entry.get("revertable") or entry.get("reverted"):
+                self.send_json({"ok": False, "error": "this change can no longer be reverted"}, 400)
+                return
+            snap = read_json(SNAP_DIR / (cid + ".json"), None)
+            if not snap or "files" not in snap:
+                self.send_json({"ok": False, "error": "snapshot no longer available"}, 400)
+                return
+            restored = []
+            for rel, content in snap["files"].items():
+                p = DATA / rel
+                if content is None:
+                    if p.exists():
+                        p.unlink()
+                else:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(content, encoding="utf-8")
+                restored.append(rel)
+            entry["reverted"] = True
+            entry["revertable"] = False
+            entry["snap"] = False
+            _delete_snapshot(cid)
+            now = datetime.now()
+            when = (entry.get("ts") or "")[:16].replace("T", " ")
+            obj["entries"].insert(0, {
+                "id": now.strftime("%Y%m%d%H%M%S%f"), "ts": now.isoformat(timespec="seconds"),
+                "kind": "revert", "label": "Reverted: " + (entry.get("label") or ""),
+                "detail": "Undid change from " + when, "files": [], "coalesceKey": None,
+                "revertable": False, "reverted": False, "snap": False, "count": 1,
+            })
+            _write_changelog(obj)
+            years = sorted({rel.split("/")[0] for rel in restored if "/" in rel})
+            self.send_json({"ok": True, "restored": restored, "years": years})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
     def parse_po(self):
         """Parse + persist the WEBSA Open PO export (global, shared across years)."""
         try:
             length = int(self.headers.get("Content-Length", 0))
             data = self.parse_po_websa(self.rfile.read(length))
             data["importedAt"] = datetime.now().isoformat(timespec="seconds")
+            record_change("upload", "WEBSA Open PO", f"{len(data['pos'])} POs · {data['rows']} lines", ["po_websa.json"])
             (DATA / "po_websa.json").write_text(json.dumps(data), encoding="utf-8")
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
@@ -1284,6 +1446,7 @@ class Handler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             data = self.parse_qlik(self.rfile.read(length))
             data["importedAt"] = datetime.now().isoformat(timespec="seconds")
+            record_change("upload", "Qlik containers", f"{len(data['dates'])} POs · {data['rows']} rows", ["po_containers.json"])
             (DATA / "po_containers.json").write_text(json.dumps(data), encoding="utf-8")
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
