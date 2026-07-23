@@ -241,6 +241,17 @@ function smoothCircular(arr, win) {
 }
 function normMean1(arr) { const m = arr.reduce((a, b) => a + b, 0) / arr.length; return m > 0 ? arr.map(v => v / m) : arr.map(() => 1); }
 function peakWeek(prof) { let mi = 0; for (let i = 1; i < prof.length; i++) if (prof[i] > prof[mi]) mi = i; return mi + 1; }
+// Compress a mean-1 profile's deviation from its mean so its peak is at most `limit`×
+// the mean, then renormalise. Used to stop a low-seasonality (continuity) product's
+// own last-year shape — which may be sharply peaked from a one-off spike or an early
+// stockout — from being imposed at full height and inflating the de-seasonalised rate.
+function capProfilePeak(prof, limit) {
+  let mx = 0; for (const v of prof) if (v > mx) mx = v;
+  if (mx <= limit) return prof;
+  const k = (limit - 1) / (mx - 1);
+  return normMean1(prof.map(v => 1 + (v - 1) * k));
+}
+const CONT_PEAK_CAP = 2.0;   // max peak-to-mean for a continuity product's seasonal shape (backtest-tuned on 2025)
 
 // Empirical weekly demand shape (mean ~1) aggregated from real sales across a set
 // of SKUs: last-year full-year shape, refined by this year's actuals where we have
@@ -339,6 +350,7 @@ function seasonProfile(sku) {
     const own = owEff > 0 ? buildEmpiricalProfile([sku], (CALIB && CALIB.cur) || SETTINGS.current_week) : null;
     if (own) prof = normMean1(prof.map((v, w) => (1 - owEff) * v + owEff * own[w]));
   }
+  if (isCont) prof = capProfilePeak(prof, CONT_PEAK_CAP);   // continuity = low-seasonality: don't impose a sharp spike
   SKU_PROFILE_CACHE.set(sku.id, prof);
   return prof;
 }
