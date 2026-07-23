@@ -573,15 +573,22 @@ def export_arrivals(payload):
     C_WEEK_BAND = "FFE9F0F9"   # soft blue – shades every other calendar week's rows
     week_rule = Side(style="medium", color="FFA9BFDB")   # stronger rule where a new week starts
 
-    def sheet(ws, title_txt, cols, rows, note, months=None):
+    def _week_key(row):   # default banding: Mon–Sun calendar week of the row's date
+        dv = row.get("date")
+        return dv.isocalendar()[:2] if isinstance(dv, date) else None
+
+    def sheet(ws, title_txt, cols, rows, note, months=None, months_title="Monthly totals", band_key=None):
+        band_key = band_key or _week_key
         ws.cell(row=1, column=1, value=title_txt).font = Font(name=FONT, size=13, bold=True)
         ws.cell(row=2, column=1, value=note).font = Font(name=FONT, size=9, italic=True, color="FF808080")
         hr = 4  # header row
         if months:
             # prominent per-month totals — one row per month actually present in the
-            # data, so the block tracks whatever window the Qlik file covers
-            ws.cell(row=4, column=1, value="Monthly totals").font = Font(name=FONT, size=10, bold=True)
-            for i, (label, ncont, units) in enumerate(months):
+            # data, so the block tracks whatever window the file covers. Each entry is
+            # (label, col4_text, col5_text) so booked ("N containers"/"units") and
+            # awaiting ("N to book"/"units") can share the same layout.
+            ws.cell(row=4, column=1, value=months_title).font = Font(name=FONT, size=10, bold=True)
+            for i, (label, c4_text, c5_text) in enumerate(months):
                 rr = 5 + i
                 lc = ws.cell(row=rr, column=1, value=label)
                 lc.font = Font(name=FONT, size=10, bold=True)
@@ -589,10 +596,10 @@ def export_arrivals(payload):
                 for col in range(1, 4):   # fill every cell of the merge-to-be
                     ws.cell(row=rr, column=col).fill = _fill(C_REF_HDR)
                     ws.cell(row=rr, column=col).border = BORDER
-                cc = ws.cell(row=rr, column=4, value=f"{ncont} container{'s' if ncont != 1 else ''}")
+                cc = ws.cell(row=rr, column=4, value=c4_text)
                 cc.font = Font(name=FONT, size=10, bold=True)
                 cc.border = BORDER
-                uc = ws.cell(row=rr, column=5, value=f"{units:,} arrival units")
+                uc = ws.cell(row=rr, column=5, value=c5_text)
                 uc.font = Font(name=FONT, size=10)
                 uc.alignment = left
                 for col in range(5, 8):
@@ -615,14 +622,13 @@ def export_arrivals(payload):
         for row in rows:
             new_group = row.get("_group") != prev_group
             prev_group = row.get("_group")
-            # calendar week of the row's date drives the alternating shading —
-            # all rows arriving in the same Mon–Sun week share one band
-            dv = row.get("date")
-            wk_key = dv.isocalendar()[:2] if isinstance(dv, date) else None
-            new_week = wk_key != prev_week
+            # band_key drives the alternating shading + strong separating rule: the
+            # booked sheet bands by calendar week, the awaiting sheet by booking month
+            bkey = band_key(row)
+            new_week = bkey != prev_week
             if new_week:
                 band = not band
-                prev_week = wk_key
+                prev_week = bkey
             for c, (_, _, k) in enumerate(cols, start=1):
                 v = row.get(k)
                 cell = ws.cell(row=r, column=c, value=v)
@@ -684,7 +690,9 @@ def export_arrivals(payload):
         g = mon.setdefault((dv.year, dv.month), {"cont": set(), "units": 0.0})
         g["cont"].add(row.get("container") or row.get("po"))
         g["units"] += row.get("qty") or 0
-    month_totals = [(f"{MONTH_NAMES[m - 1]} {y}", len(g["cont"]), int(round(g["units"])))
+    month_totals = [(f"{MONTH_NAMES[m - 1]} {y}",
+                     f"{len(g['cont'])} container{'s' if len(g['cont']) != 1 else ''}",
+                     f"{int(round(g['units'])):,} arrival units")
                     for (y, m), g in sorted(mon.items())]
     note = (f"Generated {payload.get('generated', '')} · arrival units = ordered − delivered (WEBSA Open PO)"
             " · arrival = delivery-to-CB, else UK-port ETA (Qlik)")
@@ -693,7 +701,8 @@ def export_arrivals(payload):
     sheet(ws, "Upcoming container arrivals", booked_cols, rows, note, months=month_totals)
 
     await_cols = [
-        ("WEBSA Due", 10, "date"), ("PO", 11, "po"), ("Supplier", 30, "supplier"), ("Overdue", 9, "overdue"),
+        ("WEBSA Due", 10, "date"), ("Est. Booking", 11, "bookDate"), ("PO", 11, "po"),
+        ("Supplier", 28, "supplier"), ("Overdue", 9, "overdue"),
         ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
         ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
     ]
@@ -702,13 +711,37 @@ def export_arrivals(payload):
         for ln in ev.get("lines") or [{}]:
             arows.append({
                 "_group": ev.get("po", ""),
-                "date": _date(ev.get("date")), "po": ev.get("po", ""), "supplier": ev.get("supplier", ""),
+                "date": _date(ev.get("date")), "bookDate": _date(ev.get("bookDate")),
+                "po": ev.get("po", ""), "supplier": ev.get("supplier", ""),
                 "overdue": "OVERDUE" if ev.get("overdue") else "",
                 "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
                 "qty": ln.get("qty"), "stock": ln.get("stock"),
             })
+    # "to book" totals per estimated-booking month (due − 64d): how many containers
+    # must be booked each month, deduped by PO
+    amon = {}
+    for row in arows:
+        dv = row.get("bookDate")
+        key = (dv.year, dv.month) if isinstance(dv, date) else None
+        g = amon.setdefault(key, {"pos": set(), "units": 0.0})
+        g["pos"].add(row.get("po"))
+        g["units"] += row.get("qty") or 0
+    await_month_totals = [
+        ("No est. booking date" if k is None else f"{MONTH_NAMES[k[1] - 1]} {k[0]}",
+         f"{len(g['pos'])} to book", f"{int(round(g['units'])):,} units")
+        for k, g in sorted(amon.items(), key=lambda kv: (kv[0] is None, kv[0] or (0, 0)))]
+
+    def _await_band(row):   # band the awaiting sheet by estimated booking month
+        dv = row.get("bookDate")
+        return (dv.year, dv.month) if isinstance(dv, date) else None
+
+    lead = payload.get("lead") or {}
+    ls = int(lead.get("sailing", 50)); lg = int(lead.get("grace", 7)); li = int(lead.get("inland", 7))
+    lead_note = (f"est. booking = WEBSA due − {ls + lg + li} days "
+                 f"({ls} sailing + {lg} factory grace + {li} UK inland)")
     sheet(wb.create_sheet("Awaiting Booking"), "Outstanding POs awaiting a container booking", await_cols, arows,
-          "POs with outstanding balance but no dated container in the Qlik export — dates shown are WEBSA due dates.")
+          f"POs with outstanding balance but no dated container in the Qlik export · {lead_note}, grouped by booking month.",
+          months=await_month_totals, months_title="Containers to book per month", band_key=_await_band)
 
     bio = io.BytesIO()
     wb.save(bio)

@@ -1262,11 +1262,25 @@ dialog fieldset { min-width: 0; }
   border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
 #arr-search:focus { outline: none; border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
 .arr-note { flex-basis: 100%; font-size: 11px; color: var(--dim); margin-bottom: 8px; }
+.arr-leadbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 20px;
+  padding: 9px 14px; border: 1px solid var(--glass-brd); border-radius: var(--r-card);
+  background: var(--card-bg); backdrop-filter: var(--card-blur); box-shadow: var(--shadow-card); }
+.arr-lead-label { font-weight: 600; font-size: 12.5px; }
+.arr-lead-f { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+.arr-lead-f input { width: 52px; padding: 5px 8px; font: inherit; font-size: 12.5px; text-align: right;
+  border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
+.arr-lead-f input:focus { outline: none; border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+.arr-lead-total { margin-left: auto; font-size: 12px; color: var(--dim); }
+.arr-lead-total b { font-size: 14px; color: var(--text); }
 .arr-mcards { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
 .arr-mcard { background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);
   border-radius: var(--r-card); box-shadow: var(--shadow-card); padding: 10px 20px 9px; }
 .arr-mcard b { display: block; font-size: 22px; line-height: 1.1; }
 .arr-mcard span { font-size: 11px; color: var(--dim); }
+.arr-mcard.arr-mbook { border-color: rgba(197, 90, 17, .38); background: rgba(197, 90, 17, .05); }
+.arr-mcard.arr-mbook b { color: #b06a12; }
+[data-theme="dark"] .arr-mcard.arr-mbook { border-color: rgba(224, 168, 96, .35); background: rgba(224, 168, 96, .07); }
+[data-theme="dark"] .arr-mcard.arr-mbook b { color: #e0a860; }
 .arr-card { background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);
   border-radius: var(--r-card); box-shadow: var(--shadow-card); padding: 12px 16px; margin-bottom: 10px; }
 .arr-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }

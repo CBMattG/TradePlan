@@ -4525,6 +4525,24 @@ function historyOutside(e) {
    delivery-to-CB else UK-port ETA (same convention as the Plan's PO row). */
 let ARR_FILTER = '';
 const ARR_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// Booking lead time deducted from a PO's WEBSA due date to get its estimated
+// booking date. User-adjustable in the Arrivals toolbar; persisted in SETTINGS.
+const ARR_LEAD_DEFAULT = { sailing: 50, grace: 7, inland: 7 };
+function arrLead() {
+  const s = SETTINGS.arr_lead || {};
+  const pick = k => Number.isFinite(+s[k]) ? Math.max(0, Math.round(+s[k])) : ARR_LEAD_DEFAULT[k];
+  return { sailing: pick('sailing'), grace: pick('grace'), inland: pick('inland') };
+}
+function arrLeadDays() { const l = arrLead(); return l.sailing + l.grace + l.inland; }
+// Estimated booking date for an outstanding PO = its WEBSA due date − the total lead.
+function arrBookDate(iso) {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - arrLeadDays());
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+}
+function arrMonthLabel(key) { return key === 'none' ? 'No due date' : `${ARR_MONTHS[+key.slice(5) - 1]} ${key.slice(0, 4)}`; }
 function arrTodayIso() { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; }
 function arrTodayUk() { const n = new Date(); return `${String(n.getDate()).padStart(2, '0')}-${String(n.getMonth() + 1).padStart(2, '0')}-${n.getFullYear()}`; }   // DD-MM-YYYY for export note + filename
 function arrDow(iso) { const [y, m, d] = iso.split('-').map(Number); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m - 1, d)).getUTCDay()]; }
@@ -4585,7 +4603,7 @@ function arrCardHtml(ev) {
     : `<span class="arr-badge ${ev.overdue ? 'arr-over' : 'arr-notpaid'}">${ev.overdue ? 'OVERDUE — NOT BOOKED' : 'NOT BOOKED'}</span>`;
   const dates = ev.leg
     ? `ETD ${fmtDate(lg.etd)} → UK port ${fmtDate(lg.etaPort)} → CB ${fmtDate(lg.deliveryCB)}`
-    : `WEBSA due ${fmtDate(ev.date || null)}`;
+    : `WEBSA due ${fmtDate(ev.date || null)}${ev.date ? ` · book by ${fmtDate(arrBookDate(ev.date))}` : ''}`;
   return `<div class="arr-card"><div class="arr-card-head">`
     + `<span class="po-chip po-clk" data-po="${esc(ev.po)}">${esc(ev.po)}</span>`
     + `<span class="arr-sup">${esc(ev.supplier || '—')}</span>${badge}`
@@ -4607,13 +4625,41 @@ function arrMonthCounts(booked) {
     if (!byMonth.has(k)) byMonth.set(k, new Set());
     byMonth.get(k).add(ev.leg.container || ev.po);
   }
-  return [...byMonth.keys()].sort().map(k => ({ label: ARR_MONTHS[+k.slice(5) - 1], count: byMonth.get(k).size }));
+  return [...byMonth.keys()].sort().map(k => ({ key: k, label: arrMonthLabel(k), count: byMonth.get(k).size }));
+}
+// Outstanding POs to book per 'YYYY-MM', keyed by the month of their estimated
+// booking date (WEBSA due − 64d) — how many containers must be booked each month.
+function arrBookMonthCounts(awaiting) {
+  const byMonth = new Map();
+  for (const ev of awaiting) {
+    const bd = arrBookDate(ev.date);
+    const k = bd ? bd.slice(0, 7) : 'none';
+    byMonth.set(k, (byMonth.get(k) || 0) + 1);
+  }
+  return [...byMonth.keys()].sort().map(k => ({ key: k, label: arrMonthLabel(k), count: byMonth.get(k) }));
+}
+// Wrap awaiting POs into alternately-shaded blocks by estimated booking month.
+function arrBookMonthBlocks(awaiting, body) {
+  const months = [];
+  for (const ev of awaiting) {
+    const bd = arrBookDate(ev.date);
+    const key = bd ? bd.slice(0, 7) : 'none';
+    if (!months.length || months[months.length - 1].key !== key) months.push({ key, label: arrMonthLabel(key), events: [] });
+    months[months.length - 1].events.push(ev);
+  }
+  return months.map((mo, i) =>
+    `<div class="arr-week${i % 2 ? ' wband' : ''}"><div class="arr-week-head">${esc(mo.label)}`
+    + `<span class="awh-sub">est. booking month</span>`
+    + `<span class="awh-n">${mo.events.length} to book</span></div>${body(mo.events)}</div>`).join('');
 }
 function arrBodyHtml() {
   const q = ARR_FILTER.trim().toLowerCase();
   const { booked, awaiting } = arrFilteredEvents();
-  const mcards = arrMonthCounts(booked).map(m =>
-    `<div class="arr-mcard"><b>${m.count}</b><span>${m.label} containers</span></div>`).join('');
+  const landCards = arrMonthCounts(booked).map(m =>
+    `<div class="arr-mcard"><b>${m.count}</b><span>${esc(m.label)} · landing UK</span></div>`).join('');
+  const bookCards = arrBookMonthCounts(awaiting).map(m =>
+    `<div class="arr-mcard arr-mbook"><b>${m.count}</b><span>${esc(m.label)} · to book</span></div>`).join('');
+  const mcards = landCards + bookCards;
   // booked cards grouped into Mon–Sun week blocks (alternating band shading, like
   // the export), each holding its day sub-groups
   const days = arrWeekBlocks(booked, w => {
@@ -4628,8 +4674,8 @@ function arrBodyHtml() {
     return inner;
   }) || `<div class="empty">${q ? 'No upcoming containers match the filter.' : 'No future-dated containers in the Qlik export.'}</div>`;
   const await_ = awaiting.length
-    ? `<details class="arr-awaiting"><summary>${awaiting.length} outstanding PO${awaiting.length === 1 ? '' : 's'} awaiting a container booking</summary>`
-      + arrWeekBlocks(awaiting, w => `${w.events.length} PO${w.events.length === 1 ? '' : 's'}`, evs => evs.map(arrCardHtml).join(''))
+    ? `<details class="arr-awaiting" open><summary>${awaiting.length} outstanding PO${awaiting.length === 1 ? '' : 's'} awaiting a container booking — grouped by estimated booking month (WEBSA due − ${arrLeadDays()} days)</summary>`
+      + arrBookMonthBlocks(awaiting, evs => evs.map(arrCardHtml).join(''))
       + '</details>'
     : '';
   return `<div class="arr-mcards">${mcards}</div>${days}${await_}`;
@@ -4667,13 +4713,14 @@ async function exportArrivals() {
   const flt = ARR_FILTER.trim();
   const payload = {
     generated: `${arrTodayUk()}${flt ? ` · filtered: "${flt}"` : ''}`,
+    lead: arrLead(),
     months: arrMonthCounts(booked),
     booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier,
       container: ev.leg.container || '', status: ev.leg.status || '', split: ev.split,
       etd: ev.leg.etd || null, etaPort: ev.leg.etaPort || null, deliveryCB: ev.leg.deliveryCB || null,
       lines: ev.lines.map(line) })),
-    awaiting: awaiting.map(ev => ({ date: ev.date || null, po: ev.po, supplier: ev.supplier, overdue: ev.overdue,
-      lines: ev.lines.map(line) })),
+    awaiting: awaiting.map(ev => ({ date: ev.date || null, bookDate: arrBookDate(ev.date) || null, po: ev.po,
+      supplier: ev.supplier, overdue: ev.overdue, lines: ev.lines.map(line) })),
   };
   const status = document.getElementById('save-status');
   status.textContent = 'Building arrivals workbook…';
@@ -4695,14 +4742,34 @@ function renderArrivals() {
     main.innerHTML = '<div class="arr-wrap"><div class="empty">Upload the WEBSA Open PO and Qlik Container exports (Settings → File Imports) to build this page.</div></div>';
     return;
   }
+  const L = arrLead();
+  const leadInput = (id, label, val) => `<label class="arr-lead-f">${label}<input type="number" id="${id}" min="0" max="365" step="1" value="${val}"> days</label>`;
   main.innerHTML = `<div class="arr-wrap"><div class="arr-top"><h2>Upcoming containers</h2>`
     + `<input id="arr-search" type="search" placeholder="Filter by PO, product, supplier, container…" value="${esc(ARR_FILTER)}">`
     + `<button id="btn-arr-export" title="Download this page as an Excel workbook to share with the team — respects the current filter">Export xlsx</button>`
     + `<span class="arr-note">Balance units = ordered − delivered (WEBSA Open PO) · arrival = delivery-to-CB, else UK-port ETA (Qlik) · current stock as of the last weekly data import · click a PO for full detail</span></div>`
+    + `<div class="arr-leadbar"><span class="arr-lead-label" title="How far before a PO's due date the container must be booked. The est. booking date used for the ‘to book’ months is the due date minus this total.">Booking lead time</span>`
+    + leadInput('arr-lead-sailing', 'Sailing', L.sailing)
+    + leadInput('arr-lead-grace', 'Factory grace', L.grace)
+    + leadInput('arr-lead-inland', 'UK inland', L.inland)
+    + `<span class="arr-lead-total" id="arr-lead-total">= <b>${arrLeadDays()}</b> days before the PO due date</span></div>`
     + `<div id="arr-body">${arrBodyHtml()}</div></div>`;
   const inp = document.getElementById('arr-search');
   inp.addEventListener('input', () => { ARR_FILTER = inp.value; document.getElementById('arr-body').innerHTML = arrBodyHtml(); });
   document.getElementById('btn-arr-export').addEventListener('click', exportArrivals);
+  ['arr-lead-sailing', 'arr-lead-grace', 'arr-lead-inland'].forEach(id =>
+    document.getElementById(id).addEventListener('change', arrApplyLead));
+}
+// Read the three lead inputs, persist them, and re-render with the new booking dates.
+function arrApplyLead() {
+  const g = id => Math.max(0, Math.min(365, parseInt(document.getElementById(id).value, 10) || 0));
+  const v = { sailing: g('arr-lead-sailing'), grace: g('arr-lead-grace'), inland: g('arr-lead-inland') };
+  SETTINGS.arr_lead = v; markDirty();
+  document.getElementById('arr-lead-sailing').value = v.sailing;   // reflect clamped values
+  document.getElementById('arr-lead-grace').value = v.grace;
+  document.getElementById('arr-lead-inland').value = v.inland;
+  document.getElementById('arr-lead-total').innerHTML = `= <b>${arrLeadDays()}</b> days before the PO due date`;
+  document.getElementById('arr-body').innerHTML = arrBodyHtml();
 }
 
 function setView(v) {
