@@ -4851,6 +4851,11 @@ async function computeLyAgg(lyYear) {
     if (!SETTINGS.cover_bands || !SETTINGS.cover_bands.length) SETTINGS.cover_bands = defaultCoverBands();
     SETTINGS.seasonality = migrateSeasonality(Object.assign({ useWeather: true, weatherStrength: 0.5, lat: 52.77, lon: -1.21, locationName: 'Loughborough, UK', ownShapeWeight: 0.6, byYear: undefined }, SETTINGS.seasonality || {}));
     SETTINGS.rebuy = Object.assign({ mode: 'full', maxWait: 4, suppliers: null, coverTarget: REBUY_TARGET, coverBySeason: {}, peakBoost: 0, oneProductSuppliers: [], seasonalCutoff: 0.40, partialCbm: 28 }, SETTINGS.rebuy || {});
+    // pin the LY year's OWN current week (its actuals/forecast + stock-projection
+    // boundary) — without this the aggregate is computed with the live year's week,
+    // which misplaces the whole stock curve and inflates the stock-holding ghost
+    const cwby = SETTINGS.current_week_by_year || {};
+    SETTINGS.current_week = cwby[YEAR] || M.data_week || isoWeek(new Date());
     skuById = new Map(); supByName = new Map(); MODELED = new Map(); CALIB = null; PROPOSED = null; PROFILE_CACHE.clear();
     for (const sku of M.skus) { skuById.set(sku.id, sku); if (!ORDERS[sku.id]) ORDERS[sku.id] = zeros(); }
     for (const s of M.suppliers) supByName.set(s.name, s);
