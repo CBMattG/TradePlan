@@ -1338,23 +1338,19 @@ function computeRetime(scope) {
       }
       if (need > 0.5) { vec[Wt - 1] += need; injected += need; injectWeeks.push({ week: Wt, units: Math.round(need) }); }
     }
-    // 2) demote: any future (≥ current week) committed stock NOT backed by a PO that week →
-    //    Proposed Rebuy (so committed reflects only real POs; demoted weeks read "No PO").
-    const prop = zeros(); let demoted = 0; const demoteWeeks = [];
-    for (let w = cur; w <= WEEKS; w++) {
-      const excess = vec[w - 1] - (target[w] || 0);
-      if (excess > 0) { prop[w - 1] += excess; vec[w - 1] -= excess; demoted += excess; demoteWeeks.push({ week: w, units: Math.round(excess) }); }
-    }
-    if (moves.length || demoted > 0 || injected > 0) {
+    // 2) (demote removed by design) committed stock with no matching PO in its week is
+    //    LEFT where it is — this button only re-times committed arrivals to their PO
+    //    weeks and adds newly-booked PO stock; it never moves anything into Proposed
+    //    Rebuy. Un-PO'd committed weeks still show the "No PO" flag so you can act on
+    //    them manually if you want.
+    if (moves.length || injected > 0) {
       res.newOrders[sku.id] = vec;
-      if (demoted > 0) { res.newProposed[sku.id] = prop; res.demotedUnits += demoted; }
       res.skus++;
       moves.forEach(m => { res.units += m.qty; res.weeks.add(m.from); res.weeks.add(m.to); });
-      demoteWeeks.forEach(d => res.weeks.add(d.week));
       injectWeeks.forEach(d => res.weeks.add(d.week));
       if (injected > 0) res.injectedUnits += injected;
       const pos = [...new Set(lines.filter(l => targetWeeks.has(l.week)).map(l => l.po))];
-      res.moves.push({ id: sku.id, code: sku.code, name: sku.name || '', supplier: sku.supplier, moves, demoteWeeks, injectWeeks, pos, before, after: vec.slice() });
+      res.moves.push({ id: sku.id, code: sku.code, name: sku.name || '', supplier: sku.supplier, moves, demoteWeeks: [], injectWeeks, pos, before, after: vec.slice() });
     }
   }
   return res;
@@ -2709,7 +2705,7 @@ function renderRetimePreview() {
     ? `<b>${fmtU(r.demotedUnits)}</b> units not on any PO → <b>Proposed Rebuy</b> · ` : '';
   box.innerHTML =
     `<div class="rt-summary"><b>${r.skus}</b> product(s) · <b>${fmtU(r.units)}</b> units re-timed · ${injectNote}${demoteNote}<b>${r.weeks.size}</b> week(s) affected · scope: <b>whole year (all suppliers)</b></div>`
-    + `<p class="muted-note">Arrival week = booked container date, or the PO due date where no container is booked yet. Each PO's arrival week is filled to its outstanding qty — moving stock in from non-PO weeks, and <b>adding units where the plan doesn't yet hold the PO's stock</b>. Committed stock with <b>no matching PO</b> (current week on) moves to <b>Proposed Rebuy</b> and reads "No PO". Past/delivered weeks are left alone. Undo immediately after applying.</p>`
+    + `<p class="muted-note">Arrival week = booked container date, or the PO due date where no container is booked yet. Each PO's arrival week is filled to its outstanding qty — moving stock in from other future weeks, and <b>adding units where the plan doesn't yet hold the PO's stock</b>. Committed stock with <b>no matching PO</b> is <b>left where it is</b> (it keeps its "No PO" flag so you can act on it manually). Past/delivered weeks are left alone. Undo immediately after applying.</p>`
     + `<table class="flat rt-table"><thead><tr><th>Code</th><th>Supplier</th><th>PO</th><th>Move (from→to · units)</th></tr></thead><tbody>${rows}</tbody></table>`
     + (r.moves.length > 400 ? `<p class="muted-note">…and ${r.moves.length - 400} more.</p>` : '');
 }
