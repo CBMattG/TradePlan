@@ -1298,60 +1298,61 @@ function poUnmatchedList() {
    plus a per-SKU move list for the preview (nothing is written here). */
 function computeRetime(scope) {
   const cur = SETTINGS.current_week;
-  const res = { newOrders: {}, newProposed: {}, moves: [], skus: 0, units: 0, demotedUnits: 0, injectedUnits: 0, weeks: new Set() };
+  const res = { newOrders: {}, moves: [], skus: 0, placedUnits: 0, clearedUnits: 0, injectedUnits: 0, weeks: new Set() };
   if (!poDataReady()) return res;
   const inScope = sku => scope === 'all' ? true : sku.supplier === currentSupplier;
-  // SKU code → PO arrivals [{po, qty, week, booked}] (booked container week or due-date fallback)
+  // SKU code → PO arrival weeks (booked container week, else PO due-date fallback),
+  // current week on, carrying each PO's outstanding qty. `poCodes` is every product on
+  // an outstanding PO regardless of which YEAR it now arrives — so a product whose PO
+  // has moved into another year (no in-year arrival) still gets its stale in-year
+  // committed cleared, rather than lingering in an old arrival week.
   const arrivalByCode = {};
+  const poCodes = new Set();
   for (const po in PO_WEBSA.pos) {
+    for (const l of PO_WEBSA.pos[po].lines) if (l.outstanding > 0) poCodes.add(l.code);
     const weeks = poArrivalWeeks(po).filter(a => a.week >= cur);
     if (!weeks.length) continue;
     for (const l of PO_WEBSA.pos[po].lines) {
       if (l.outstanding <= 0) continue;
-      (arrivalByCode[l.code] = arrivalByCode[l.code] || []).push(...weeks.map(a => ({ po, qty: l.outstanding, week: a.week, booked: a.booked })));
+      (arrivalByCode[l.code] = arrivalByCode[l.code] || []).push(...weeks.map(a => ({ po, qty: l.outstanding, week: a.week })));
     }
   }
   for (const sku of M.skus) {
     if (!inScope(sku)) continue;
-    const lines = arrivalByCode[sku.code] || [];     // [] = product on no outstanding PO
-    const vec = (ORDERS[sku.id] || EMPTY53).slice();
-    const before = vec.slice();
-    const target = {};                       // week → desired qty from the PO arrivals
+    if (!poCodes.has(sku.code)) continue;            // not on any outstanding PO → leave this product untouched
+    const lines = arrivalByCode[sku.code] || [];     // empty ⇒ its PO now arrives in another year ⇒ clear in-year committed
+    const before = (ORDERS[sku.id] || EMPTY53).slice();
+    const target = {};                               // PO arrival week → outstanding qty
     for (const ln of lines) target[ln.week] = (target[ln.week] || 0) + ln.qty;
-    const targetWeeks = new Set(Object.keys(target).map(Number));
-    const moves = [], injectWeeks = []; let injected = 0;
-    // 1) re-time: fill each PO arrival week to its outstanding qty — first by pulling from the
-    //    nearest non-PO future weeks (a pure move), then, for any remainder the plan simply
-    //    doesn't hold, by ADDING the PO's outstanding units into that week. So the committed
-    //    row mirrors the outstanding POs: a newly-booked PO whose stock was never keyed in
-    //    appears as stock to arrive, rather than an empty week under a PO chip.
-    for (const Wt of [...targetWeeks].sort((a, b) => a - b)) {
-      let need = target[Wt] - vec[Wt - 1];
-      if (need <= 0) continue;               // week already holds enough — surplus handled by the demote below
-      const cand = [];
-      for (let w = cur; w <= WEEKS; w++) if (w !== Wt && !targetWeeks.has(w) && vec[w - 1] > 0) cand.push(w);
-      cand.sort((a, b) => Math.abs(a - Wt) - Math.abs(b - Wt) || a - b);
-      for (const w of cand) {
-        if (need <= 0) break;
-        const take = Math.min(vec[w - 1], need);
-        if (take > 0) { vec[w - 1] -= take; vec[Wt - 1] += take; need -= take; moves.push({ from: w, to: Wt, qty: take }); }
+    // Set the committed row from the current week on to EXACTLY the PO schedule: each
+    // PO arrival week holds its outstanding qty; every other future week is cleared to
+    // zero (so old, superseded arrivals don't linger and double up). Past/delivered
+    // weeks (< current week) are left untouched.
+    const vec = before.slice();
+    const placeWeeks = [], clearWeeks = [];
+    let placed = 0, cleared = 0, injected = 0;
+    for (let w = cur; w <= WEEKS; w++) {
+      const want = target[w] || 0;
+      const had = vec[w - 1] || 0;
+      if (want > 0) {
+        vec[w - 1] = want;
+        placeWeeks.push({ week: w, qty: Math.round(want) });
+        placed += want;
+        if (want > had) injected += want - had;      // units the plan didn't previously hold
+      } else if (had > 0) {
+        vec[w - 1] = 0;
+        clearWeeks.push({ week: w, units: Math.round(had) });
+        cleared += had;
       }
-      if (need > 0.5) { vec[Wt - 1] += need; injected += need; injectWeeks.push({ week: Wt, units: Math.round(need) }); }
     }
-    // 2) (demote removed by design) committed stock with no matching PO in its week is
-    //    LEFT where it is — this button only re-times committed arrivals to their PO
-    //    weeks and adds newly-booked PO stock; it never moves anything into Proposed
-    //    Rebuy. Un-PO'd committed weeks still show the "No PO" flag so you can act on
-    //    them manually if you want.
-    if (moves.length || injected > 0) {
-      res.newOrders[sku.id] = vec;
-      res.skus++;
-      moves.forEach(m => { res.units += m.qty; res.weeks.add(m.from); res.weeks.add(m.to); });
-      injectWeeks.forEach(d => res.weeks.add(d.week));
-      if (injected > 0) res.injectedUnits += injected;
-      const pos = [...new Set(lines.filter(l => targetWeeks.has(l.week)).map(l => l.po))];
-      res.moves.push({ id: sku.id, code: sku.code, name: sku.name || '', supplier: sku.supplier, moves, demoteWeeks: [], injectWeeks, pos, before, after: vec.slice() });
-    }
+    if (!vec.some((v, i) => v !== before[i])) continue;   // no net change → skip
+    res.newOrders[sku.id] = vec;
+    res.skus++;
+    res.placedUnits += placed; res.clearedUnits += cleared; res.injectedUnits += injected;
+    placeWeeks.forEach(p => res.weeks.add(p.week));
+    clearWeeks.forEach(c => res.weeks.add(c.week));
+    const pos = [...new Set(lines.map(l => l.po))];
+    res.moves.push({ id: sku.id, code: sku.code, name: sku.name || '', supplier: sku.supplier, placeWeeks, clearWeeks, pos, before, after: vec.slice() });
   }
   return res;
 }
@@ -2688,43 +2689,40 @@ function renderRetimePreview() {
   PO_RETIME = r;
   if (!poDataReady()) { box.innerHTML = '<p class="muted-note">Upload the WEBSA + Qlik files first.</p>'; applyBtn.disabled = true; return; }
   if (!r.skus) {
-    box.innerHTML = `<p class="po-diag-ok">✓ Nothing to re-time — every supplier's committed arrivals already match their PO arrival weeks.</p>`;
+    box.innerHTML = `<p class="po-diag-ok">✓ Nothing to re-time — every product on an outstanding PO already sits on its PO arrival week.</p>`;
     applyBtn.disabled = true; return;
   }
   applyBtn.disabled = false;
   let rows = '';
   for (const m of r.moves.slice(0, 400)) {
-    const parts = m.moves.map(mv => `W${mv.from}→<b>W${mv.to}</b> ${fmtU(mv.qty)}`);
-    (m.injectWeeks || []).forEach(iw => parts.push(`<span class="rt-inject">+W${iw.week} ${fmtU(iw.units)} new PO stock</span>`));
-    const demo = (m.demoteWeeks || []).reduce((a, d) => a + d.units, 0);
-    if (demo > 0) parts.push(`<span class="rt-demote">→ Proposed (No PO) ${fmtU(demo)}</span>`);
+    const parts = m.placeWeeks.map(p => `→ <b>W${p.week}</b> ${fmtU(p.qty)}`);
+    (m.clearWeeks || []).forEach(c => parts.push(`<span class="rt-demote">cleared W${c.week} ${fmtU(c.units)}</span>`));
     rows += `<tr><td class="rt-code">${esc(m.code)}</td><td class="rt-sup">${esc(titleCase(m.supplier))}</td><td class="rt-po">${m.pos.map(esc).join(', ') || '—'}</td><td>${parts.join(', ') || '—'}</td></tr>`;
   }
+  const clearedNote = r.clearedUnits
+    ? `<b>${fmtU(r.clearedUnits)}</b> units cleared from non-PO weeks · ` : '';
   const injectNote = r.injectedUnits
-    ? `<b>${fmtU(r.injectedUnits)}</b> units added as new PO stock · ` : '';
-  const demoteNote = r.demotedUnits
-    ? `<b>${fmtU(r.demotedUnits)}</b> units not on any PO → <b>Proposed Rebuy</b> · ` : '';
+    ? `<b>${fmtU(r.injectedUnits)}</b> units newly added · ` : '';
   box.innerHTML =
-    `<div class="rt-summary"><b>${r.skus}</b> product(s) · <b>${fmtU(r.units)}</b> units re-timed · ${injectNote}${demoteNote}<b>${r.weeks.size}</b> week(s) affected · scope: <b>whole year (all suppliers)</b></div>`
-    + `<p class="muted-note">Arrival week = booked container date, or the PO due date where no container is booked yet. Each PO's arrival week is filled to its outstanding qty — moving stock in from other future weeks, and <b>adding units where the plan doesn't yet hold the PO's stock</b>. Committed stock with <b>no matching PO</b> is <b>left where it is</b> (it keeps its "No PO" flag so you can act on it manually). Past/delivered weeks are left alone. Undo immediately after applying.</p>`
-    + `<table class="flat rt-table"><thead><tr><th>Code</th><th>Supplier</th><th>PO</th><th>Move (from→to · units)</th></tr></thead><tbody>${rows}</tbody></table>`
+    `<div class="rt-summary"><b>${r.skus}</b> product(s) · <b>${fmtU(r.placedUnits)}</b> units placed on PO weeks · ${clearedNote}${injectNote}<b>${r.weeks.size}</b> week(s) affected · scope: <b>whole year (all suppliers)</b></div>`
+    + `<p class="muted-note">Each product on an outstanding PO has its committed arrivals (current week on) set to <b>exactly its PO schedule</b> — the PO's outstanding units on its arrival week (booked container date, else PO due date), with <b>every other future week cleared</b> so superseded arrivals don't linger. Products with <b>no outstanding PO are left untouched</b>. Past/delivered weeks are left alone. Undo immediately after applying.</p>`
+    + `<table class="flat rt-table"><thead><tr><th>Code</th><th>Supplier</th><th>PO</th><th>Change (set / cleared)</th></tr></thead><tbody>${rows}</tbody></table>`
     + (r.moves.length > 400 ? `<p class="muted-note">…and ${r.moves.length - 400} more.</p>` : '');
 }
-// Shared apply: snapshot affected committed + proposed for undo, then mutate + save + re-render.
+// Shared apply: snapshot affected committed rows for undo, then set them to the PO
+// schedule + save + re-render. (Only the committed layer is touched now — proposed is
+// left alone, so the snapshot only needs the committed vectors.)
 function doApplyRetime(plan, label) {
   if (!plan || !plan.skus) return false;
-  if (!PROPOSED) PROPOSED = new Map();
-  const oIds = Object.keys(plan.newOrders), pIds = Object.keys(plan.newProposed || {});
-  const allIds = [...new Set([...oIds, ...pIds])];
+  const oIds = Object.keys(plan.newOrders);
   const snapO = {}, snapP = {};
-  for (const id of allIds) { snapO[id] = (ORDERS[id] || EMPTY53).slice(); snapP[id] = (PROPOSED.get(id) || EMPTY53).slice(); }
-  const detail = `${plan.skus} product(s), ${fmtU(plan.units)} moved${plan.injectedUnits ? `, ${fmtU(plan.injectedUnits)} added` : ''}${plan.demotedUnits ? `, ${fmtU(plan.demotedUnits)} → proposed (No PO)` : ''}`;
+  for (const id of oIds) snapO[id] = (ORDERS[id] || EMPTY53).slice();
+  const parts = [`${plan.skus} product(s)`, `${fmtU(plan.placedUnits)} on PO weeks`];
+  if (plan.clearedUnits) parts.push(`${fmtU(plan.clearedUnits)} cleared`);
+  if (plan.injectedUnits) parts.push(`${fmtU(plan.injectedUnits)} added`);
+  const detail = parts.join(', ');
   PO_APPLY_UNDO = { snapO, snapP, label, detail };
   for (const id of oIds) ORDERS[id] = plan.newOrders[id].slice();
-  for (const id of pIds) {                 // demoted "No PO" stock is ADDED on top of any existing proposed
-    const add = plan.newProposed[id], ex = PROPOSED.get(id) || zeros();
-    PROPOSED.set(id, ex.map((v, i) => v + add[i]));
-  }
   computeAll(); markDirty();
   renderSidebar();
   if (currentView === 'plan') renderPlan(); else setView(currentView);
@@ -2741,7 +2739,7 @@ function applySupplierRetime() {         // from the Plan supplier-header button
   const status = document.getElementById('save-status');
   if (!poDataReady()) { status.textContent = 'Upload PO + container files first (Settings → Data)'; return; }
   const plan = computeRetime('sup');
-  if (!plan.skus) { status.textContent = `No PO moves for ${titleCase(currentSupplier)} — arrivals already match their PO weeks`; return; }
+  if (!plan.skus) { status.textContent = `Nothing to re-time for ${titleCase(currentSupplier)} — every PO'd product already matches its PO weeks`; return; }
   doApplyRetime(plan, titleCase(currentSupplier));
 }
 function undoRetime() {
