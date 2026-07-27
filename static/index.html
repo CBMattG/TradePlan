@@ -275,6 +275,18 @@
         <div class="band-buttons"><button type="button" id="btn-apply-manual-asp" class="primary" disabled>Apply manual prices</button></div>
       </fieldset>
       <fieldset>
+        <legend>Manual CBM</legend>
+        <small>Edit any product's CBM (m³ per unit) by hand — e.g. a newly-sized product, or a correction. Figures tagged <b>import</b> came straight from the last workbook import; hand-edited ones are tagged <b>manual</b>. <b>Previous</b> shows the CBM before your last manual edit and <b>Var %</b> the change from it. CBM drives container fill, CBM totals and the estimated landed cost. Changes apply to the current year and later forecast years.</small>
+        <div class="asp-edit-toolbar">
+          <input id="cbm-edit-search" type="search" placeholder="Filter by code or name…">
+          <label class="asp-edit-chk"><input type="checkbox" id="cbm-edit-manual-only"> Only show manually edited</label>
+          <span id="cbm-edit-count" class="muted-note"></span>
+        </div>
+        <div class="asp-edit-head"><span>Code</span><span>Name</span><span>Source</span><span>Previous</span><span>Var&nbsp;%</span><span>CBM</span></div>
+        <div id="cbm-edit-list" class="asp-edit-list"></div>
+        <div class="band-buttons"><button type="button" id="btn-apply-manual-cbm" class="primary" disabled>Apply manual CBM</button></div>
+      </fieldset>
+      <fieldset>
         <legend>Purchase orders &amp; container bookings</legend>
         <small>Upload the <b>WEBSA Open PO</b> and <b>Qlik Container</b> files from the <b>File Imports</b> tab. Here you can view diagnostics and re-time committed stock arrivals to their PO/container weeks (matched by PO number, across all years).</small>
         <div class="po-up-row">
@@ -496,6 +508,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=127"></script>
+<script src="app.js?v=128"></script>
 </body>
 </html>

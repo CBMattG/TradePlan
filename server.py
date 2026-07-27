@@ -458,6 +458,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_landed()
         elif parsed.path == "/api/apply-landed":
             self.apply_landed(parse_qs(parsed.query))
+        elif parsed.path == "/api/apply-cbm":
+            self.apply_cbm(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-buying":
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
@@ -825,6 +827,39 @@ class Handler(SimpleHTTPRequestHandler):
                         s["landed_src"] = "manual" if c in manual else "upload"
                         touched = True
                     if touched:
+                        n += 1
+                mpath.write_text(json.dumps(master), encoding="utf-8")
+                applied[y] = n
+            self.send_json({"ok": True, "applied": applied, "years": targets})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def apply_cbm(self, qs):
+        """Write hand-edited CBM (m³/unit) into master.json for the given years, matched
+        by code. Each edited product is tagged cbm_src='manual' (vs the workbook-import
+        default) and keeps cbm_prev, so the Data editor can show import-vs-manual."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            cbm = body.get("cbm") or {}
+            yrs, _ = years_index()
+            targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "Product CBM", f"{', '.join(targets)} · manual",
+                              [f"{y}/master.json" for y in targets])
+            applied = {}
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                n = 0
+                for s in master["skus"]:
+                    v = cbm.get(s.get("code"))
+                    if v is not None and v > 0:
+                        s["cbm_prev"] = s.get("cbm")
+                        s["cbm"] = v
+                        s["cbm_src"] = "manual"
                         n += 1
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n

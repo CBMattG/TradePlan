@@ -2280,6 +2280,7 @@ function openSettings() {
     document.getElementById('sf-marketing').value = +(f.marketing_pct * 100).toFixed(2);
     document.getElementById('sf-deposit').value = +(f.deposit_pct * 100).toFixed(2); }
   renderAspEditor();
+  renderCbmEditor();
   const diag = document.getElementById('season-diag');
   diag.classList.add('hidden'); diag.innerHTML = '';
   setSettingsTab('forecast');
@@ -3449,6 +3450,82 @@ async function applyManualAsp() {
     applyAspToMemory(changes, years, 'manual');
     renderAspEditor();   // refresh tags (now 'manual')
     status.textContent = `Set ${codes.length} manual price${codes.length > 1 ? 's' : ''} (${years.join(', ')})`;
+  } catch (err) { status.textContent = ''; alert('Save error: ' + err.message); }
+}
+
+// Bulk manual-CBM editor (Settings → Data): mirrors the ASP editor. CBM has two
+// provenance states — 'import' (from the workbook build) and 'manual' (hand-edited) —
+// so you can see which m³/unit figures came straight from the last import.
+const CBM_SRC_LABEL = { import: 'import', manual: 'manual' };
+function cbmSrc(sku) { return sku.cbm_src === 'manual' ? 'manual' : 'import'; }
+function postCbm(cbmMap, years) {
+  return fetch('/api/apply-cbm', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cbm: cbmMap, years }) }).then(r => r.json());
+}
+// Mirror a CBM change into the in-memory loaded year (so it shows without a reload).
+function applyCbmToMemory(cbmMap, years) {
+  if (!years.includes(String(YEAR))) return 0;
+  let n = 0;
+  for (const s of M.skus) { const v = cbmMap[s.code]; if (v != null && v > 0) { s.cbm_prev = (+s.cbm || 0); s.cbm = v; s.cbm_src = 'manual'; n++; } }
+  computeAll(); renderSidebar();
+  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  return n;
+}
+function renderCbmEditor() {
+  const list = document.getElementById('cbm-edit-list'); if (!list || !M) return;
+  const q = (document.getElementById('cbm-edit-search').value || '').toLowerCase().trim();
+  const manualOnly = document.getElementById('cbm-edit-manual-only').checked;
+  const rows = M.skus.filter(s => {
+    if (manualOnly && cbmSrc(s) !== 'manual') return false;
+    if (q && !((s.code || '').toLowerCase().includes(q) || (s.name || '').toLowerCase().includes(q))) return false;
+    return true;
+  }).sort((a, b) => a.code.localeCompare(b.code));
+  const manualTotal = M.skus.filter(s => cbmSrc(s) === 'manual').length;
+  document.getElementById('cbm-edit-count').textContent = `${manualTotal} manually edited · ${rows.length} shown`;
+  list.innerHTML = rows.map(s => {
+    const src = cbmSrc(s);
+    const tint = src === 'manual' ? 'asp-manual' : 'asp-upload';   // reuse the ASP editor tints
+    const cur = +s.cbm || 0;
+    const prev = (s.cbm_prev != null && +s.cbm_prev > 0) ? +s.cbm_prev : null;
+    const vpct = prev ? (cur - prev) / prev * 100 : null;
+    return `<div class="asp-edit-row ${tint}"><span class="aer-code">${esc(s.code)}</span>`
+      + `<span class="aer-name">${esc(s.name || '')}</span>`
+      + `<span class="aer-src" title="CBM source">${CBM_SRC_LABEL[src]}</span>`
+      + `<span class="aer-prev" title="CBM before the last manual edit">${prev != null ? prev.toFixed(3) : '—'}</span>`
+      + `<span class="aer-var ${vpct == null ? '' : vpct >= 0 ? 'c-up' : 'c-down'}" data-prev="${prev != null ? prev : ''}" title="change from the previous CBM">${vpct == null ? '—' : (vpct >= 0 ? '+' : '') + vpct.toFixed(1) + '%'}</span>`
+      + `<input class="aer-input" type="number" step="0.001" min="0" data-code="${esc(s.code)}" data-orig="${cur.toFixed(3)}" value="${cur.toFixed(3)}"></div>`;
+  }).join('') || '<div class="muted-note">No products match.</div>';
+  list.querySelectorAll('.aer-input').forEach(inp => inp.addEventListener('input', () => { updateManualCbmButton(); updateAerVariance(inp); }));
+  updateManualCbmButton();
+}
+function collectManualCbmChanges() {
+  const out = {};
+  document.querySelectorAll('#cbm-edit-list .aer-input').forEach(inp => {
+    const v = parseFloat(inp.value);
+    if (isFinite(v) && v > 0 && Math.abs(v - parseFloat(inp.dataset.orig)) > 0.0005) out[inp.dataset.code] = +v.toFixed(3);
+  });
+  return out;
+}
+function updateManualCbmButton() {
+  const n = Object.keys(collectManualCbmChanges()).length;
+  const btn = document.getElementById('btn-apply-manual-cbm');
+  if (!btn) return;
+  btn.disabled = !n;
+  btn.textContent = n ? `Apply ${n} manual CBM${n > 1 ? 's' : ''}` : 'Apply manual CBM';
+}
+async function applyManualCbm() {
+  const changes = collectManualCbmChanges();
+  const codes = Object.keys(changes);
+  if (!codes.length) return;
+  const years = manualAspYears();
+  const status = document.getElementById('save-status');
+  status.textContent = 'Saving CBM…';
+  try {
+    const j = await postCbm(changes, years);
+    if (!j.ok) { status.textContent = ''; alert('Save failed: ' + (j.error || 'unknown')); return; }
+    applyCbmToMemory(changes, years);
+    renderCbmEditor();   // refresh tags (now 'manual')
+    status.textContent = `Set ${codes.length} manual CBM${codes.length > 1 ? 's' : ''} (${years.join(', ')})`;
   } catch (err) { status.textContent = ''; alert('Save error: ' + err.message); }
 }
 
@@ -5070,6 +5147,9 @@ async function init() {
   document.getElementById('asp-edit-search').addEventListener('input', renderAspEditor);
   document.getElementById('asp-edit-stale-only').addEventListener('change', renderAspEditor);
   document.getElementById('btn-apply-manual-asp').addEventListener('click', applyManualAsp);
+  document.getElementById('cbm-edit-search').addEventListener('input', renderCbmEditor);
+  document.getElementById('cbm-edit-manual-only').addEventListener('change', renderCbmEditor);
+  document.getElementById('btn-apply-manual-cbm').addEventListener('click', applyManualCbm);
   document.getElementById('btn-export').addEventListener('click', exportCsv);
   document.getElementById('btn-export-forecast').addEventListener('click', exportForecast);
   document.getElementById('btn-save-config').addEventListener('click', openSaveConfigDialog);
