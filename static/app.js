@@ -4497,7 +4497,8 @@ async function chanFileChosen(e) {
     const data = await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json();
     CHANNEL_INDEX = data.channelIndex || null;
     const basisTxt = j.basis === 'ly' ? ' · weighted by last-year units (start-of-year fallback)'
-      : j.basis === 'ty' ? ' · weighted by this-year units' : '';
+      : j.basis === 'ty' ? ' · weighted by this-year units'
+      : j.basis === 'online' ? ' · weighted by online (CB Online) units' : '';
     status.textContent = `Channel index loaded: ${j.skus} SKUs · ${j.rows} customer shares · ${j.customers} customer names${basisTxt}.`;
     renderUploadAges(); renderChanMap();
     if (currentView === 'plan') renderPlan();

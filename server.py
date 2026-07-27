@@ -1117,22 +1117,64 @@ class Handler(SimpleHTTPRequestHandler):
                             customers[no] = nm
                 return {"skus": skus, "customers": customers}, rows, "ratio"
 
-            # --- NEW format: flat 'Channel Sales' export, columns matched by header ---
+            # --- flat exports, columns matched by header name. Two layouts supported:
+            #   'flat' : Product SKU / Customer Code / Sales Qty TY / Sales Qty LY / ASP
+            #            (both-years export — weight TY units, LY fallback)
+            #   'soh'  : cmp_product / soh_cusndcode / Quantity / Average Channel Sale
+            #            Price £ — a single-period, single-channel (online) export with
+            #            no TY/LY split, so weight by Quantity and price = Sales / Qty.
             ws = wb.active
             it = ws.iter_rows(values_only=True)
             col = {}
+            fmt = None
             for hdr in it:                                     # find + map the header row
                 lower = [str(c or "").strip().lower() for c in hdr]
                 if "product sku" in lower and "customer code" in lower:
+                    fmt = "flat"
                     col = {name: i for i, name in enumerate(lower)}
                     break
-            if not col:
-                raise ValueError("Couldn't find a header row with 'Product SKU' and 'Customer Code' "
-                                 "(and no 'CustomerIndex' sheet). Is this the Channel Sales export?")
+                if "cmp_product" in lower and "soh_cusndcode" in lower:
+                    fmt = "soh"
+                    col = {name: i for i, name in enumerate(lower)}
+                    break
+            if not fmt:
+                raise ValueError("Couldn't find a Channel Sales header row — expected either "
+                                 "'Product SKU' + 'Customer Code', or 'cmp_product' + 'soh_cusndcode'. "
+                                 "Is this the Channel Sales export?")
 
             def cell(row, name):
                 i = col.get(name)
                 return row[i] if (i is not None and i < len(row)) else None
+
+            # --- 'soh' layout: one period, one channel. Weight = Quantity (summed per
+            # SKU+customer, dropping returns/credits); price = Sales / Qty. ---
+            if fmt == "soh":
+                agg, customers = {}, {}
+                for row in it:
+                    code = str(cell(row, "cmp_product") or "").strip()
+                    cust = str(cell(row, "soh_cusndcode") or "").strip()
+                    if not code or not cust:
+                        continue
+                    nm = str(cell(row, "[soh source acc name]") or "").strip()
+                    if nm:
+                        customers[cust] = nm
+                    qty = num(cell(row, "quantity")) or 0.0
+                    if qty <= 0:                               # skip returns/credits + zero-qty rows
+                        continue
+                    sales = num(cell(row, "sales")) or 0.0
+                    e = agg.setdefault((code, cust), {"qty": 0.0, "sales": 0.0})
+                    e["qty"] += qty
+                    e["sales"] += sales
+                skus, rows = {}, 0
+                for (code, cust), e in agg.items():
+                    if e["qty"] <= 0:
+                        continue
+                    price = e["sales"] / e["qty"] if e["qty"] > 0 else None
+                    skus.setdefault(code, []).append({
+                        "c": cust, "r": round(e["qty"], 4),
+                        "p": round(price, 4) if (price and price > 0) else None})
+                    rows += 1
+                return {"skus": skus, "customers": customers}, rows, "online"
 
             # gather every customer row per SKU with both years' units + a price
             raw_by_code, customers = {}, {}
