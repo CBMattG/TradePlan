@@ -460,6 +460,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.apply_landed(parse_qs(parsed.query))
         elif parsed.path == "/api/apply-cbm":
             self.apply_cbm(parse_qs(parsed.query))
+        elif parsed.path == "/api/add-product":
+            self.add_product(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-buying":
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
@@ -864,6 +866,92 @@ class Handler(SimpleHTTPRequestHandler):
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def add_product(self, qs):
+        """Create a brand-new product (and its supplier, if new) in master.json for the
+        given years. No sales history: ly/actual seed to zero, stock history to the
+        entered current stock, and base_forecast to the annual figure spread evenly.
+        Cost/CBM/ASP are tagged 'manual'. Logged as a revertable changelog entry."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            b = json.loads(self.rfile.read(length)) if length else {}
+            code = str(b.get("code") or "").strip()
+            name = str(b.get("name") or "").strip()
+            supplier = str(b.get("supplier") or "").strip()
+            if not code or not name or not supplier:
+                self.send_json({"ok": False, "error": "Product code, name and supplier are all required."}, 400)
+                return
+            yrs, _ = years_index()
+            targets = [str(y) for y in (b.get("years") or []) if str(y) in yrs]
+            if not targets:
+                self.send_json({"ok": False, "error": "No valid target years."}, 400)
+                return
+            masters, clash = {}, []
+            for y in targets:
+                m = read_json(DATA / y / "master.json", None)
+                if not m:
+                    continue
+                masters[y] = m
+                if any(str(s.get("code", "")).strip() == code for s in m.get("skus", [])):
+                    clash.append(y)
+            if clash:
+                self.send_json({"ok": False, "error": f"A product with code '{code}' already exists in {', '.join(clash)}."}, 400)
+                return
+
+            def num(v, d=None):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return d
+
+            WEEKS = 53
+            annual = num(b.get("annualForecast"), 0) or 0
+            per = round(annual / WEEKS, 4) if annual > 0 else 0.0
+            stock_now = num(b.get("stock_now"), 0) or 0
+            common = {
+                "code": code, "name": name, "supplier": supplier,
+                "season": str(b.get("season") or "No Defined Season"),
+                "category": (str(b.get("category")).strip() or None) if b.get("category") else None,
+                "status": str(b.get("status") or "Live"),
+                "fob": num(b.get("fob")), "fob_src": "manual",
+                "landed": num(b.get("landed")), "landed_src": "manual",
+                "asp": num(b.get("asp")), "asp_src": "manual",
+                "cbm": num(b.get("cbm")), "cbm_src": "manual",
+                "stock_now": stock_now,
+                "fpq": num(b.get("fpq")),
+                "pallet_type": (str(b.get("palletType")).strip() or None) if b.get("palletType") else None,
+                "image": (str(b.get("image")).strip() or None) if b.get("image") else None,
+                "duty_rate": None,
+            }
+            ns = b.get("newSupplier") or {}
+            supplier_rec = {"name": supplier, "number": ns.get("number"),
+                            "contact": ns.get("contact") or None, "port": ns.get("port") or None,
+                            "email": ns.get("email") or None, "origin": ns.get("origin") or None}
+            record_change("edit", f"Add product {code}", f"{name} · {', '.join(targets)}",
+                          [f"{y}/master.json" for y in targets])
+            applied = {}
+            for y in targets:
+                m = masters.get(y)
+                if not m:
+                    continue
+                ids = {s.get("id") for s in m.get("skus", [])}
+                sid, n = code, 2
+                while sid in ids:
+                    sid = f"{code}#{n}"; n += 1
+                sku = dict(common)
+                sku["id"] = sid
+                sku["ly"] = [0.0] * WEEKS
+                sku["actual"] = [0.0] * WEEKS
+                sku["base_forecast"] = [per] * WEEKS
+                sku["running_stock"] = [float(stock_now)] * WEEKS
+                m.setdefault("skus", []).append(sku)
+                if not any(str(s.get("name", "")).strip() == supplier for s in m.get("suppliers", [])):
+                    m.setdefault("suppliers", []).append(dict(supplier_rec))
+                (DATA / y / "master.json").write_text(json.dumps(m), encoding="utf-8")
+                applied[y] = sid
+            self.send_json({"ok": True, "code": code, "supplier": supplier, "years": targets, "applied": applied})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

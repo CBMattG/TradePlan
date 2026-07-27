@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=90">
+<link rel="stylesheet" href="style.css?v=92">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -22,6 +22,7 @@
   </nav>
   <div id="topbar-right">
     <span id="save-status" title="Changes save automatically"></span>
+    <button id="btn-add-product" title="Add a brand-new product (and supplier, if new) to the plan">➕ Product</button>
     <button id="btn-theme" class="iconbtn" title="Switch between light and dark mode" aria-label="Toggle dark mode"></button>
     <button id="btn-save-config" title="Save the current sales forecast + rebuy plans under a name">&#128190; Save config</button>
     <select id="config-select" title="Load a saved configuration"><option value="">Load config&hellip;</option></select>
@@ -491,6 +492,44 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="loadconfig-cancel">Cancel</button><button type="button" id="loadconfig-ok" class="primary">Load</button></div>
 </dialog>
 
+<dialog id="addprod-dialog">
+  <div class="settings-head"><h2>Add a new product</h2></div>
+  <p class="ex-sub">Fields marked * are required. The product is created in the current year and every later forecast year. Costs, CBM and ASP are tagged <b>manual</b>; you can refine the weekly forecast in the grid afterwards.</p>
+  <div class="ap-grid">
+    <label>Product code *<input type="text" id="ap-code" autocomplete="off" placeholder="e.g. BBQNEW01"></label>
+    <label>Product name *<input type="text" id="ap-name" autocomplete="off" placeholder="Full product description"></label>
+    <label>Supplier *<select id="ap-supplier"></select></label>
+    <label>Season *<select id="ap-season">
+      <option>Continuity</option><option>Summer</option><option>Winter</option><option>No Defined Season</option>
+    </select></label>
+    <label>Category<input type="text" id="ap-category" list="ap-cat-list" autocomplete="off" placeholder="pick or type a new one">
+      <datalist id="ap-cat-list"></datalist></label>
+    <label>Status *<select id="ap-status"><option>Live</option><option>Not Live</option></select></label>
+    <label>FOB cost (USD)<input type="number" id="ap-fob" step="0.01" min="0" placeholder="0.00"></label>
+    <label>Landed cost (GBP)<input type="number" id="ap-landed" step="0.01" min="0" placeholder="0.00"></label>
+    <label>ASP (GBP)<input type="number" id="ap-asp" step="0.01" min="0" placeholder="0.00"></label>
+    <label>CBM (m³)<input type="number" id="ap-cbm" step="0.001" min="0" placeholder="0.000"></label>
+    <label>Current stock (units)<input type="number" id="ap-stock" step="1" min="0" placeholder="0"></label>
+    <label>Annual sales forecast (units)<input type="number" id="ap-forecast" step="1" min="0" placeholder="spread evenly over the year"></label>
+    <label>Units per pallet<input type="number" id="ap-fpq" step="1" min="0" placeholder="optional"></label>
+    <label>Pallet type<select id="ap-pallet"><option value="">—</option><option>Pallet</option><option>Stillage</option><option>Racking</option></select></label>
+    <label class="ap-wide">Image URL <small>optional</small><input type="text" id="ap-image" autocomplete="off" placeholder="https://…"></label>
+  </div>
+  <fieldset id="ap-newsup" class="ap-newsup" hidden>
+    <legend>New supplier details</legend>
+    <div class="ap-grid">
+      <label>Supplier name *<input type="text" id="ap-sup-name" autocomplete="off"></label>
+      <label>Origin / region <small>sets lead time</small><input type="text" id="ap-sup-origin" autocomplete="off" placeholder="e.g. Shandong, or Europe"></label>
+      <label>Port<input type="text" id="ap-sup-port" autocomplete="off"></label>
+      <label>Supplier number<input type="number" id="ap-sup-number" step="1"></label>
+      <label>Contact<input type="text" id="ap-sup-contact" autocomplete="off"></label>
+      <label>Email<input type="text" id="ap-sup-email" autocomplete="off"></label>
+    </div>
+    <small>Overseas suppliers default to an 11-week lead time; Europe/domestic origins get 3 weeks.</small>
+  </fieldset>
+  <div class="dialog-actions"><span id="ap-msg" class="ap-msg"></span><span class="spacer"></span><button type="button" id="ap-cancel">Cancel</button><button type="button" id="ap-save" class="primary">Add product</button></div>
+</dialog>
+
 <dialog id="revert-dialog">
   <div class="settings-head"><h2>Revert orders</h2></div>
   <p class="ex-sub">Choose what to revert back to. This replaces the order quantities and rebuy suggestions.</p>
@@ -508,6 +547,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=131"></script>
+<script src="app.js?v=132"></script>
 </body>
 </html>

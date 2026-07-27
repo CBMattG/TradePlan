@@ -1279,6 +1279,19 @@ dialog fieldset { min-width: 0; }
 .arr-mcard span { font-size: 11px; color: var(--dim); }
 .arr-mcard.arr-mbook { border-color: rgba(197, 90, 17, .38); background: rgba(197, 90, 17, .05); }
 .arr-mcard.arr-mbook b { color: #b06a12; }
+/* Add-product dialog */
+#addprod-dialog { width: min(780px, 94vw); max-width: 94vw; max-height: 90vh; overflow: auto; }
+.ap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin: 10px 0 4px; }
+.ap-grid label { display: flex; flex-direction: column; gap: 3px; margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.ap-grid label small { font-weight: 400; color: var(--dim); }
+.ap-grid label.ap-wide { grid-column: 1 / -1; }
+/* override the global `dialog label input { width:130px }` so fields fill their column */
+.ap-grid input, .ap-grid select { width: 100%; box-sizing: border-box; margin: 0; padding: 7px 9px; font: inherit;
+  font-size: 13px; border-radius: var(--r-ctl, 8px); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
+.ap-grid input:focus, .ap-grid select:focus { outline: none; border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+.ap-newsup { border: 1px solid var(--glass-brd); border-radius: var(--r-card); padding: 10px 14px 12px; margin: 12px 0 4px; }
+.ap-newsup legend { font-size: 12px; font-weight: 700; padding: 0 6px; }
+.ap-msg { font-size: 12px; color: #b23b2c; font-weight: 600; }
 [data-theme="dark"] .arr-mcard.arr-mbook { border-color: rgba(224, 168, 96, .35); background: rgba(224, 168, 96, .07); }
 [data-theme="dark"] .arr-mcard.arr-mbook b { color: #e0a860; }
 .arr-card { background: var(--card-bg); backdrop-filter: var(--card-blur); border: 1px solid var(--glass-brd);

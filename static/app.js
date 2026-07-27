@@ -3527,6 +3527,75 @@ async function applyManualCbm() {
   } catch (err) { status.textContent = ''; alert('Save error: ' + err.message); }
 }
 
+/* ---------------- Add a new product (Settings → Data) ----------------
+   Builds a full SKU (+ supplier if new) in master.json for the current year and all
+   later years, then reloads so the supplier appears in the sidebar and its product in
+   the Plan grid. No sales history: ly/actual seed to zero, base_forecast to the annual
+   figure spread evenly; costs/CBM/ASP tag as 'manual'. */
+function openAddProductDialog() {
+  if (!M) return;
+  const dlg = document.getElementById('addprod-dialog');
+  const sups = [...M.suppliers].sort((a, b) => a.name.localeCompare(b.name));
+  document.getElementById('ap-supplier').innerHTML =
+    sups.map(s => `<option value="${esc(s.name)}">${esc(titleCase(s.name))}</option>`).join('')
+    + `<option value="__new__">➕ New supplier…</option>`;
+  document.getElementById('ap-supplier').value =
+    (currentSupplier && sups.some(s => s.name === currentSupplier)) ? currentSupplier : (sups[0] && sups[0].name) || '__new__';
+  const cats = [...new Set(M.skus.map(s => s.category).filter(Boolean))].sort();
+  document.getElementById('ap-cat-list').innerHTML = cats.map(c => `<option value="${esc(c)}"></option>`).join('');
+  ['ap-code', 'ap-name', 'ap-fob', 'ap-landed', 'ap-asp', 'ap-cbm', 'ap-stock', 'ap-forecast', 'ap-fpq',
+   'ap-image', 'ap-category', 'ap-sup-name', 'ap-sup-origin', 'ap-sup-port', 'ap-sup-contact', 'ap-sup-email',
+   'ap-sup-number'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+  document.getElementById('ap-season').value = 'Continuity';
+  document.getElementById('ap-status').value = 'Live';
+  document.getElementById('ap-pallet').value = '';
+  document.getElementById('ap-msg').textContent = '';
+  apToggleNewSupplier();
+  dlg.showModal();
+}
+function apToggleNewSupplier() {
+  document.getElementById('ap-newsup').hidden = document.getElementById('ap-supplier').value !== '__new__';
+}
+async function submitAddProduct() {
+  const val = id => (document.getElementById(id).value || '').trim();
+  const numv = id => { const n = parseFloat(val(id).replace(/[^0-9.\-]/g, '')); return isFinite(n) ? n : null; };
+  const msg = document.getElementById('ap-msg');
+  const code = val('ap-code'), name = val('ap-name');
+  if (!code || !name) { msg.textContent = 'Product code and name are required.'; return; }
+  let supplier = document.getElementById('ap-supplier').value;
+  const newSup = {};
+  if (supplier === '__new__') {
+    supplier = val('ap-sup-name');
+    if (!supplier) { msg.textContent = 'Enter the new supplier name.'; return; }
+    newSup.origin = val('ap-sup-origin'); newSup.port = val('ap-sup-port');
+    newSup.contact = val('ap-sup-contact'); newSup.email = val('ap-sup-email');
+    const sn = parseInt(val('ap-sup-number'), 10); if (isFinite(sn)) newSup.number = sn;
+  }
+  const years = manualAspYears();
+  const payload = {
+    code, name, supplier,
+    season: val('ap-season') || 'No Defined Season', category: val('ap-category'),
+    status: val('ap-status') || 'Live',
+    fob: numv('ap-fob'), landed: numv('ap-landed'), asp: numv('ap-asp'), cbm: numv('ap-cbm'),
+    stock_now: numv('ap-stock') || 0, annualForecast: numv('ap-forecast') || 0,
+    fpq: numv('ap-fpq'), palletType: val('ap-pallet'), image: val('ap-image'),
+    newSupplier: newSup, years,
+  };
+  msg.textContent = 'Adding…';
+  try {
+    const r = await fetch('/api/add-product', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if (!j.ok) { msg.textContent = j.error || 'Could not add the product.'; return; }
+    document.getElementById('addprod-dialog').close();
+    document.getElementById('settings-dialog').close();
+    currentSupplier = supplier;                       // focus the (possibly new) supplier
+    try { localStorage.setItem('tp_supplier', supplier); } catch {}
+    await loadYear(YEAR);                             // reload so the SKU + supplier show up
+    setView('plan');
+    document.getElementById('save-status').textContent = `Added ${code} (${supplier.slice(0, 20)}) to ${years.join(', ')}`;
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+
 /* ---------------- per-supplier Excel form export / import ---------------- */
 async function exportSupplier(name) {
   // Always flush first so the server has the latest orders AND the current
@@ -5149,6 +5218,10 @@ async function init() {
   document.getElementById('cbm-edit-search').addEventListener('input', renderCbmEditor);
   document.getElementById('cbm-edit-manual-only').addEventListener('change', renderCbmEditor);
   document.getElementById('btn-apply-manual-cbm').addEventListener('click', applyManualCbm);
+  document.getElementById('btn-add-product').addEventListener('click', openAddProductDialog);
+  document.getElementById('ap-supplier').addEventListener('change', apToggleNewSupplier);
+  document.getElementById('ap-cancel').addEventListener('click', () => document.getElementById('addprod-dialog').close());
+  document.getElementById('ap-save').addEventListener('click', submitAddProduct);
   document.getElementById('btn-export').addEventListener('click', exportCsv);
   document.getElementById('btn-export-forecast').addEventListener('click', exportForecast);
   document.getElementById('btn-save-config').addEventListener('click', openSaveConfigDialog);
