@@ -1992,7 +1992,10 @@ function renderSummary() {
 }
 
 /* ================= Warehouse Capacity view ================= */
-let WH_WEEK = 0;   // remembers the leaderboard week across re-renders
+let WH_WEEK = 0;    // the week the leaderboards show (follows the graph hover)
+let WH_PIN = 0;     // clicked week: holds WH_WEEK against hover until clicked again
+const WH_FIND = { pal: '', still: '' };   // per-table search (code / name / supplier)
+const WH_TOP = 15;  // leaderboard length — always rendered, so the panels never resize
 // Capacity utilisation chart — same visual language as salesChart. Two lines:
 // pallets+racking and stillage, each as a % of their capacity, with a dashed 100%
 // reference. Hit columns drive the shared hover tooltip (kind='cap').
@@ -2020,6 +2023,11 @@ function capacityChart(d, opt) {
   axis += `<text class="sl-ax" x="${(W - 2).toFixed(1)}" y="${H - 4}" text-anchor="end">W${n}</text>`;
   let curLine = ''; const cw = highlightWeek();
   if (cw >= 1 && cw <= n) { const cx = x(cw - 1).toFixed(1); curLine = `<line class="sl-cur" x1="${cx}" y1="${padT}" x2="${cx}" y2="${base.toFixed(1)}"/>`; }
+  let pinLine = '';                                     // clicked (held) week
+  if (opt.pin >= 1 && opt.pin <= n) {
+    const px = x(opt.pin - 1).toFixed(1);
+    pinLine = `<line class="sl-pin" x1="${px}" y1="${padT}" x2="${px}" y2="${base.toFixed(1)}"/>`;
+  }
   const hw = W / (n - 1); let hits = '';
   for (let i = 0; i < n; i++) {
     hits += `<rect class="sl-hit" x="${(x(i) - hw / 2).toFixed(1)}" y="0" width="${hw.toFixed(1)}" height="${H}" fill="transparent"`
@@ -2027,85 +2035,223 @@ function capacityChart(d, opt) {
       + ` data-stillage="${Math.round(d.stillage[i])}" data-ruse="${(d.rackUse[i] * 100).toFixed(0)}" data-suse="${(d.stillUse[i] * 100).toFixed(0)}"></rect>`;
   }
   return `<svg class="saleschart" viewBox="0 0 ${W} ${H}">${grid}${capLine}<path class="sl-area" d="${area}"/>`
-    + `<path class="sl-line" d="${rl}"/><path class="sl-stock" d="${sl2}"/>${curLine}${axis}${hits}</svg>`;
+    + `<path class="sl-line" d="${rl}"/><path class="sl-stock" d="${sl2}"/>${curLine}${pinLine}${axis}${hits}</svg>`;
 }
-// Ranked "most space-demanding products" leaderboards for one week — pallets+racking
-// and stillages, each a horizontal bar list sorted by spaces used.
-function whSpaceLists(week) {
-  const w = week - 1;
-  const pal = [], still = [];
+// ---- product selection: each leaderboard has its own search over code / name / supplier ----
+function whHolds(sku) { return sku.fpq > 0 && !!sku.pallet_type; }   // takes warehouse space at all
+function whIsStill(sku) { return sku.pallet_type === 'Stillage'; }
+function whSide(sku) { return whIsStill(sku) ? 'still' : 'pal'; }    // pallets+racking vs stillages
+function whMatch(sku, q) {
+  if (!q) return true;
+  return (sku.code || '').toLowerCase().includes(q)
+      || (sku.name || '').toLowerCase().includes(q)
+      || (sku.supplier || '').toLowerCase().includes(q);
+}
+function whQuery(side) { return (WH_FIND[side] || '').trim().toLowerCase(); }
+function whFiltering() { return !!(whQuery('pal') || whQuery('still')); }
+// The set of SKUs the chart / cards / weekly table should cover: null = everything,
+// otherwise the products matching whichever searches are active (each search only
+// applies to its own side, so a pallet search never hides stillage lines).
+function whSelectedIds() {
+  if (!whFiltering()) return null;
+  const qp = whQuery('pal'), qs = whQuery('still');
+  const ids = new Set();
   for (const sku of M.skus) {
-    if (!(sku.fpq > 0) || !sku.pallet_type) continue;
-    const r = RES.get(sku.id); if (!r) continue;
-    const spaces = Math.ceil((r.stock[w] || 0) / sku.fpq);
-    if (spaces <= 0) continue;
-    const rec = { code: sku.code, name: sku.name || '', supplier: sku.supplier, spaces, type: sku.pallet_type };
-    (sku.pallet_type === 'Stillage' ? still : pal).push(rec);
+    if (!whHolds(sku)) continue;
+    const q = whSide(sku) === 'still' ? qs : qp;
+    if (q && whMatch(sku, q)) ids.add(sku.id);
   }
-  const list = (arr, title, cls) => {
-    arr.sort((a, b) => b.spaces - a.spaces);
-    if (!arr.length) return `<div class="wh-col"><div class="wh-col-h">${title}</div><div class="muted-note">No stock held in this week.</div></div>`;
-    const top = arr.slice(0, 15), max = top[0].spaces || 1, tot = arr.reduce((a, b) => a + b.spaces, 0);
-    const rows = top.map(r => `<div class="wh-row">`
-      + `<div class="wh-bar-wrap"><div class="wh-bar ${cls}" style="width:${(r.spaces / max * 100).toFixed(1)}%"></div>`
-      + `<span class="wh-code">${esc(r.code)}</span><span class="wh-nm" title="${esc(r.supplier)}">${esc(r.name)}</span></div>`
-      + `<span class="wh-sp"><b>${fmtU(r.spaces)}</b> ${r.type === 'Racking' ? 'rack' : 'sp'}</span></div>`).join('');
-    return `<div class="wh-col"><div class="wh-col-h">${title}<span class="wh-col-tot">${fmtU(tot)} spaces · ${arr.length} products</span></div>`
-      + rows + (arr.length > top.length ? `<div class="muted-note">+${arr.length - top.length} more</div>` : '') + `</div>`;
-  };
-  return list(pal, 'Pallets &amp; racking', 'wh-bar-pal') + list(still, 'Stillages', 'wh-bar-still');
+  return ids;
 }
-function renderWarehouse() {
-  const g = AGG.g;
+// Weekly space series for a subset (null = all). Mirrors the computeAll maths exactly,
+// so the unfiltered result equals AGG.g.
+function whSeries(ids) {
+  const pallet = zeros(), racking = zeros(), stillage = zeros();
+  let products = 0;
+  for (const sku of M.skus) {
+    if (!whHolds(sku)) continue;
+    if (ids && !ids.has(sku.id)) continue;
+    const r = RES.get(sku.id); if (!r) continue;
+    products++;
+    const tgt = sku.pallet_type === 'Stillage' ? stillage : sku.pallet_type === 'Racking' ? racking : pallet;
+    for (let w = 0; w < WEEKS; w++) tgt[w] += Math.ceil(r.stock[w] / sku.fpq);
+  }
   const cap = SETTINGS.capacities || {};
   const rackTotal = (+cap.racking_websa || 0) + (+cap.racking_express || 0) + (+cap.racking_refit || 0);
   const stillTotal = (+cap.stillage_websa || 0) + (+cap.stillage_lough || 0) + (+cap.stillage_express || 0) + (+cap.stillage_free || 0);
-  const chart = capacityChart({ rackUse: g.rackUseTotal, stillUse: g.stillUseTotal, pallet: g.pallet, racking: g.racking, stillage: g.stillage }, { h: 150 });
-  const cards = [
-    [(g.peakRack * 100).toFixed(0) + '%', 'Peak pallet/racking use (W' + g.peakRackWk + ')'],
-    [(g.peakStill * 100).toFixed(0) + '%', 'Peak stillage use (W' + g.peakStillWk + ')'],
-    [Math.round(Math.max(0, ...g.pallet)).toLocaleString(), 'Peak pallet spaces'],
-    [Math.round(Math.max(0, ...g.stillage)).toLocaleString(), 'Peak stillage spaces'],
-    [Math.round(rackTotal).toLocaleString(), 'Racking capacity'],
-    [Math.round(stillTotal).toLocaleString(), 'Stillage capacity'],
-  ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  const rackUse = pallet.map((p, w) => rackTotal > 0 ? (p + racking[w]) / rackTotal : 0);
+  const stillUse = stillage.map(v => stillTotal > 0 ? v / stillTotal : 0);
+  const peakRack = Math.max(...rackUse), peakStill = Math.max(...stillUse);
+  return { pallet, racking, stillage, rackUse, stillUse, rackTotal, stillTotal, products,
+           peakRack, peakRackWk: rackUse.indexOf(peakRack) + 1,
+           peakStill, peakStillWk: stillUse.indexOf(peakStill) + 1 };
+}
+// Ranked products for one side in one week, honouring that side's search.
+function whRank(week, side) {
+  const w = week - 1, q = whQuery(side), out = [];
+  for (const sku of M.skus) {
+    if (!whHolds(sku) || whSide(sku) !== side || !whMatch(sku, q)) continue;
+    const r = RES.get(sku.id); if (!r) continue;
+    const spaces = Math.ceil((r.stock[w] || 0) / sku.fpq);
+    if (spaces <= 0) continue;
+    out.push({ code: sku.code, name: sku.name || '', supplier: sku.supplier, spaces, type: sku.pallet_type });
+  }
+  out.sort((a, b) => b.spaces - a.spaces);
+  return out;
+}
+// Always renders WH_TOP rows (hidden filler for the remainder) plus a fixed footer line,
+// so the panels are a constant height no matter how many products a week holds.
+function whRowsHtml(arr, cls, searching) {
+  const top = arr.slice(0, WH_TOP), max = (top[0] && top[0].spaces) || 1;
+  let html = top.map(r => `<div class="wh-row">`
+    + `<div class="wh-bar-wrap"><div class="wh-bar ${cls}" style="width:${(r.spaces / max * 100).toFixed(1)}%"></div>`
+    + `<span class="wh-code">${esc(r.code)}</span><span class="wh-nm" title="${esc(r.supplier)}">${esc(r.name)}</span></div>`
+    + `<span class="wh-sp"><b>${fmtU(r.spaces)}</b> ${r.type === 'Racking' ? 'rack' : 'sp'}</span></div>`).join('');
+  if (!arr.length) html = `<div class="wh-row wh-none"><div class="muted-note">${searching ? 'Nothing matching this search holds stock in this week.' : 'No stock held in this week.'}</div></div>`;
+  const filled = arr.length ? top.length : 1;
+  for (let i = filled; i < WH_TOP; i++)
+    html += `<div class="wh-row wh-ghost"><div class="wh-bar-wrap"><span class="wh-code">&nbsp;</span></div><span class="wh-sp">&nbsp;</span></div>`;
+  const more = arr.length > top.length ? `+${arr.length - top.length} more` : '&nbsp;';
+  return html + `<div class="wh-more muted-note">${more}</div>`;
+}
+// One column shell: title + its own search box + a rows container. The shell is rendered
+// once so typing in the search survives every week change (only the rows are redrawn).
+function whColShell(side, title, ph) {
+  return `<div class="wh-col">
+    <div class="wh-col-h">${title}<span class="wh-col-tot" id="wh-tot-${side}"></span></div>
+    <div class="wh-find"><input type="search" id="wh-find-${side}" placeholder="${ph}" autocomplete="off" value="${esc(WH_FIND[side])}">
+      <button type="button" class="wh-find-x" data-side="${side}" title="Clear this search">✕</button></div>
+    <div id="wh-rows-${side}"></div>
+  </div>`;
+}
+function renderWarehouse() {
+  const cap = SETTINGS.capacities || {};
+  const g = AGG.g;
+  const combo = g.pallet.map((p, w) => p + g.racking[w] + g.stillage[w]);
+  const peakW = combo.indexOf(Math.max(...combo)) + 1;
+  const defW = (WH_WEEK >= 1 && WH_WEEK <= WEEKS) ? WH_WEEK : (highlightWeek() || peakW);
+  WH_WEEK = defW;
+  const weekOpts = Array.from({ length: WEEKS }, (_, i) =>
+    `<option value="${i + 1}"${i + 1 === defW ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
   const legend = `<div class="sum-legend">
     <span class="lg-line">Pallets &amp; racking (% of capacity)</span>
     <span class="lg-stock">Stillages (% of capacity)</span>
     <span class="lg-cap">100% capacity</span>
     ${highlightWeek() ? '<span class="lg-cur">Current week</span>' : ''}
-    <span class="lg-hint">Hover for weekly detail</span></div>`;
-  const combo = g.pallet.map((p, w) => p + g.racking[w] + g.stillage[w]);
-  const peakW = combo.indexOf(Math.max(...combo)) + 1;
-  const defW = (WH_WEEK >= 1 && WH_WEEK <= WEEKS) ? WH_WEEK : (highlightWeek() || peakW);
-  const weekOpts = Array.from({ length: WEEKS }, (_, i) =>
-    `<option value="${i + 1}"${i + 1 === defW ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
+    <span class="lg-hint">Hover to follow · click to hold a week</span></div>`;
   const main = document.getElementById('main');
   main.innerHTML = `
-    <div class="cards">${cards}</div>
+    <div class="cards" id="wh-cards"></div>
     <div class="sum-grand">
-      <div class="sum-sec-title">Warehouse space utilisation — ${YEAR}</div>
-      ${chart}
+      <div class="sum-sec-title" id="wh-chart-title">Warehouse space utilisation — ${YEAR}</div>
+      <div id="wh-banner"></div>
+      <div id="wh-chart"></div>
       ${legend}
     </div>
     <div class="wh-head">
       <h2 class="sect" style="margin:0">Most space-demanding products</h2>
+      <span class="wh-follow" id="wh-follow"></span>
       <label class="wh-wk">Week <select id="wh-week">${weekOpts}</select></label>
     </div>
-    <div id="wh-lists" class="wh-lists"></div>
-    <h2 class="sect">Weekly capacity totals — ${YEAR}</h2>
-    ${weeklyTable([
-      ['Pallet spaces', g.pallet, fmtU],
-      ['Racking spaces', g.racking, fmtU],
-      ['Stillage spaces', g.stillage, fmtU],
-      ['Pallet/racking use', g.rackUseTotal, fmtPct],
-      ['Stillage use', g.stillUseTotal, fmtPct],
-    ])}
+    <div id="wh-lists" class="wh-lists">
+      ${whColShell('pal', 'Pallets &amp; racking', 'search code / product / supplier…')}
+      ${whColShell('still', 'Stillages', 'search code / product / supplier…')}
+    </div>
+    <h2 class="sect" id="wh-table-title">Weekly capacity totals — ${YEAR}</h2>
+    <div id="wh-table"></div>
     <div style="height:30px"></div>`;
+
   const sel = document.getElementById('wh-week');
-  const draw = () => { WH_WEEK = +sel.value; document.getElementById('wh-lists').innerHTML = whSpaceLists(WH_WEEK); };
-  sel.addEventListener('change', draw);
-  draw();
+  // ---- the chart / cards / weekly table, for the current selection ----
+  const drawView = () => {
+    const ids = whSelectedIds();
+    const s = whSeries(ids);
+    document.getElementById('wh-chart').innerHTML = capacityChart(
+      { rackUse: s.rackUse, stillUse: s.stillUse, pallet: s.pallet, racking: s.racking, stillage: s.stillage },
+      { h: 150, pin: WH_PIN });
+    document.getElementById('wh-cards').innerHTML = [
+      [(s.peakRack * 100).toFixed(0) + '%', 'Peak pallet/racking use (W' + s.peakRackWk + ')'],
+      [(s.peakStill * 100).toFixed(0) + '%', 'Peak stillage use (W' + s.peakStillWk + ')'],
+      [Math.round(Math.max(0, ...s.pallet)).toLocaleString(), 'Peak pallet spaces'],
+      [Math.round(Math.max(0, ...s.stillage)).toLocaleString(), 'Peak stillage spaces'],
+      [Math.round(s.rackTotal).toLocaleString(), 'Racking capacity'],
+      [Math.round(s.stillTotal).toLocaleString(), 'Stillage capacity'],
+    ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+    const terms = ['pal', 'still'].filter(k => whQuery(k)).map(k => `“${esc(WH_FIND[k].trim())}”`);
+    document.getElementById('wh-banner').innerHTML = ids
+      ? `<div class="wh-sel">Showing <b>${s.products}</b> product${s.products === 1 ? '' : 's'} matching ${terms.join(' + ')}`
+        + ` — still measured against full warehouse capacity. <button type="button" id="wh-sel-clear">show everything</button></div>`
+      : '';
+    document.getElementById('wh-chart-title').textContent =
+      `Warehouse space utilisation — ${YEAR}${ids ? ' · selection' : ''}`;
+    document.getElementById('wh-table-title').textContent =
+      `Weekly capacity totals — ${YEAR}${ids ? ' · selection' : ''}`;
+    document.getElementById('wh-table').innerHTML = weeklyTable([
+      ['Pallet spaces', s.pallet, fmtU],
+      ['Racking spaces', s.racking, fmtU],
+      ['Stillage spaces', s.stillage, fmtU],
+      ['Pallet/racking use', s.rackUse, fmtPct],
+      ['Stillage use', s.stillUse, fmtPct],
+    ]);
+    const clr = document.getElementById('wh-sel-clear');
+    if (clr) clr.addEventListener('click', () => {
+      WH_FIND.pal = ''; WH_FIND.still = '';
+      document.getElementById('wh-find-pal').value = '';
+      document.getElementById('wh-find-still').value = '';
+      drawView(); drawRows();
+    });
+  };
+  // ---- the two leaderboards, for WH_WEEK ----
+  const drawRows = () => {
+    for (const [side, cls] of [['pal', 'wh-bar-pal'], ['still', 'wh-bar-still']]) {
+      const arr = whRank(WH_WEEK, side);
+      document.getElementById(`wh-rows-${side}`).innerHTML = whRowsHtml(arr, cls, !!whQuery(side));
+      const tot = arr.reduce((a, b) => a + b.spaces, 0);
+      document.getElementById(`wh-tot-${side}`).innerHTML =
+        `${fmtU(tot)} spaces · ${arr.length} product${arr.length === 1 ? '' : 's'}`;
+    }
+    document.getElementById('wh-follow').innerHTML = WH_PIN
+      ? `<span class="wh-pinned">📌 week ${WH_PIN} held — click it again on the graph to release</span>`
+      : 'follows the graph as you hover · click a week to hold it';
+  };
+  const setWeek = w => { if (w === WH_WEEK) return; WH_WEEK = w; sel.value = String(w); drawRows(); };
+
+  sel.addEventListener('change', () => {
+    WH_WEEK = +sel.value;
+    if (WH_PIN) { WH_PIN = WH_WEEK; drawView(); }   // keep the hold on the week now chosen
+    drawRows();
+  });
+  // Hovering the chart follows the week under the cursor; clicking holds it (click the
+  // same week again to release). Listeners sit on the wrapper so redrawing the svg
+  // (selection change / pin marker) never loses them.
+  const chartBox = document.getElementById('wh-chart');
+  const hitWeek = e => {
+    const hit = e.target.closest('.sl-hit');
+    if (!hit || hit.dataset.kind !== 'cap') return 0;
+    const w = +hit.dataset.w;
+    return (w >= 1 && w <= WEEKS) ? w : 0;
+  };
+  chartBox.addEventListener('mousemove', e => { const w = hitWeek(e); if (w && !WH_PIN) setWeek(w); });
+  chartBox.addEventListener('click', e => {
+    const w = hitWeek(e); if (!w) return;
+    WH_PIN = (WH_PIN === w) ? 0 : w;                // same week again = release
+    if (WH_PIN) setWeek(w);
+    drawView(); drawRows();
+  });
+  for (const side of ['pal', 'still']) {
+    document.getElementById(`wh-find-${side}`).addEventListener('input', e => {
+      WH_FIND[side] = e.target.value;
+      drawView(); drawRows();
+    });
+  }
+  main.querySelectorAll('.wh-find-x').forEach(b => b.addEventListener('click', () => {
+    const side = b.dataset.side;
+    WH_FIND[side] = '';
+    document.getElementById(`wh-find-${side}`).value = '';
+    drawView(); drawRows();
+  }));
+  drawView();
+  drawRows();
 }
 
 /* ---------------- seasonality apply / weather ---------------- */

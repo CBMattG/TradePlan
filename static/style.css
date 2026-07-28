@@ -539,6 +539,9 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .sl-line { fill: none; stroke: var(--accent); stroke-width: 1.7; vector-effect: non-scaling-stroke; }
 .sl-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .sl-cur { stroke: var(--spark-cur); stroke-width: 1.2; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+/* the week clicked (held) on the capacity chart */
+.sl-pin { stroke: var(--accent); stroke-width: 2; opacity: .6; vector-effect: non-scaling-stroke; }
+#wh-chart .sl-hit { cursor: pointer; }
 .sl-fc { fill: none; stroke: var(--fc-line); stroke-width: 1.4; vector-effect: non-scaling-stroke; opacity: .9; }
 .sl-stock { fill: none; stroke: var(--stock-line); stroke-width: 1.5; stroke-dasharray: 4 2.5; vector-effect: non-scaling-stroke; opacity: .9; }
 .sl-cont circle { fill: #16a085; }
@@ -563,6 +566,8 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .sum-legend .lg-cap::before { border-top: 2px dashed var(--bad); }
 .wh-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .wh-wk { font-size: 12px; color: var(--dim); font-weight: 600; }
+/* the leaderboards track the hovered week — sits between the title and the week picker */
+.wh-follow { margin-right: auto; font-size: 11px; color: var(--dim); font-style: italic; }
 .wh-wk select { margin-left: 6px; padding: 5px 8px; font: inherit; font-size: 12.5px; border-radius: var(--r-ctl, 8px);
   border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
 .wh-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
@@ -570,6 +575,23 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .wh-col { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 .wh-col-h { font-size: 12.5px; font-weight: 700; margin-bottom: 8px; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .wh-col-tot { font-weight: 500; font-size: 11px; color: var(--dim); white-space: nowrap; }
+/* per-column search (code / product / supplier) */
+.wh-find { display: flex; gap: 5px; margin-bottom: 7px; }
+.wh-find input { flex: 1; min-width: 0; padding: 4px 8px; font: inherit; font-size: 12px;
+  border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); border-radius: var(--r-ctl, 8px); }
+.wh-find input::-webkit-search-cancel-button { display: none; }
+.wh-find-x { padding: 2px 8px; font-size: 11px; line-height: 1.6; cursor: pointer; color: var(--dim);
+  border: 1px solid var(--pill-brd); background: var(--pill-bg); border-radius: var(--r-ctl, 8px); }
+.wh-find-x:hover { color: var(--text); border-color: var(--text); }
+/* filler rows keep the panel a constant height whatever the week holds */
+.wh-ghost { visibility: hidden; }
+.wh-more { font-size: 11px; margin-top: 4px; min-height: 14px; }
+.wh-pinned { font-style: normal; font-weight: 700; color: var(--accent); }
+/* selection banner above the chart */
+.wh-sel { font-size: 12px; margin: 2px 0 8px; padding: 5px 10px; border-radius: 6px;
+  background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+.wh-sel button { margin-left: 6px; font: inherit; font-size: 11.5px; font-weight: 650; cursor: pointer;
+  background: transparent; border: 1px solid var(--pill-brd); border-radius: 999px; padding: 1px 9px; color: inherit; }
 .wh-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
 .wh-bar-wrap { position: relative; flex: 1; min-width: 0; padding: 4px 9px; border-radius: 6px; overflow: hidden;
   background: var(--pill-bg); display: flex; align-items: baseline; gap: 7px; }
