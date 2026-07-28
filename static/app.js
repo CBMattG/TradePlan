@@ -24,6 +24,7 @@ let PO_SCHED_CUR = null;  // on-screen supplier: week -> PO arrival entries (raw
 let PO_POS_CUR = null;    // on-screen supplier: Map PO# -> { lines, qty } (raw, for per-product cell tooltips)
 let SETTINGS = {};
 let RES = new Map();     // sku id -> computed results
+let RESC = new Map();    // sku id -> sales value incl. proposed rebuys (only where any exist)
 let AGG = null;          // aggregates
 let skuById = new Map();
 let supByName = new Map();
@@ -539,14 +540,28 @@ function forecastDemandTotal() {
 
 function computeAll() {
   RES = new Map();
+  RESC = new Map();      // sales value WITH proposed rebuys, only for SKUs that have any
+  for (const sku of M.skus) {
+    RES.set(sku.id, computeSku(sku));
+    const prop = PROPOSED && PROPOSED.get(sku.id);
+    // combined (committed + proposed) sales is stock-dependent, so re-simulate those SKUs
+    if (prop && prop.some(v => v)) RESC.set(sku.id, computeSku(sku, combinedOrder(sku.id)).value);
+  }
+  AGG = aggregateOver(M.skus);
+  tagsInvalidate();      // condition tags are derived from these results
+}
+// Roll the per-SKU results up into the whole-plan + per-supplier aggregates. Split out of
+// computeAll so a filtered view (Summary) can re-aggregate a SUBSET from the same RES
+// without recomputing anything, and get an object of exactly the same shape.
+function aggregateOver(skus) {
   const bySup = new Map();
   const g = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(),
               fcUnits: zeros(), fcSales: zeros(), pallet: zeros(), stillage: zeros(), racking: zeros() };
   const cSales = zeros();                          // sales value with committed + proposed orders
   let propUnits = 0, propFob = 0, propCbm = 0;     // proposed-rebuy additions (purely additive)
-  for (const sku of M.skus) {
-    const r = computeSku(sku);
-    RES.set(sku.id, r);
+  for (const sku of skus) {
+    const r = RES.get(sku.id);
+    if (!r) continue;
     let s = bySup.get(sku.supplier);
     if (!s) { s = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(), fcUnits: zeros(), fcSales: zeros(), fcValue: 0, covNum: 0, covDen: 0 }; bySup.set(sku.supplier, s); }
     // forecast value (uncapped) + stocked-in coverage (committed supply vs forecast demand)
@@ -569,13 +584,13 @@ function computeAll() {
         else if (sku.pallet_type === 'Racking') g.racking[w] += sp;
       }
     }
-    // combined (committed + proposed) sales is stock-dependent, so re-simulate
-    // SKUs that have proposals; FOB/units/CBM are additive so summed directly
+    // proposed-rebuy uplift: sales come from the pre-simulated combined run (RESC),
+    // FOB/units/CBM are additive so they sum straight from the proposal row
     const prop = PROPOSED && PROPOSED.get(sku.id);
-    const hasP = prop && prop.some(v => v);
-    const rc = hasP ? computeSku(sku, combinedOrder(sku.id)) : r;
-    for (let w = 0; w < WEEKS; w++) cSales[w] += rc.value[w];
-    if (hasP) for (let w = 0; w < WEEKS; w++) {
+    const cVal = RESC && RESC.get(sku.id);
+    const src = cVal || r.value;
+    for (let w = 0; w < WEEKS; w++) cSales[w] += src[w];
+    if (cVal && prop) for (let w = 0; w < WEEKS; w++) {
       const q = prop[w] || 0;
       if (q) { propUnits += q; propFob += q * (sku.fob || 0); propCbm += q * (sku.cbm || 0); }
     }
@@ -605,7 +620,7 @@ function computeAll() {
     s.forecastValue = s.fcValue;
     s.stockedPct = s.covDen > 0 ? (s.covNum / s.covDen) * 100 : null;
   }
-  AGG = { g, bySup };
+  return { g, bySup };
 }
 
 /* ---------------- persistence ---------------- */
@@ -665,16 +680,16 @@ function fillTotals() {
 }
 
 /* ---------------- sidebar ---------------- */
-// Searching for "npd" is treated as a tag filter rather than text: it keeps the products
-// tagged NPD for the viewed year (and the suppliers that have one), since no product code
-// or name contains the word. Any other term stays a plain code/name search.
-function isNpdTerm(term) { return term === 'npd'; }
+// A search term naming a condition tag ("overstocked", "npd", "nopo"…) filters by that
+// tag rather than by text — no product code or name contains those words. Anything else
+// stays a plain code/name search, and a supplier name still matches on text.
 function skuMatchesTerm(k, term) {
-  if (isNpdTerm(term)) return isNpd(k);
+  const tag = tagTermId(term);
+  if (tag) return skuTags(k).includes(tag);
   return k.code.toLowerCase().includes(term) || (k.name || '').toLowerCase().includes(term);
 }
 function supplierMatches(sup, term) {
-  if (!isNpdTerm(term) && sup.name.toLowerCase().includes(term)) return true;
+  if (!tagTermId(term) && sup.name.toLowerCase().includes(term)) return true;
   return M.skus.some(k => k.supplier === sup.name && skuMatchesTerm(k, term));
 }
 function supTotalSales(name) {
@@ -723,6 +738,7 @@ function renderSidebar() {
   document.getElementById('sidebar-legend').innerHTML =
     `Sorted by <b>${sortLabel}</b> · <b>£ = forecast sales value</b> (demand × price, uncapped) · <b>% = stocked-in</b> (committed supply vs forecast; &lt;100% needs orders, &gt;100% overstock)`;
   document.querySelectorAll('.sortbtn').forEach(b => b.classList.toggle('active', b.dataset.sort === sortMode));
+  renderTagQuick(term);
 
   const list = document.getElementById('supplier-list');
   const withProp = suppliersWithProposed();
@@ -736,7 +752,20 @@ function renderSidebar() {
       ${warn}<span class="n" title="${esc(nm)}">${esc(nm)}</span>
       <span class="si-fc" title="Forecast sales value (uncapped)">${fmtGBPk(fc)}</span>
       <span class="si-stk ${stockedClass(pct)}" title="Stocked-in %: committed supply vs forecast demand">${pctTxt}</span></div>`;
-  }).join('') || '<div class="empty">No match</div>';
+  }).join('') || `<div class="empty">${searchEmptyNote(term)}</div>`;
+}
+// Why a search found nothing. A tag search that comes up empty is easy to mistake for a
+// broken filter, so name the tag and — for the year-scoped NPD tag — say where to look.
+function searchEmptyNote(term) {
+  const id = tagTermId(term);
+  if (!id) return 'No match';
+  const d = TAG_DEF[id];
+  let s = `No products are tagged <b>${esc(d.label)}</b> in ${YEAR}.`;
+  if (id === 'npd') {
+    s += ` NPD only shows in the plan year a product was entered for, so check the other`
+      + ` years — and note a product added for a later year isn't in this year's plan at all.`;
+  }
+  return s;
 }
 
 /* ---------------- plan view ---------------- */
@@ -847,6 +876,211 @@ function npdBadge(sku) {
   if (!isNpd(sku)) return '';
   return `<span class="badge npd" title="New Product Development — first plan year (${esc(String(sku.npd_year))}). The tag drops automatically from ${+sku.npd_year + 1}.">NPD</span>`;
 }
+/* ================= product condition tags =================
+   Derived, always-live labels ("Overstocked", "Overselling", …) computed from the plan
+   itself rather than stored on the product. Each one is a quick search term on the Plan
+   page and a chip on the product header, and every threshold is configurable in
+   Settings → Tags. Tags are recomputed whenever the plan is recalculated. */
+const TAG_DEFS = [
+  { id: 'npd', term: 'npd', label: 'NPD', sev: 'info', chip: false, params: [],
+    desc: 'Entered by hand for this plan year (drops next year).',
+    test: (s) => isNpd(s) },
+  { id: 'overstocked', term: 'overstocked', label: 'Overstocked', sev: 'warn',
+    params: [{ k: 'cover', lbl: 'weeks cover above', def: 20, step: 1 }],
+    desc: 'Holding more cover than it needs at the current week.',
+    test: (s, m, p) => m.cover != null && m.stock > 0 && m.cover > p.cover },
+  { id: 'understocked', term: 'understocked', label: 'Understocked', sev: 'warn',
+    params: [{ k: 'cover', lbl: 'weeks cover below', def: 4, step: 1 },
+             { k: 'demand', lbl: 'and remaining forecast above N units', def: 50, step: 10 }],
+    desc: 'Too little cover at the current week, with real demand still to come.',
+    test: (s, m, p) => m.cover != null && m.fcRest > p.demand && m.cover < p.cover },
+  { id: 'stockout', term: 'stockout', label: 'Stock-out', sev: 'bad',
+    params: [{ k: 'weeks', lbl: 'within the next N weeks', def: 12, step: 1 },
+             { k: 'demand', lbl: 'and remaining forecast above N units', def: 50, step: 10 }],
+    desc: 'Projects to zero stock while the forecast still expects sales.',
+    test: (s, m, p) => m.outWk > 0 && m.outWk <= SETTINGS.current_week + p.weeks && m.fcRest > p.demand },
+  { id: 'overselling', term: 'overselling', label: 'Overselling', sev: 'good',
+    params: [{ k: 'pct', lbl: 'ahead of forecast by more than %', def: 15, step: 1 },
+             { k: 'weeks', lbl: 'needs at least N weeks of actuals', def: 4, step: 1 }],
+    desc: 'Banked sales running ahead of the plan year to date.',
+    test: (s, m, p) => m.ytdWeeks >= p.weeks && m.ytdPct != null && m.ytdPct >= p.pct },
+  { id: 'underselling', term: 'underselling', label: 'Underselling', sev: 'warn',
+    params: [{ k: 'pct', lbl: 'behind forecast by more than %', def: 15, step: 1 },
+             { k: 'weeks', lbl: 'needs at least N weeks of actuals', def: 4, step: 1 }],
+    desc: 'Banked sales running behind the plan year to date.',
+    test: (s, m, p) => m.ytdWeeks >= p.weeks && m.ytdPct != null && m.ytdPct <= -p.pct },
+  { id: 'rebuy', term: 'rebuy', label: 'Rebuy pending', sev: 'info', params: [],
+    desc: 'Has proposed rebuy stock that is not committed yet.',
+    test: (s, m) => m.prop > 0.5 },
+  { id: 'nopo', term: 'nopo', alias: ['no po'], label: 'No PO', sev: 'bad', params: [],
+    desc: 'Future stock arrivals with no matching PO or container booking.',
+    test: (s, m) => m.noPo },
+  { id: 'rundown', term: 'rundown', label: 'Run-down', sev: 'warn',
+    params: [{ k: 'units', lbl: 'stock still on hand above', def: 0, step: 1 }],
+    desc: 'Not Live but still holding stock to sell through.',
+    test: (s, m, p) => (s.status === 'Not Live') && m.stock > p.units },
+  { id: 'slow', term: 'slow', label: 'Slow mover', sev: 'info',
+    params: [{ k: 'units', lbl: 'forecast units for the year below', def: 50, step: 10 }],
+    desc: 'Very low forecast demand for the whole year.',
+    test: (s, m, p) => m.fcYear < p.units },
+  { id: 'nocost', term: 'nocost', label: 'Missing cost', sev: 'info', on: false, params: [],
+    desc: 'No FOB, landed cost or selling price — figures will under-report.',
+    test: (s) => !(+s.fob > 0) || !(+s.landed > 0) || !(+s.asp > 0) },
+  { id: 'nospace', term: 'nospace', label: 'Missing space data', sev: 'info', on: false, params: [],
+    desc: 'No units-per-pallet or pallet type — invisible to Warehouse Capacity.',
+    test: (s) => !(+s.fpq > 0) || !s.pallet_type },
+];
+const TAG_DEF = Object.fromEntries(TAG_DEFS.map(d => [d.id, d]));
+// Enabled state + thresholds, from SETTINGS.tags with each definition's defaults.
+function tagCfg() {
+  const saved = (SETTINGS && SETTINGS.tags) || {};
+  const out = {};
+  for (const d of TAG_DEFS) {
+    const s = saved[d.id] || {};
+    const p = {};
+    for (const pr of d.params) p[pr.k] = Number.isFinite(+s[pr.k]) ? +s[pr.k] : pr.def;
+    out[d.id] = { on: s.on != null ? !!s.on : (d.on !== false), p };
+  }
+  return out;
+}
+let TAG_CACHE = null;                       // sku.id -> [tag id]
+function tagsInvalidate() { TAG_CACHE = null; }
+function buildTags() {
+  const cfg = tagCfg(), cur = SETTINGS.current_week, aw = cur - 1;
+  const ready = poDataReady(), sched = new Map();   // supplier -> PO schedule (built once each)
+  TAG_CACHE = new Map();
+  for (const sku of M.skus) {
+    const r = RES.get(sku.id);
+    if (!r) { TAG_CACHE.set(sku.id, []); continue; }
+    const prop = ((PROPOSED && PROPOSED.get(sku.id)) || EMPTY53);
+    const com = ORDERS[sku.id] || EMPTY53;
+    let outWk = 0;
+    for (let w = cur - 1; w < WEEKS; w++) {
+      if (r.stock[w] <= 0 && r.forecast[w] > 0) { outWk = w + 1; break; }
+    }
+    let noPo = false;
+    // the PO lookup reaches outside the plan (uploaded PO/container files) — never let a
+    // problem there take the whole tag build (and therefore the sidebar) down with it
+    try {
+      if (ready) {
+        if (!sched.has(sku.supplier)) sched.set(sku.supplier, supplierPoSchedule(sku.supplier) || {});
+        const sc = sched.get(sku.supplier) || {};
+        for (let w = cur; w <= WEEKS && !noPo; w++) {
+          if ((com[w - 1] || 0) + (prop[w - 1] || 0) > 0.5 && !(sc[w] && sc[w].length)) noPo = true;
+        }
+      }
+    } catch { noPo = false; }
+    const asp = +sku.asp || 0;
+    const actual = r.value.slice(0, Math.max(0, aw)).reduce((a, b) => a + b, 0);
+    const fcast = r.forecast.slice(0, Math.max(0, aw)).reduce((a, b) => a + b, 0) * asp;
+    const m = {
+      cover: r.cover[Math.max(0, cur - 1)],
+      stock: r.stock[Math.max(0, cur - 1)],
+      fcRest: r.forecast.slice(Math.max(0, cur - 1)).reduce((a, b) => a + b, 0),
+      fcYear: r.forecast.reduce((a, b) => a + b, 0),
+      prop: prop.reduce((a, b) => a + b, 0),
+      outWk, noPo, ytdWeeks: Math.max(0, aw),
+      ytdPct: (aw >= 1 && fcast > 0) ? ((actual - fcast) / fcast) * 100 : null,
+    };
+    const list = [];
+    for (const d of TAG_DEFS) {
+      const c = cfg[d.id];
+      if (!c.on) continue;
+      try { if (d.test(sku, m, c.p)) list.push(d.id); } catch { /* a tag never breaks a render */ }
+    }
+    TAG_CACHE.set(sku.id, list);
+  }
+}
+function skuTags(sku) {
+  if (!TAG_CACHE) buildTags();
+  return TAG_CACHE.get(sku.id) || [];
+}
+function tagCounts() {                       // whole-plan count per tag id
+  if (!TAG_CACHE) buildTags();
+  const out = {};
+  for (const d of TAG_DEFS) out[d.id] = 0;
+  for (const list of TAG_CACHE.values()) for (const id of list) out[id]++;
+  return out;
+}
+// A search term that names an enabled tag → that tag's id, else null (plain text search).
+function tagTermId(term) {
+  const t = String(term || '').trim().toLowerCase();
+  if (!t) return null;
+  const cfg = tagCfg();
+  for (const d of TAG_DEFS) {
+    if (!cfg[d.id].on) continue;
+    if (d.term === t || (d.alias || []).includes(t) || d.label.toLowerCase() === t) return d.id;
+  }
+  return null;
+}
+// Sidebar quick filters: one chip per enabled tag that actually matches something, with
+// its whole-plan count. Clicking sets the search term; clicking the active one clears it.
+// Settings → Tags: one row per tag (enable, thresholds, live count). Reads/writes the
+// live SETTINGS.tags so the counts move as thresholds are typed; Apply persists it.
+function renderTagSettings() {
+  const box = document.getElementById('tag-settings');
+  if (!box) return;
+  const cfg = tagCfg(), counts = tagCounts();
+  box.innerHTML = TAG_DEFS.map(d => {
+    const c = cfg[d.id];
+    const params = d.params.map(pr =>
+      `<label class="tsr-p">${esc(pr.lbl)}<input type="number" step="${pr.step}" data-tag="${d.id}" data-p="${pr.k}" value="${c.p[pr.k]}"></label>`).join('');
+    return `<div class="tsr${c.on ? '' : ' off'}">
+      <label class="tsr-on"><input type="checkbox" data-tag="${d.id}" data-on="1"${c.on ? ' checked' : ''}>
+        <span class="tag-chip tg-${d.sev}">${esc(d.label)}</span></label>
+      <div class="tsr-mid"><div class="tsr-desc">${esc(d.desc)}</div>
+        <div class="tsr-params">${params || '<span class="muted-note">No threshold — it either applies or it doesn\'t.</span>'}</div></div>
+      <div class="tsr-right"><code>${esc(d.term)}</code><span class="tsr-count" data-count="${d.id}">${counts[d.id]}</span></div>
+    </div>`;
+  }).join('');
+  const refresh = () => {
+    tagsInvalidate();
+    const n = tagCounts();
+    box.querySelectorAll('[data-count]').forEach(el => { el.textContent = n[el.dataset.count]; });
+    markDirty();                                  // tag settings take effect immediately
+    renderTagQuick(searchTerm.toLowerCase());     // keep the sidebar chips in step
+  };
+  const store = (id) => {
+    SETTINGS.tags = SETTINGS.tags || {};
+    SETTINGS.tags[id] = SETTINGS.tags[id] || {};
+    return SETTINGS.tags[id];
+  };
+  box.querySelectorAll('input[data-on]').forEach(cb => cb.addEventListener('change', () => {
+    store(cb.dataset.tag).on = cb.checked;
+    cb.closest('.tsr').classList.toggle('off', !cb.checked);
+    refresh();
+  }));
+  box.querySelectorAll('input[data-p]').forEach(inp => inp.addEventListener('input', () => {
+    const v = parseFloat(inp.value);
+    if (isFinite(v)) { store(inp.dataset.tag)[inp.dataset.p] = v; refresh(); }
+  }));
+}
+function renderTagQuick(term) {
+  const box = document.getElementById('tag-quick');
+  if (!box) return;
+  const cfg = tagCfg(), counts = tagCounts(), active = tagTermId(term);
+  const chips = TAG_DEFS.filter(d => cfg[d.id].on && counts[d.id] > 0).map(d =>
+    `<button type="button" class="tq-chip tg-${d.sev}${active === d.id ? ' on' : ''}" data-tag="${esc(d.term)}"`
+    + ` title="${esc(d.desc)} — ${counts[d.id]} product${counts[d.id] === 1 ? '' : 's'}. Same as typing “${esc(d.term)}”.">`
+    + `${esc(d.label)} <b>${counts[d.id]}</b></button>`).join('');
+  box.innerHTML = chips || '';
+  box.querySelectorAll('.tq-chip').forEach(b => b.addEventListener('click', () => {
+    const t = b.classList.contains('on') ? '' : b.dataset.tag;
+    searchTerm = t;
+    const inp = document.getElementById('search');
+    if (inp) inp.value = t;
+    renderSidebar();
+    if (currentView === 'plan') renderPlan();
+  }));
+}
+function tagChips(sku) {
+  const list = skuTags(sku).filter(id => TAG_DEF[id].chip !== false);
+  if (!list.length) return '';
+  return `<div class="skh-pills skh-tags">` + list.map(id => {
+    const d = TAG_DEF[id];
+    return `<span class="tag-chip tg-${d.sev}" title="${esc(d.desc)} · search “${esc(d.term)}”">${esc(d.label)}</span>`;
+  }).join('') + `</div>`;
+}
 function statusBadge(status) {
   const s = status || 'Unknown';
   const cls = s === 'Live' ? 'live' : s === 'Not Live' ? 'notlive' : 'unknown';
@@ -898,6 +1132,7 @@ function skuRowsHtml(sku, idx) {
     +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><button class="sku-details" data-sku="${esc(sku.id)}" title="Product details — edit every stored value (supplier, season, costs, packing, weekly forecast)">Details</button><span class="inf">${inf}</span></div>`
     +   `<div class="skh-pills">${statusBadge(sku.status)}${npdBadge(sku)}${aspChip(sku)}${wkAspChip(sku)}</div>`
     +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${cbmChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
+    +   tagChips(sku)
     + `</div>`
     + `<div class="skh-right">${statsHtml}${ytdHtml}</div>`
     + `</div></div></div></td></tr>`;
@@ -1131,10 +1366,13 @@ function refreshSupplierPanel() {
 }
 // Per-week order CBM for a supplier, split into committed (Committed Orders) and
 // proposed (rebuy suggestions) — feeds the grid's weekly container-fill footer.
-function supCbmByWeek(supName) {   // supName null/falsy = every supplier (whole-plan)
+// supName null/falsy = every supplier (whole-plan); ids = optional Set of sku ids to
+// restrict to (the Summary filter), null = no restriction.
+function supCbmByWeek(supName, ids) {
   const com = zeros(), prop = zeros();
   for (const sku of M.skus) {
     if ((supName && sku.supplier !== supName) || !(sku.cbm > 0)) continue;
+    if (ids && !ids.has(sku.id)) continue;
     const o = ORDERS[sku.id], p = PROPOSED && PROPOSED.get(sku.id);
     for (let w = 0; w < WEEKS; w++) {
       if (o && o[w]) com[w] += o[w] * sku.cbm;
@@ -1545,9 +1783,9 @@ function renderPlan() {
   else if (statusFilter === 'notlive') skus = skus.filter(k => k.status === 'Not Live');
   if (term) {
     const hit = skus.filter(k => skuMatchesTerm(k, term));
-    // a text search that hits nothing shows the whole supplier (as before), but an NPD
+    // a text search that hits nothing shows the whole supplier (as before), but a TAG
     // search must be able to say "this supplier has none" rather than silently show all
-    if (hit.length || isNpdTerm(term)) skus = hit;
+    if (hit.length || tagTermId(term)) skus = hit;
   }
   const meta = [
     sup.number ? `No. <b>${esc(sup.number)}</b>` : null,
@@ -1592,7 +1830,7 @@ function renderPlan() {
   skus.forEach((k, i) => body += skuRowsHtml(k, i));
   if (!skus.length) {
     const why = term
-      ? (isNpdTerm(term) ? `products tagged NPD for ${YEAR}` : `products matching “${esc(searchTerm)}”`)
+      ? (tagTermId(term) ? `products tagged “${esc(TAG_DEF[tagTermId(term)].label)}”` : `products matching “${esc(searchTerm)}”`)
       : `${statusFilter === 'live' ? 'Live' : statusFilter === 'notlive' ? 'Not Live' : 'matching'} products`;
     body = `<tr class="skuhead"><td colspan="${WEEKS + 2}"><div class="skuhead-inner" style="color:var(--dim);font-weight:400">No ${why} for this supplier.</div></td></tr>`;
   }
@@ -1888,10 +2126,80 @@ function weeklyTable(rows) {
 }
 function fmtPct(v) { return Math.abs(v) < .0005 ? '–' : (v * 100).toFixed(0) + '%'; }
 
+/* ---- Summary filters ----
+   Narrow the whole Summary to a subset of products: code, name, status, supplier,
+   category, NPD. All active criteria AND together. Because every figure is re-aggregated
+   from the same per-SKU results, a filtered Summary is the real plan for that subset —
+   cards, chart, channel split, weekly totals, quarters and supplier blocks all agree. */
+const SUM_FILT = { code: '', name: '', status: '', supplier: '', category: '', npd: false };
+function sumFiltering() {
+  return !!(SUM_FILT.code.trim() || SUM_FILT.name.trim() || SUM_FILT.status
+            || SUM_FILT.supplier || SUM_FILT.category || SUM_FILT.npd);
+}
+function sumMatches(sku) {
+  const c = SUM_FILT.code.trim().toLowerCase(), n = SUM_FILT.name.trim().toLowerCase();
+  if (c && !(sku.code || '').toLowerCase().includes(c)) return false;
+  if (n && !(sku.name || '').toLowerCase().includes(n)) return false;
+  if (SUM_FILT.status && (sku.status || '') !== SUM_FILT.status) return false;
+  if (SUM_FILT.supplier && sku.supplier !== SUM_FILT.supplier) return false;
+  if (SUM_FILT.category && (sku.category || '') !== SUM_FILT.category) return false;
+  if (SUM_FILT.npd && !isNpd(sku)) return false;
+  return true;
+}
+function sumSkus() { return sumFiltering() ? M.skus.filter(sumMatches) : M.skus; }
+function sumFilterBar() {
+  const cats = [...new Set(M.skus.map(s => s.category).filter(Boolean))].sort();
+  const sups = [...M.suppliers].map(s => s.name).sort((a, b) => a.localeCompare(b));
+  const opt = (v, lbl, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(lbl)}</option>`;
+  return `<div class="sum-filter" id="sum-filter">
+    <span class="sf-lbl">Filter</span>
+    <input type="search" id="sf-code" placeholder="product code" value="${esc(SUM_FILT.code)}" autocomplete="off">
+    <input type="search" id="sf-name" placeholder="product name" value="${esc(SUM_FILT.name)}" autocomplete="off">
+    <select id="sf-status">${opt('', 'any status', SUM_FILT.status)}${opt('Live', 'Live', SUM_FILT.status)}${opt('Not Live', 'Not Live', SUM_FILT.status)}</select>
+    <select id="sf-supplier">${opt('', 'any supplier', SUM_FILT.supplier)}${sups.map(s => opt(s, titleCase(s), SUM_FILT.supplier)).join('')}</select>
+    <select id="sf-category">${opt('', 'any category', SUM_FILT.category)}${cats.map(c => opt(c, c, SUM_FILT.category)).join('')}</select>
+    <label class="sf-npd" title="Only products tagged NPD for ${YEAR}"><input type="checkbox" id="sf-npd"${SUM_FILT.npd ? ' checked' : ''}> <b>NPD</b> only</label>
+    <button type="button" id="sf-clear"${sumFiltering() ? '' : ' disabled'}>Clear</button>
+    <span class="sf-count" id="sf-count"></span>
+  </div>`;
+}
 // Combined Summary tab: whole-plan totals + sales-shape chart at the top, then
 // per-supplier breakdowns (value split + sales chart with container markers).
+// The filter bar renders once; everything below it is redrawn on each change so typing
+// in a filter box never loses focus.
 function renderSummary() {
-  const g = AGG.g;
+  const main = document.getElementById('main');
+  main.innerHTML = sumFilterBar() + `<div id="sum-body"></div>`;
+  const draw = () => {
+    renderSummaryBody();
+    document.getElementById('sf-clear').disabled = !sumFiltering();
+  };
+  for (const [id, key] of [['sf-code', 'code'], ['sf-name', 'name']]) {
+    document.getElementById(id).addEventListener('input', e => { SUM_FILT[key] = e.target.value; draw(); });
+  }
+  for (const [id, key] of [['sf-status', 'status'], ['sf-supplier', 'supplier'], ['sf-category', 'category']]) {
+    document.getElementById(id).addEventListener('change', e => { SUM_FILT[key] = e.target.value; draw(); });
+  }
+  document.getElementById('sf-npd').addEventListener('change', e => { SUM_FILT.npd = e.target.checked; draw(); });
+  document.getElementById('sf-clear').addEventListener('click', () => {
+    SUM_FILT.code = ''; SUM_FILT.name = ''; SUM_FILT.status = '';
+    SUM_FILT.supplier = ''; SUM_FILT.category = ''; SUM_FILT.npd = false;
+    document.getElementById('sf-code').value = ''; document.getElementById('sf-name').value = '';
+    document.getElementById('sf-status').value = ''; document.getElementById('sf-supplier').value = '';
+    document.getElementById('sf-category').value = ''; document.getElementById('sf-npd').checked = false;
+    draw();
+  });
+  draw();
+}
+function renderSummaryBody() {
+  const skus = sumSkus();
+  const filtered = sumFiltering();
+  const ids = filtered ? new Set(skus.map(s => s.id)) : null;
+  const A = filtered ? aggregateOver(skus) : AGG;
+  const g = A.g;
+  document.getElementById('sf-count').innerHTML = filtered
+    ? `<b>${skus.length}</b> of ${M.skus.length} products`
+    : `all <b>${M.skus.length}</b> products`;
   const CC = SETTINGS.container_cbm || 68;
   const sum = (a, from, to) => a.slice(from, to).reduce((x, y) => x + y, 0);
   const sumAll = a => a.reduce((x, y) => x + y, 0);
@@ -1926,11 +2234,13 @@ function renderSummary() {
     [(g.peakStill * 100).toFixed(0) + '%', 'Peak stillage use (W' + g.peakStillWk + ')'],
   ].map(([v, l, s]) => `<div class="card${s ? ' card-wide' : ''}"><div class="v">${v}</div><div class="l">${l}</div>${s || ''}</div>`).join('');
 
-  // container arrivals per week (committed + proposed) for the whole plan
-  const gc = supCbmByWeek(null);
+  // container arrivals per week (committed + proposed) across the products in view
+  const gc = supCbmByWeek(null, ids);
   const gCont = gc.com.map((c, w) => (c + gc.prop[w]) / CC);
 
-  const priorYears = Object.keys(hist);
+  // Prior-year quarters are whole-plan history — there is no per-product breakdown of
+  // them — so while filtered we drop those columns rather than invite a false comparison.
+  const priorYears = filtered ? [] : Object.keys(hist);
   let qt = `<table class="flat"><thead><tr><th></th>${priorYears.map(y => `<th>${y} actual</th>`).join('')}
             <th>${YEAR} forecast</th><th>${YEAR} import FOB</th></tr></thead><tbody>`;
   ['Q1', 'Q2', 'Q3', 'Q4'].forEach((qn, i) => {
@@ -1951,7 +2261,7 @@ function renderSummary() {
   // per-supplier breakdown rows (sorted by sales, suppliers with any sales)
   const totSales = g.totSales || 1;
   const supRows = M.suppliers.map(s => {
-    const t = AGG.bySup.get(s.name);
+    const t = A.bySup.get(s.name);
     if (!t) return null;
     return { name: s.name, origin: s.origin || '', t,
              sales: sumAll(t.sales), units: sumAll(t.units), fob: sumAll(t.fob),
@@ -1959,7 +2269,7 @@ function renderSummary() {
   }).filter(r => r && r.sales > 0.5).sort((a, b) => b.sales - a.sales);
 
   const supBlocks = supRows.map((r, idx) => {
-    const cb = supCbmByWeek(r.name);
+    const cb = supCbmByWeek(r.name, ids);
     const cont = cb.com.map((c, w) => (c + cb.prop[w]) / CC);
     const metrics = [
       ['Sales', fmtGBP(r.sales)], ['Share', (100 * r.sales / totSales).toFixed(1) + '%'],
@@ -1980,16 +2290,19 @@ function renderSummary() {
       ${salesChart(r.t.sales, cont, r.t.shv, r.t.fcSales, { h: 84 })}</div>`;
   }).join('');
 
-  const main = document.getElementById('main');
-  main.innerHTML = `
+  const scope = filtered
+    ? `${skus.length} selected product${skus.length === 1 ? '' : 's'}`
+    : 'all suppliers';
+  const body = document.getElementById('sum-body');
+  body.innerHTML = `
     <div class="cards">${cards}</div>
     <div class="sum-grand">
-      <div class="sum-sec-title">Whole-year sales shape — all suppliers</div>
+      <div class="sum-sec-title">Whole-year sales shape — ${esc(scope)}</div>
       ${salesChart(g.sales, gCont, g.shv, g.fcSales, { h: 150 })}
       ${chartLegend}
     </div>
-    ${chanSummaryHtml()}
-    <h2 class="sect">Weekly totals — ${YEAR}</h2>
+    ${chanSummaryHtml(skus)}
+    <h2 class="sect">Weekly totals — ${YEAR}${filtered ? ' · selection' : ''}</h2>
     ${weeklyTable([
       ['Sales £', g.sales, fmtGBP],
       ['Forecast units', g.fcUnits, fmtU],
@@ -2006,11 +2319,13 @@ function renderSummary() {
       ['Stillage use (WEBSA)', g.stillUseWebsa, fmtPct],
       ['Stillage use (total)', g.stillUseTotal, fmtPct],
     ])}
-    <h2 class="sect">Quarterly sales vs history</h2>${qt}
-    <h2 class="sect">Supplier breakdown — ${supRows.length} suppliers by ${YEAR} sales</h2>
-    ${supBlocks}
+    <h2 class="sect">Quarterly sales${filtered ? ' — selection' : ' vs history'}</h2>
+    ${filtered ? '<p class="muted-note">Prior-year quarters are whole-plan actuals only, so they are left out while a filter is on.</p>' : ''}${qt}
+    <h2 class="sect">Supplier breakdown — ${supRows.length} supplier${supRows.length === 1 ? '' : 's'} by ${YEAR} sales${filtered ? ' (selection)' : ''}</h2>
+    ${supBlocks || `<p class="muted-note">No products match these filters.${SUM_FILT.npd
+      ? ` No products are tagged NPD in ${YEAR} — the tag only shows in the plan year a product was entered for, so try another year.` : ''}</p>`}
     <div style="height:30px"></div>`;
-  main.querySelectorAll('a[data-sup]').forEach(a => a.addEventListener('click', () => {
+  body.querySelectorAll('a[data-sup]').forEach(a => a.addEventListener('click', () => {
     currentSupplier = a.dataset.sup; savePref('tp_supplier', currentSupplier); setView('plan');
   }));
 }
@@ -2208,8 +2523,10 @@ function renderWarehouse() {
     ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
     const terms = ['pal', 'still'].filter(k => whQuery(k)).map(k => `“${esc(WH_FIND[k].trim())}”`);
     if (WH_NPD) terms.unshift(`<b>NPD ${YEAR}</b>`);
+    const npdNote = (WH_NPD && s.products === 0)
+      ? ` <span class="wh-selnote">No products are tagged NPD in ${YEAR} — the tag only shows in the plan year a product was entered for.</span>` : '';
     document.getElementById('wh-banner').innerHTML = ids
-      ? `<div class="wh-sel">Showing <b>${s.products}</b> product${s.products === 1 ? '' : 's'} matching ${terms.join(' + ')}`
+      ? `<div class="wh-sel">Showing <b>${s.products}</b> product${s.products === 1 ? '' : 's'} matching ${terms.join(' + ')}${npdNote}`
         + ` — still measured against full warehouse capacity. <button type="button" id="wh-sel-clear">show everything</button></div>`
       : '';
     document.getElementById('wh-chart-title').textContent =
@@ -2324,7 +2641,7 @@ async function applySeasonality(opts = {}) {
 }
 
 /* ---------------- settings tabs + seasonal-curve diagnostic ---------------- */
-const SETTINGS_TABS = ['forecast', 'capacity', 'cover', 'rebuy', 'supplier', 'imports', 'data', 'changelog'];
+const SETTINGS_TABS = ['forecast', 'capacity', 'tags', 'cover', 'rebuy', 'supplier', 'imports', 'data', 'changelog'];
 // Defaults mirror supplier_form.FORM_DEFAULTS (server-side). Percentages are stored
 // as fractions of order value (0.01 = 1%); the Settings inputs show them as whole %.
 const SUPPLIER_FORM_DEFAULTS = { sailing_days: 50, grace_days: 7, inland_days: 7, marketing_pct: 0.01, deposit_pct: 0.15 };
@@ -2574,6 +2891,7 @@ function openSettings() {
     document.getElementById('lc-full-cbm').value = lc.full_container_cbm;
     document.getElementById('lc-inland-rate').value = lc.inland_rate;
     document.getElementById('lc-duty-pct').value = lc.duty_pct; }
+  renderTagSettings();
   document.getElementById('iso-week-now').textContent = isoWeek(new Date());
   for (const k of Object.keys(SETTINGS.capacities)) {
     const el = document.getElementById('cap-' + k);
@@ -3907,7 +4225,11 @@ function openSkuDialog(id) {
   document.getElementById('sku-msg').textContent = '';
 
   // --- provenance / raw stored values ---
+  const myTags = skuTags(sku);
   const rows = [
+    ['Condition tags', myTags.length
+      ? myTags.map(id => `<span class="tag-chip tg-${TAG_DEF[id].sev}" title="${esc(TAG_DEF[id].desc)}">${esc(TAG_DEF[id].label)}</span>`).join(' ')
+      : 'none'],
     ['Season / category', `${esc(sku.season || '—')} · ${esc(sku.category || '—')}`],
     ['Weekly forecast', srcPill(sku.base_forecast_src || 'orig')],
     ['Cartons', nC ? srcPill(sku.cartons_src || 'manual', `${nC} box${nC > 1 ? 'es' : ''}`) : '—'],
@@ -5472,12 +5794,13 @@ function openChannelDialog(id) {
   document.getElementById('channel-title').textContent = `${sku.code} — channel split`;
   document.getElementById('channel-dialog').showModal();
 }
-// whole-plan channel table for the Summary tab (forecast plan units × ratio × price)
-function chanSummaryHtml() {
+// channel table for the Summary tab (forecast plan units × ratio × price). `skus`
+// defaults to the whole plan; the Summary passes its filtered subset.
+function chanSummaryHtml(skus) {
   if (!chanReady()) return '';
   const agg = {};
   let totU = 0, totV = 0, missing = 0;
-  for (const sku of M.skus) {
+  for (const sku of (skus || M.skus)) {
     const rows = skuChannelRows(sku);
     const r = RES.get(sku.id);
     const fcTot = r ? r.forecast.reduce((a, b) => a + b, 0) : 0;
@@ -5915,7 +6238,7 @@ async function computeYearEndStocks(year) {
   try { data = await (await fetch('/api/data?year=' + encodeURIComponent(year))).json(); }
   catch { return null; }
   if (!data || data.error || !data.master) return null;
-  const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, AGG, PROPOSED, skuById, supByName };
+  const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, RESC, AGG, PROPOSED, skuById, supByName };
   const profSnap = new Map(PROFILE_CACHE);
   try {
     YEAR = String(year);
@@ -5946,7 +6269,7 @@ async function computeYearEndStocks(year) {
   } catch { return null; }
   finally {
     YEAR = snap.YEAR; M = snap.M; ORDERS = snap.ORDERS; SETTINGS = snap.SETTINGS; MODELED = snap.MODELED;
-    CALIB = snap.CALIB; RES = snap.RES; AGG = snap.AGG; PROPOSED = snap.PROPOSED; skuById = snap.skuById; supByName = snap.supByName;
+    CALIB = snap.CALIB; RES = snap.RES; RESC = snap.RESC; AGG = snap.AGG; PROPOSED = snap.PROPOSED; skuById = snap.skuById; supByName = snap.supByName;
     PROFILE_CACHE.clear(); for (const [k, v] of profSnap) PROFILE_CACHE.set(k, v);
   }
 }
@@ -5961,7 +6284,7 @@ async function computeLyAgg(lyYear) {
   try { data = await (await fetch('/api/data?year=' + encodeURIComponent(lyYear))).json(); }
   catch { return null; }
   if (!data || data.error || !data.master) return null;
-  const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, AGG, PROPOSED, skuById, supByName };
+  const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, RESC, AGG, PROPOSED, skuById, supByName };
   const profSnap = new Map(PROFILE_CACHE);
   try {
     YEAR = String(lyYear);
@@ -5996,7 +6319,7 @@ async function computeLyAgg(lyYear) {
   } catch { return null; }
   finally {
     YEAR = snap.YEAR; M = snap.M; ORDERS = snap.ORDERS; SETTINGS = snap.SETTINGS; MODELED = snap.MODELED;
-    CALIB = snap.CALIB; RES = snap.RES; AGG = snap.AGG; PROPOSED = snap.PROPOSED; skuById = snap.skuById; supByName = snap.supByName;
+    CALIB = snap.CALIB; RES = snap.RES; RESC = snap.RESC; AGG = snap.AGG; PROPOSED = snap.PROPOSED; skuById = snap.skuById; supByName = snap.supByName;
     PROFILE_CACHE.clear(); for (const [k, v] of profSnap) PROFILE_CACHE.set(k, v);
   }
 }

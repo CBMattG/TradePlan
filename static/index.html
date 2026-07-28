@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=103">
+<link rel="stylesheet" href="style.css?v=106">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -37,7 +37,8 @@
 
 <div id="layout">
   <aside id="sidebar">
-    <input id="search" type="search" placeholder="Search supplier, SKU, or NPD..." title="Type part of a supplier name, product code or product name. Type NPD to show only this year's New Product Development lines.">
+    <input id="search" type="search" placeholder="Search supplier, SKU, or a tag..." title="Type part of a supplier name, product code or product name — or a tag name (NPD, Overstocked, Understocked, Overselling, Underselling…) to filter by condition. Configure the tags in Settings &rarr; Tags.">
+    <div id="tag-quick" title="Quick tag filters — click to search, click again to clear"></div>
     <div id="sidebar-tools">
       <div id="sidebar-legend">Sorted by <b>forecast sales 2026</b> (£ next to each supplier = its total projected sales value for the year)</div>
       <div id="sort-controls">
@@ -61,6 +62,7 @@
         <button type="button" class="stab active" data-tab="forecast">Forecast</button>
         <button type="button" class="stab" data-tab="capacity">Capacity &amp; weeks</button>
         <button type="button" class="stab" data-tab="cover">Weeks Cover</button>
+        <button type="button" class="stab" data-tab="tags">Tags</button>
         <button type="button" class="stab" data-tab="rebuy">Rebuy</button>
         <button type="button" class="stab" data-tab="supplier">Supplier forms</button>
         <button type="button" class="stab" data-tab="imports">File Imports</button>
@@ -174,6 +176,13 @@
     </div>
 
     <!-- WEEKS COVER -->
+    <!-- TAGS -->
+    <div class="stab-panel hidden" data-panel="tags">
+      <p class="ex-sub">Tags are worked out live from the plan &mdash; nothing is stored on the product. Each enabled tag becomes a <b>quick search term</b> on the Plan page (type it in the search box, or click its chip under the search), and a chip on the product's header. Set the thresholds to match how you buy; the count on the right updates as you change them.</p>
+      <div id="tag-settings"></div>
+      <p class="muted-note">Untick a tag to hide it everywhere (chip, quick filter and search). <b>Missing cost</b> and <b>Missing space data</b> start off &mdash; they are for data clean-ups rather than day-to-day buying. Changes here save and take effect immediately, without waiting for Apply.</p>
+    </div>
+
     <div class="stab-panel hidden" data-panel="cover">
       <fieldset>
         <legend>Weeks Cover colour bands</legend>
@@ -649,6 +658,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=144"></script>
+<script src="app.js?v=147"></script>
 </body>
 </html>

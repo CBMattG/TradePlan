@@ -569,6 +569,59 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .wh-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .wh-wk { font-size: 12px; color: var(--dim); font-weight: 600; }
 /* the leaderboards track the hovered week — sits between the title and the week picker */
+/* ---------- condition tags ---------- */
+.tag-chip { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .02em;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid var(--pill-brd);
+  background: var(--pill-bg); color: var(--dim); white-space: nowrap; }
+.tag-chip.tg-bad { background: #fdeceb; color: #b23b2c; border-color: #f0c3bd; }
+.tag-chip.tg-warn { background: #fdf4e3; color: #9a6b12; border-color: #ead9a6; }
+.tag-chip.tg-good { background: #e3f4e7; color: #1e7e34; border-color: #b6e0c2; }
+.tag-chip.tg-info { background: #eaf0f8; color: #4d6480; border-color: #cdd8e6; }
+[data-theme="dark"] .tag-chip.tg-bad { background: #3a1f1c; color: #f0938a; border-color: #63332d; }
+[data-theme="dark"] .tag-chip.tg-warn { background: #352c17; color: #e0b65a; border-color: #57471f; }
+[data-theme="dark"] .tag-chip.tg-good { background: #16352b; color: #6fd49a; border-color: #225a43; }
+[data-theme="dark"] .tag-chip.tg-info { background: #1e2735; color: #93a8c4; border-color: #35435a; }
+.skh-tags { margin-top: 2px; gap: 3px !important; }
+/* sidebar quick tag filters */
+#tag-quick { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 6px; }
+#tag-quick:empty { display: none; }
+.tq-chip { font: inherit; font-size: 10px; font-weight: 700; cursor: pointer; padding: 2px 7px;
+  border-radius: 999px; border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--dim); }
+.tq-chip b { font-weight: 800; opacity: .8; margin-left: 2px; }
+.tq-chip:hover { border-color: var(--text); color: var(--text); }
+.tq-chip.on { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--text); }
+/* Settings → Tags rows */
+.tsr { display: grid; grid-template-columns: 190px 1fr 120px; gap: 10px; align-items: start;
+  padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.tsr.off { opacity: .5; }
+.tsr-on { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; }
+.tsr-on input { width: auto; }
+.tsr-desc { font-size: 11.5px; color: var(--dim); }
+.tsr-params { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.tsr-p { font-size: 11px; color: var(--dim); font-weight: 600; display: inline-flex; align-items: center; gap: 5px; }
+.tsr-p input { width: 74px; padding: 3px 6px; font: inherit; font-size: 12px;
+  border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); border-radius: var(--r-ctl, 8px); }
+.tsr-right { text-align: right; font-size: 11px; color: var(--dim); }
+.tsr-right code { display: block; font-size: 11px; }
+.tsr-count { display: inline-block; margin-top: 3px; font-weight: 800; font-size: 13px; color: var(--text); }
+
+/* ---------- Summary filter bar ---------- */
+.sum-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 10px;
+  padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.sum-filter .sf-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); }
+.sum-filter input[type="search"], .sum-filter select { padding: 4px 8px; font: inherit; font-size: 12px;
+  border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); border-radius: var(--r-ctl, 8px); }
+.sum-filter input[type="search"] { width: 140px; }
+.sum-filter select { max-width: 210px; }
+.sum-filter input[type="search"]::-webkit-search-cancel-button { display: none; }
+.sf-npd { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; color: var(--dim); cursor: pointer; }
+.sf-npd b { color: #5b3fa8; letter-spacing: .03em; }
+[data-theme="dark"] .sf-npd b { color: #b9a6f0; }
+.sum-filter button { font: inherit; font-size: 11.5px; font-weight: 650; cursor: pointer; padding: 3px 10px;
+  border: 1px solid var(--pill-brd); background: var(--pill-bg); color: inherit; border-radius: 999px; }
+.sum-filter button:disabled { opacity: .45; cursor: default; }
+.sf-count { margin-left: auto; font-size: 11.5px; color: var(--dim); }
+.sf-count b { color: var(--text); }
 .wh-follow { margin-right: auto; font-size: 11px; color: var(--dim); font-style: italic; }
 .wh-npd { font-size: 12px; color: var(--dim); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .wh-npd b { color: #5b3fa8; letter-spacing: .03em; }
@@ -595,6 +648,8 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 /* selection banner above the chart */
 .wh-sel { font-size: 12px; margin: 2px 0 8px; padding: 5px 10px; border-radius: 6px;
   background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+.wh-selnote { color: #9a6b12; font-weight: 600; }
+[data-theme="dark"] .wh-selnote { color: #e0b65a; }
 .wh-sel button { margin-left: 6px; font: inherit; font-size: 11.5px; font-weight: 650; cursor: pointer;
   background: transparent; border: 1px solid var(--pill-brd); border-radius: 999px; padding: 1px 9px; color: inherit; }
 .wh-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
