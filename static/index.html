@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=101">
+<link rel="stylesheet" href="style.css?v=102">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -455,6 +455,51 @@
   </div>
 </dialog>
 
+<dialog id="sku-dialog">
+  <div class="settings-head"><h2 id="sku-dlg-title">Product details</h2></div>
+  <div id="sku-dlg-sub" class="ex-sub"></div>
+  <div class="sku-dlg-body">
+    <fieldset><legend>Identity &amp; classification</legend>
+      <div class="ap-grid" id="sku-f-id"></div>
+      <div class="muted-note" id="sku-id-note"></div>
+    </fieldset>
+    <fieldset><legend>Costs &amp; price</legend>
+      <div class="ap-grid" id="sku-f-cost"></div>
+    </fieldset>
+    <fieldset><legend>Space &amp; packing</legend>
+      <div class="ap-grid" id="sku-f-space"></div>
+      <div class="sku-space-note" id="sku-space-note"></div>
+    </fieldset>
+    <fieldset><legend>Stock &amp; measured performance</legend>
+      <div class="ap-grid" id="sku-f-stock"></div>
+      <div id="sku-stats" class="sku-stats"></div>
+    </fieldset>
+    <fieldset><legend>Weekly sales forecast <small>the planner baseline the app forecasts from</small></legend>
+      <div id="sku-fc-warn"></div>
+      <div class="sku-fc-tools">
+        <label>Annual units <input type="number" id="sku-fc-annual" step="1" min="0"></label>
+        <button type="button" id="sku-fc-season">Spread by season</button>
+        <button type="button" id="sku-fc-scale">Keep shape, scale to annual</button>
+        <button type="button" id="sku-fc-flat">Flat across the year</button>
+        <button type="button" id="sku-fc-ly">Copy last year's units</button>
+        <button type="button" id="sku-fc-reset">Undo my changes</button>
+      </div>
+      <div id="sku-fc-grid" class="sku-fc-grid"></div>
+      <div class="muted-note" id="sku-fc-note"></div>
+    </fieldset>
+    <fieldset><legend>Stored values &amp; where they came from</legend>
+      <div id="sku-f-meta" class="sku-meta"></div>
+    </fieldset>
+  </div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+    <div id="sku-years" class="asp-years"></div></div>
+  <div id="sku-msg" class="ap-msg"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="sku-cancel">Cancel</button>
+    <button type="button" id="sku-save" class="primary">Save changes</button>
+  </div>
+</dialog>
+
 <dialog id="cartons-dialog">
   <div class="settings-head"><h2>Import carton sizes</h2></div>
   <p class="ex-sub">Reads the Tradeplan workbook's <b>TIxHI</b> sheet and fills each product's carton dimensions and pack size. This feeds the item&#8209;CBM calculation, the pallet&#8209;space maths and the order pack&#8209;size warnings. Existing CBM, loading quantities and Pallet/Stillage flags are <b>left as they are</b>.</p>
@@ -602,6 +647,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=141"></script>
+<script src="app.js?v=143"></script>
 </body>
 </html>

@@ -475,6 +475,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_wksales()
         elif parsed.path == "/api/apply-wksales":
             self.apply_wksales(parse_qs(parsed.query))
+        elif parsed.path == "/api/apply-sku":
+            self.apply_sku(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-tixhi":
             self.parse_tixhi()
         elif parsed.path == "/api/apply-tixhi":
@@ -1058,6 +1060,104 @@ class Handler(SimpleHTTPRequestHandler):
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
             self.send_json({"ok": True, "code": code, "years": targets, "applied": applied})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def apply_sku(self, qs):
+        """Hand-edited product details from the per-product Details dialog. Writes only the
+        fields the client says changed into master.json for the given years, matched by
+        code. The product code and id are the keys every import matches on, so they are
+        never edited here. Fields that carry provenance are stamped 'manual' (or 'calc'
+        for a CBM that came from cartons). Optional baseForecast replaces the 53-week
+        planner forecast. Logged as one revertable changelog entry."""
+        TEXT = {"name", "supplier", "season", "category", "status", "image", "pallet_type"}
+        NUM = {"fob", "landed", "asp", "duty_rate", "cbm", "pack_size", "fpq", "stock_now"}
+        SRC = {"fob": "fob_src", "landed": "landed_src", "asp": "asp_src",
+               "cbm": "cbm_src", "fpq": "fpq_src"}
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            b = json.loads(self.rfile.read(length)) if length else {}
+            code = str(b.get("code") or "").strip()
+            if not code:
+                self.send_json({"ok": False, "error": "Missing product code."}, 400)
+                return
+            raw = b.get("fields") or {}
+            fields = {}
+            for k, v in raw.items():
+                if k in TEXT:
+                    s = str(v).strip() if v is not None else ""
+                    fields[k] = s or None
+                elif k in NUM:
+                    if v is None or v == "":
+                        fields[k] = None
+                        continue
+                    try:
+                        n = float(v)
+                    except (TypeError, ValueError):
+                        self.send_json({"ok": False, "error": f"'{k}' must be a number."}, 400)
+                        return
+                    if k in ("pack_size", "fpq", "stock_now") and n < 0:
+                        self.send_json({"ok": False, "error": f"'{k}' cannot be negative."}, 400)
+                        return
+                    fields[k] = round(n, 4)
+            if fields.get("name") is None and "name" in fields:
+                self.send_json({"ok": False, "error": "The product name can't be empty."}, 400)
+                return
+            if "supplier" in fields and not fields["supplier"]:
+                self.send_json({"ok": False, "error": "The supplier can't be empty."}, 400)
+                return
+            weekly = None
+            bf = b.get("baseForecast")
+            if isinstance(bf, list) and len(bf) == 53:
+                try:
+                    weekly = [max(0.0, round(float(v or 0), 4)) for v in bf]
+                except (TypeError, ValueError):
+                    self.send_json({"ok": False, "error": "The weekly forecast must be numbers."}, 400)
+                    return
+            if not fields and weekly is None:
+                self.send_json({"ok": False, "error": "Nothing changed."}, 400)
+                return
+            yrs, _ = years_index()
+            targets = [str(y) for y in (b.get("years") or []) if str(y) in yrs]
+            if not targets:
+                self.send_json({"ok": False, "error": "No valid target years."}, 400)
+                return
+            changed = sorted(list(fields.keys()) + (["base_forecast"] if weekly else []))
+            record_change("edit", f"Product details {code}",
+                          f"{', '.join(changed)} · {', '.join(targets)}",
+                          [f"{y}/master.json" for y in targets])
+            applied, missing = {}, []
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                n = 0
+                for s in master["skus"]:
+                    if str(s.get("code", "")).strip() != code:
+                        continue
+                    for k, v in fields.items():
+                        if k == "cbm" and v is not None and s.get("cbm") != v:
+                            s["cbm_prev"] = s.get("cbm")
+                        s[k] = v
+                        tag = SRC.get(k)
+                        if tag:
+                            s[tag] = "calc" if (k == "cbm" and str(b.get("cbmSrc")) == "calc") else "manual"
+                    if weekly is not None:
+                        s["base_forecast"] = list(weekly)
+                        s["base_forecast_src"] = "manual"
+                    n += 1
+                # a product moved to a supplier this year doesn't know about yet
+                sup = fields.get("supplier")
+                if n and sup and not any(str(x.get("name", "")).strip() == sup
+                                         for x in master.get("suppliers", [])):
+                    master.setdefault("suppliers", []).append({"name": sup})
+                if not n:
+                    missing.append(y)
+                mpath.write_text(json.dumps(master), encoding="utf-8")
+                applied[y] = n
+            self.send_json({"ok": True, "code": code, "years": targets, "applied": applied,
+                            "changed": changed, "missing": missing})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

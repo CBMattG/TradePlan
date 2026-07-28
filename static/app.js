@@ -878,7 +878,7 @@ function skuRowsHtml(sku, idx) {
   }
   let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car" title="Click to expand / collapse this product">▶</span><div class="skh-main">${img}<div class="skh-body">`
     + `<div class="skh-left">`
-    +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
+    +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><button class="sku-details" data-sku="${esc(sku.id)}" title="Product details — edit every stored value (supplier, season, costs, packing, weekly forecast)">Details</button><span class="inf">${inf}</span></div>`
     +   `<div class="skh-pills">${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}</div>`
     +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${cbmChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
     + `</div>`
@@ -1713,6 +1713,7 @@ function renderPlan() {
   const ed = document.getElementById('season-edit-link');
   if (ed) ed.addEventListener('click', openSettings);
   main.querySelectorAll('.sku-explain').forEach(b => b.addEventListener('click', () => explainSku(b.dataset.sku)));
+  main.querySelectorAll('.sku-details').forEach(b => b.addEventListener('click', () => openSkuDialog(b.dataset.sku)));
   main.querySelectorAll('.asp-chip').forEach(b => b.addEventListener('click', () => editAspInline(b.dataset.aspSku)));
   main.querySelectorAll('.cost-chip:not(.cbm-chip)').forEach(b => b.addEventListener('click', () => editCostInline(b.dataset.costSku, b.dataset.costK)));
   main.querySelectorAll('.cbm-chip').forEach(b => b.addEventListener('click', () => openCartonDialog(b.dataset.cbmSku)));
@@ -3186,8 +3187,7 @@ function applyAspToMemory(aspMap, years, src) {
   if (!years.includes(String(YEAR))) return 0;
   let n = 0;
   for (const s of M.skus) { const a = aspMap[s.code]; if (a != null && a > 0) { s.asp_prev = (+s.asp || 0); s.asp = a; s.asp_src = src; n++; } }
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
 /* ---------------- update FOB + landed costs from a "Landed Costs" export ---------- */
@@ -3312,8 +3312,7 @@ function applyLandedToMemory(fobMap, landedMap, manualSet, years) {
     if (landedMap[s.code] != null) { s.landed_prev = (+s.landed || 0); s.landed = landedMap[s.code]; s.landed_src = manualSet.has(s.code) ? 'manual' : 'upload'; touched = true; }
     if (touched) n++;
   }
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
 // Cost provenance for the FOB / Landed figures on the plan: 'upload' (from a cost file),
@@ -3395,8 +3394,7 @@ function applyBuyingToMemory(map, years) {
     if (rec.stock != null) { s.stock_now = rec.stock; touched = true; }   // live warehouse stock
     if (touched) n++;
   }
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
 
@@ -3666,8 +3664,7 @@ function applyWksalesToMemory(units, wkasp, week, dataWeek, closedThrough) {
   const dateWk = highlightWeek();
   if (dateWk) SETTINGS.current_week = Math.min(dateWk, M.data_week || dateWk);
   buildModeledForecasts();   // models anchor on this-year actuals — refresh them
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
 }
 
 // ASP provenance for a SKU: 'upload' (sales file), 'manual' (hand-edited), or 'orig'
@@ -3736,6 +3733,248 @@ async function editCostInline(id, which) {
   } catch (err) { alert('Save error: ' + err.message); return; }
   applyLandedToMemory(isFob ? { [sku.code]: v } : {}, isFob ? {} : { [sku.code]: v }, new Set([sku.code]), years);
   document.getElementById('save-status').textContent = `${isFob ? 'FOB' : 'Landed cost'} set for ${sku.code}`;
+}
+
+/* ---- keep the reader's place across a re-render ----
+   The Plan grid scrolls inside .gridwrap, so rebuilding it (any per-product save) would
+   otherwise drop the view back to the first product. Snapshot before, restore after —
+   with one animation-frame retry in case the rebuilt grid hasn't laid out yet. */
+function planScrollSnap() {
+  const gw = document.querySelector('#main.plan .gridwrap');
+  return gw ? { top: gw.scrollTop, left: gw.scrollLeft } : null;
+}
+function planScrollRestore(s) {
+  if (!s) return;
+  const put = () => {
+    const gw = document.querySelector('#main.plan .gridwrap');
+    if (gw) { gw.scrollTop = s.top; gw.scrollLeft = s.left; }
+  };
+  put();
+  requestAnimationFrame(put);
+}
+// Re-render the plan (or whichever view is open) leaving the user where they were.
+function rerenderKeepingPlace() {
+  const s = planScrollSnap();
+  renderSidebar();
+  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  planScrollRestore(s);
+}
+
+/* ================= per-product Details dialog =================
+   Everything the app stores about one product, editable in one place: identity and
+   classification (including moving it to another supplier), costs, space/packing, stock
+   and the 53-week planner forecast. Only the fields actually changed are sent, so an
+   untouched cost never gets re-stamped 'manual'. Code + id are the keys every import
+   matches on, so they are shown read-only. */
+let SKU_EDIT = null;   // { id, code, weekly:[53], weekly0:[53] }
+const SKU_SRC_LABEL = { manual: 'manual', upload: 'import', import: 'import', calc: 'from cartons', orig: 'original import' };
+function srcPill(src, extra) {
+  const s = src || 'orig';
+  const cls = s === 'manual' ? 's-manual' : s === 'calc' ? 's-calc' : s === 'orig' ? 's-orig' : 's-import';
+  return `<span class="sku-src ${cls}">${esc(SKU_SRC_LABEL[s] || s)}${extra ? ' · ' + esc(extra) : ''}</span>`;
+}
+function skuNumField(id, label, value, step, note) {
+  const v = (value == null || value === '') ? '' : value;
+  return `<label>${label} ${note || ''}<input type="number" id="sku-${id}" step="${step}" value="${v}"></label>`;
+}
+function skuSelField(id, label, value, options, note, pretty) {
+  const opts = [...new Set(options.filter(o => o !== ''))].map(o =>
+    `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${esc(pretty ? titleCase(o) : o)}</option>`).join('');
+  return `<label>${label} ${note || ''}<select id="sku-${id}">${opts}</select></label>`;
+}
+function openSkuDialog(id) {
+  const sku = skuById.get(id); if (!sku) return;
+  const r = RES.get(id) || computeSku(sku);
+  const base = (sku.base_forecast || []).slice(0, WEEKS);
+  while (base.length < WEEKS) base.push(0);
+  SKU_EDIT = { id, code: sku.code, weekly: base.map(v => +v || 0), weekly0: base.map(v => +v || 0) };
+  document.getElementById('sku-dlg-title').innerHTML = `${esc(sku.code)} <span class="sku-dlg-nm">${esc(sku.name || '')}</span>`;
+  document.getElementById('sku-dlg-sub').innerHTML =
+    `Editing the stored ${YEAR} values. Changes apply to the year(s) ticked at the bottom and are logged in History, so they can be reverted.`;
+
+  // --- identity ---
+  const sups = [...M.suppliers].map(s => s.name).sort((a, b) => a.localeCompare(b));
+  if (sku.supplier && !sups.includes(sku.supplier)) sups.unshift(sku.supplier);
+  const cats = [...new Set(M.skus.map(s => s.category).filter(Boolean))].sort();
+  document.getElementById('sku-f-id').innerHTML =
+    `<label>Product code <small>the import match key — not editable</small><input type="text" value="${esc(sku.code)}" disabled></label>`
+    + `<label>Product name<input type="text" id="sku-name" value="${esc(sku.name || '')}"></label>`
+    + skuSelField('supplier', 'Supplier', sku.supplier, sups, '<small>moves the product</small>', true)
+    + skuSelField('season', 'Season', sku.season || 'No Defined Season',
+        [sku.season || 'No Defined Season', 'Continuity', 'Summer', 'Winter', 'No Defined Season'],
+        '<small>drives the forecast shape</small>')
+    + `<label>Category<input type="text" id="sku-category" list="sku-cat-list" value="${esc(sku.category || '')}">`
+    + `<datalist id="sku-cat-list">${cats.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist></label>`
+    + skuSelField('status', 'Status', sku.status || 'Live', ['Live', 'Not Live'])
+    + `<label class="ap-wide">Image URL<input type="text" id="sku-image" value="${esc(sku.image || '')}"></label>`;
+  document.getElementById('sku-id-note').innerHTML = `Internal id <code>${esc(sku.id)}</code>`
+    + (sku.supplier ? ` · currently under <b>${esc(titleCase(sku.supplier))}</b>` : '')
+    + `. Moving a product to another supplier re-groups it in the sidebar and in every supplier export.`;
+
+  // --- costs ---
+  document.getElementById('sku-f-cost').innerHTML =
+    skuNumField('fob', 'FOB cost (USD)', sku.fob, '0.01', `<small>${srcPill(sku.fob_src)}</small>`)
+    + skuNumField('landed', 'Landed cost (GBP)', sku.landed, '0.01', `<small>${srcPill(sku.landed_src)}</small>`)
+    + skuNumField('asp', 'ASP (GBP)', sku.asp, '0.01', `<small>${srcPill(sku.asp_src)}</small>`)
+    + skuNumField('duty_rate', 'Duty rate (%)', sku.duty_rate, '0.1', `<small>${sku.duty_rate == null ? 'using the global default' : srcPill('upload')}</small>`);
+
+  // --- space ---
+  const nC = cartonList(sku).length;
+  document.getElementById('sku-f-space').innerHTML =
+    skuNumField('cbm', 'Item CBM (m³)', sku.cbm, '0.0001', `<small>${srcPill(sku.cbm_src)}</small>`)
+    + skuNumField('pack_size', 'Pack size', sku.pack_size || 1, '1', '<small>order-qty multiples</small>')
+    + skuNumField('fpq', `<span id="sku-fpq-lbl">Units per ${sku.pallet_type === 'Stillage' ? 'stillage' : 'pallet'}</span>`,
+        sku.fpq, '1', `<small>${srcPill(sku.fpq_src)}</small>`)
+    + skuSelField('pallet_type', 'Pallet type', sku.pallet_type || 'Pallet', ['Pallet', 'Stillage', 'Racking']);
+  const cm = nC ? cartonMetrics(cartonList(sku), sku.pack_size || 1) : null;
+  document.getElementById('sku-space-note').innerHTML =
+    (nC ? `<b>${nC}</b> carton${nC > 1 ? 's' : ''} on file: ${cartonList(sku).map(c => `${c.l}×${c.w}×${c.h}${c.kg ? ` @${c.kg}kg` : ''}`).join(', ')} cm`
+        + (cm ? ` → calculated CBM <b>${cm.cbm.toFixed(4)}</b>${cm.needsStillage ? ' · <b>too big for a pallet</b>' : ` · <b>${cm.volumeQty}</b>/pallet by volume${cm.hasWeight ? `, <b>${cm.effWeightQty}</b> weight-limited` : ''}`}` : '')
+        : 'No carton dimensions on file.')
+    + ` <button type="button" id="sku-cartons-btn">Edit carton sizes…</button>`
+    + `<div class="muted-note">Warehouse space uses <b>units per ${sku.pallet_type === 'Stillage' ? 'stillage' : 'pallet'}</b> above, not the CBM.</div>`;
+
+  // --- stock + measured stats ---
+  document.getElementById('sku-f-stock').innerHTML =
+    // the raw stored value, not a rounded one — else saving would silently re-write it
+    skuNumField('stock_now', 'Current stock (units)', sku.stock_now == null ? 0 : sku.stock_now, '1',
+      `<small>week ${SETTINGS.current_week} opening</small>`);
+  const cur = SETTINGS.current_week, aw = cur - 1;
+  const committed = (ORDERS[id] || EMPTY53).reduce((a, b) => a + b, 0);
+  const prop = ((PROPOSED && PROPOSED.get(id)) || EMPTY53).reduce((a, b) => a + b, 0);
+  const lyU = (sku.ly || []).reduce((a, b) => a + (b || 0), 0);
+  const ytdU = (sku.actual || []).slice(0, Math.max(0, aw)).reduce((a, b) => a + (b || 0), 0);
+  const el = estLanded(sku);
+  const stat = (l, v) => `<div class="sku-stat"><span>${l}</span><b>${v}</b></div>`;
+  document.getElementById('sku-stats').innerHTML =
+    stat('Forecast units ' + YEAR, fmtU(r.forecast.reduce((a, b) => a + b, 0)))
+    + stat('Forecast sales', fmtGBP(r.forecast.reduce((a, b) => a + b, 0) * (sku.asp || 0)))
+    + stat('Committed orders', fmtU(committed))
+    + stat('Proposed rebuy', prop ? fmtU(prop) : '—')
+    + stat('Projected closing stock', fmtU(r.stock[WEEKS - 1]))
+    + stat('Cover now', fmt1(r.cover[Math.max(0, cur - 1)]) + ' wks')
+    + stat(`Actual units to W${Math.max(0, aw)}`, aw >= 1 ? fmtU(ytdU) : '—')
+    + stat('Last-year units', lyU ? fmtU(lyU) : 'no history')
+    + stat('On purchase', sku.os_purchases != null ? fmtU(sku.os_purchases) : '—')
+    + stat('Est. landed', el ? fmtGBP(el.est) : '—');
+
+  // --- weekly forecast ---
+  const mode = seasonModeFor(YEAR);
+  document.getElementById('sku-fc-warn').innerHTML = mode === 'off' ? '' :
+    `<div class="sku-warn">${YEAR} runs the <b>${mode === 'target' ? 'Target sales' : 'Seasonality'}</b> forecast mode`
+    + (mode === 'seasonality' ? ` at <b>${(seasonStrengthFor(YEAR) * 100).toFixed(0)}%</b> strength` : '')
+    + `, so the <i>displayed</i> forecast is re-modelled from this baseline rather than shown as typed.`
+    + ` The numbers below still set the level the model anchors on — for a brand-new product they drive it entirely.`
+    + ` Set ${YEAR} to <b>Original</b> in Settings → Forecast to plan these weeks literally.</div>`;
+  document.getElementById('sku-years').innerHTML = YEARS.slice().sort().map(y =>
+    `<label class="asp-yr"><input type="checkbox" value="${y}"${y === String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
+  document.getElementById('sku-msg').textContent = '';
+
+  // --- provenance / raw stored values ---
+  const rows = [
+    ['Season / category', `${esc(sku.season || '—')} · ${esc(sku.category || '—')}`],
+    ['Weekly forecast', srcPill(sku.base_forecast_src || 'orig')],
+    ['Cartons', nC ? srcPill(sku.cartons_src || 'manual', `${nC} box${nC > 1 ? 'es' : ''}`) : '—'],
+    ['Loading basis', sku.load_basis === 'volume' ? 'carton volume' : (sku.load_basis === 'weight' ? 'weight-limited' : '—')],
+    ['Previous CBM', sku.cbm_prev != null ? (+sku.cbm_prev).toFixed(4) : '—'],
+    ['Weekly ASP (last upload)', sku.asp_wk != null ? fmtGBP(sku.asp_wk) : '—'],
+    ['Rows in this year', `${(sku.actual || []).filter(v => v).length} weeks of actuals · ${(sku.ly || []).filter(v => v).length} weeks last year`],
+  ];
+  document.getElementById('sku-f-meta').innerHTML =
+    rows.map(([k, v]) => `<div class="sku-mrow"><span>${k}</span><span>${v}</span></div>`).join('');
+
+  skuFcRender();
+  document.getElementById('sku-cartons-btn').addEventListener('click', () => {
+    document.getElementById('sku-dialog').close(); openCartonDialog(id);
+  });
+  document.getElementById('sku-pallet_type').addEventListener('change', e => {
+    const lbl = document.getElementById('sku-fpq-lbl');
+    if (lbl) lbl.textContent = `Units per ${e.target.value === 'Stillage' ? 'stillage' : 'pallet'}`;
+  });
+  document.getElementById('sku-dialog').showModal();
+}
+// 53 editable weekly cells + a live annual total
+function skuFcRender() {
+  const box = document.getElementById('sku-fc-grid');
+  box.innerHTML = SKU_EDIT.weekly.map((v, w) =>
+    `<label class="sku-fcw"><span>W${w + 1}</span><input type="number" step="0.1" min="0" data-w="${w}" value="${+(+v).toFixed(2)}"></label>`).join('');
+  box.querySelectorAll('input').forEach(inp => inp.addEventListener('input', () => {
+    SKU_EDIT.weekly[+inp.dataset.w] = Math.max(0, parseFloat(inp.value) || 0);
+    skuFcTotals();
+  }));
+  skuFcTotals(true);
+}
+function skuFcTotals(setAnnual) {
+  const tot = SKU_EDIT.weekly.reduce((a, b) => a + b, 0);
+  const was = SKU_EDIT.weekly0.reduce((a, b) => a + b, 0);
+  if (setAnnual) document.getElementById('sku-fc-annual').value = Math.round(tot);
+  const d = tot - was;
+  document.getElementById('sku-fc-note').innerHTML =
+    `Total <b>${fmtU(tot)}</b> units/year · peak <b>${fmtU(Math.max(0, ...SKU_EDIT.weekly))}</b> in W${SKU_EDIT.weekly.indexOf(Math.max(...SKU_EDIT.weekly)) + 1}`
+    + (Math.abs(d) > 0.5 ? ` · <b class="${d > 0 ? 'c-up' : 'c-down'}">${d > 0 ? '+' : '−'}${fmtU(Math.abs(d))}</b> vs the stored ${fmtU(was)}` : ' · unchanged');
+}
+function skuFcSet(arr) {
+  SKU_EDIT.weekly = arr.map(v => Math.max(0, Math.round((+v || 0) * 100) / 100));
+  skuFcRender();
+}
+function skuFcAnnual() { const n = parseFloat(document.getElementById('sku-fc-annual').value); return isFinite(n) && n >= 0 ? n : null; }
+async function submitSkuDetails() {
+  const sku = skuById.get(SKU_EDIT.id); if (!sku) return;
+  const msg = document.getElementById('sku-msg');
+  const years = [...document.querySelectorAll('#sku-years input:checked')].map(i => i.value);
+  if (!years.length) { msg.textContent = 'Pick at least one year to apply to.'; return; }
+  const txt = id => (document.getElementById('sku-' + id).value || '').trim();
+  const nOf = id => { const raw = txt(id); if (raw === '') return null; const n = parseFloat(raw); return isFinite(n) ? n : null; };
+  const fields = {};
+  const setIf = (key, val, cur) => {
+    const a = val == null ? null : (typeof val === 'number' ? +val.toFixed(4) : val);
+    const b = cur == null || cur === '' ? null : (typeof val === 'number' ? +(+cur).toFixed(4) : String(cur));
+    if (a !== b) fields[key] = a;
+  };
+  const name = txt('name');
+  if (!name) { msg.textContent = 'The product name is required.'; return; }
+  setIf('name', name, sku.name);
+  setIf('supplier', txt('supplier'), sku.supplier);
+  setIf('season', txt('season'), sku.season);
+  setIf('category', txt('category') || null, sku.category);
+  setIf('status', txt('status'), sku.status);
+  setIf('image', txt('image') || null, sku.image);
+  setIf('pallet_type', txt('pallet_type'), sku.pallet_type);
+  for (const k of ['fob', 'landed', 'asp', 'duty_rate', 'cbm', 'pack_size', 'fpq', 'stock_now']) setIf(k, nOf(k), sku[k]);
+  const wChanged = SKU_EDIT.weekly.some((v, w) => Math.abs(v - SKU_EDIT.weekly0[w]) > 0.0005);
+  if (!Object.keys(fields).length && !wChanged) { msg.textContent = 'Nothing changed yet.'; return; }
+  const payload = { code: sku.code, years, fields, baseForecast: wChanged ? SKU_EDIT.weekly : null };
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/apply-sku', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if (!j.ok) { msg.textContent = j.error || 'Save failed.'; return; }
+    applySkuToMemory(sku.code, fields, wChanged ? SKU_EDIT.weekly : null, years);
+    document.getElementById('sku-dialog').close();
+    const what = (j.changed || []).length;
+    document.getElementById('save-status').textContent =
+      `${sku.code}: ${what} field${what === 1 ? '' : 's'} updated (${years.join(', ')})`;
+    if (fields.supplier) alert(`${sku.code} moved to ${titleCase(fields.supplier)}.\n\nIt now appears under that supplier in the sidebar and in their export.`);
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+function applySkuToMemory(code, fields, weekly, years) {
+  if (!years.includes(String(YEAR))) return;
+  const moved = fields.supplier;
+  for (const s of M.skus) {
+    if (s.code !== code) continue;
+    for (const k in fields) {
+      s[k] = fields[k];
+      const tag = { fob: 'fob_src', landed: 'landed_src', asp: 'asp_src', cbm: 'cbm_src', fpq: 'fpq_src' }[k];
+      if (tag) s[tag] = 'manual';
+    }
+    if (weekly) { s.base_forecast = weekly.slice(); s.base_forecast_src = 'manual'; }
+  }
+  if (moved && !M.suppliers.some(s => s.name === moved)) M.suppliers.push({ name: moved });
+  supByName = new Map(M.suppliers.map(s => [s.name, s]));
+  SKU_PROFILE_CACHE.clear(); PROFILE_CACHE.clear();
+  buildModeledForecasts();      // season / category / baseline changes re-shape the model
+  computeAll();
+  rerenderKeepingPlace();       // stay on the product just edited, not back at the top
 }
 
 /* ---- carton dimensions → item CBM + pallet/stillage loading ----
@@ -3910,8 +4149,7 @@ function applyCartonsToMemory(code, p) {
     if (p.cbm != null) { s.cbm = p.cbm; s.cbm_src = 'calc'; }
     s.pallet_type = p.palletType; if (p.fpq != null) s.fpq = p.fpq; s.fpq_src = p.fpqSrc;
   }
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
 }
 
 /* ------------- estimated future landed cost (mirrors the old Excel "Landed Costs" calc) ------- */
@@ -4029,8 +4267,7 @@ function applyCbmToMemory(cbmMap, years) {
   if (!years.includes(String(YEAR))) return 0;
   let n = 0;
   for (const s of M.skus) { const v = cbmMap[s.code]; if (v != null && v > 0) { s.cbm_prev = (+s.cbm || 0); s.cbm = v; s.cbm_src = 'manual'; n++; } }
-  computeAll(); renderSidebar();
-  if (currentView === 'plan') renderPlan(); else setView(currentView);
+  computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
 function renderCbmEditor() {
@@ -5906,6 +6143,32 @@ async function init() {
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);
   document.getElementById('duty-cancel').addEventListener('click', () => document.getElementById('duty-dialog').close());
   document.getElementById('duty-apply').addEventListener('click', applyDutyUpdates);
+  // per-product Details dialog
+  document.getElementById('sku-cancel').addEventListener('click', () => document.getElementById('sku-dialog').close());
+  document.getElementById('sku-save').addEventListener('click', submitSkuDetails);
+  document.getElementById('sku-fc-annual').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); document.getElementById('sku-fc-scale').click(); } });
+  document.getElementById('sku-fc-season').addEventListener('click', () => {
+    const a = skuFcAnnual(); if (a == null) return;
+    const sku = skuById.get(SKU_EDIT.id);
+    skuFcSet(newProductProfile(document.getElementById('sku-season').value, document.getElementById('sku-category').value || sku.category)
+      .map(v => (a / WEEKS) * v));
+  });
+  document.getElementById('sku-fc-scale').addEventListener('click', () => {
+    const a = skuFcAnnual(); if (a == null) return;
+    const tot = SKU_EDIT.weekly.reduce((x, y) => x + y, 0);
+    skuFcSet(tot > 0 ? SKU_EDIT.weekly.map(v => v * (a / tot)) : new Array(WEEKS).fill(a / WEEKS));
+  });
+  document.getElementById('sku-fc-flat').addEventListener('click', () => {
+    const a = skuFcAnnual(); if (a == null) return;
+    skuFcSet(new Array(WEEKS).fill(a / WEEKS));
+  });
+  document.getElementById('sku-fc-ly').addEventListener('click', () => {
+    const sku = skuById.get(SKU_EDIT.id);
+    const ly = (sku.ly || []).slice(0, WEEKS);
+    if (!ly.some(v => v)) { document.getElementById('sku-msg').textContent = 'This product has no last-year sales to copy.'; return; }
+    skuFcSet(ly);
+  });
+  document.getElementById('sku-fc-reset').addEventListener('click', () => skuFcSet(SKU_EDIT.weekly0));
   document.getElementById('cartons-file').addEventListener('change', cartonsFileChosen);
   document.getElementById('cartons-cancel').addEventListener('click', () => document.getElementById('cartons-dialog').close());
   document.getElementById('cartons-apply').addEventListener('click', applyCartonsImport);
