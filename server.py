@@ -475,6 +475,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_wksales()
         elif parsed.path == "/api/apply-wksales":
             self.apply_wksales(parse_qs(parsed.query))
+        elif parsed.path == "/api/parse-tixhi":
+            self.parse_tixhi()
+        elif parsed.path == "/api/apply-tixhi":
+            self.apply_tixhi(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-duty":
             self.parse_duty()
         elif parsed.path == "/api/apply-duty":
@@ -1054,6 +1058,117 @@ class Handler(SimpleHTTPRequestHandler):
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
             self.send_json({"ok": True, "code": code, "years": targets, "applied": applied})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    # ---- bulk carton dimensions from the Tradeplan "TIxHI" sheet ----
+    @staticmethod
+    def aggregate_tixhi(raw):
+        """Read the Tradeplan 'TIxHI' sheet → per-code carton dimensions + pack size.
+
+        Columns are found by header name: Product, Pack Size, Number of Cartons,
+        Length/Width/Height (one carton, cm) and — for comparison only — Full Pallet
+        Qty and Pallet Type. A product listing N cartons is stored as N identical
+        boxes, which reproduces the workbook's own CBM for 418 of 490 products
+        (CBM = Σ L×W×H ÷ 1e6 ÷ pack size). The sheet carries no carton weights.
+        First row per code wins (the sheet repeats codes)."""
+        import io
+        import warnings
+        import openpyxl
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            ws = wb["TIxHI"] if "TIxHI" in wb.sheetnames else wb.active
+            rows = ws.iter_rows(values_only=True)
+            header = next(rows, None)
+            if not header:
+                raise ValueError("The sheet is empty.")
+
+            def find(*names):
+                want = {x.lower() for x in names}
+                return next((j for j, c in enumerate(header)
+                             if isinstance(c, str) and c.strip().lower() in want), None)
+
+            c_code, c_pack = find("product", "cmp_product"), find("pack size")
+            c_ncart, c_fpq = find("number of cartons"), find("full pallet qty")
+            c_type = find("pallet type")
+            c_l, c_w, c_h = find("length"), find("width"), find("height")
+            if c_code is None or c_l is None or c_w is None or c_h is None:
+                raise ValueError("Expected a 'TIxHI' sheet with Product and Length/Width/Height columns.")
+
+            def num(r, j):
+                if j is None or j >= len(r):
+                    return None
+                try:
+                    return float(r[j])
+                except (TypeError, ValueError):
+                    return None
+
+            out, seen = {}, 0
+            for r in rows:
+                if not r or c_code >= len(r) or not isinstance(r[c_code], str):
+                    continue
+                code = r[c_code].strip()
+                if not code or code in out:
+                    continue
+                seen += 1
+                l, w, h = num(r, c_l), num(r, c_w), num(r, c_h)
+                if not (l and w and h and l > 0 and w > 0 and h > 0):
+                    continue
+                pack = max(1, int(num(r, c_pack) or 1))
+                ncart = max(1, int(num(r, c_ncart) or 1))
+                ncart = min(ncart, 20)          # sanity cap: identical-box expansion
+                box = {"l": round(l, 2), "w": round(w, 2), "h": round(h, 2)}
+                ptype = r[c_type] if (c_type is not None and c_type < len(r)) else None
+                out[code] = {"cartons": [dict(box) for _ in range(ncart)], "pack": pack,
+                             "excelFpq": num(r, c_fpq),
+                             "excelType": ptype.strip() if isinstance(ptype, str) else None}
+            return out, seen
+
+    def parse_tixhi(self):
+        """Parse an uploaded Tradeplan workbook's TIxHI sheet — preview only, nothing written."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            cartons, count = self.aggregate_tixhi(self.rfile.read(length))
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        self.send_json({"ok": True, "cartons": cartons, "fileSkus": count})
+
+    def apply_tixhi(self, qs):
+        """Write carton dimensions + pack size into master.json for the given years,
+        matched by code. Deliberately does NOT touch cbm, fpq or pallet_type: the
+        workbook's own 'Full Pallet Qty' stays in charge of warehouse spacing until the
+        user reviews a product in the carton editor. Revertable changelog entry."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            src = body.get("cartons") or {}
+            yrs, _ = years_index()
+            targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("upload", "Carton dimensions", ", ".join(targets),
+                              [f"{y}/master.json" for y in targets])
+            applied = {}
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                n = 0
+                for s in master["skus"]:
+                    rec = src.get(s.get("code"))
+                    if not rec or not rec.get("cartons"):
+                        continue
+                    s["cartons"] = [{"l": float(c["l"]), "w": float(c["w"]), "h": float(c["h"])}
+                                    for c in rec["cartons"]
+                                    if c.get("l") and c.get("w") and c.get("h")]
+                    s["pack_size"] = max(1, int(rec.get("pack") or 1))
+                    s["cartons_src"] = "import"
+                    n += 1
+                mpath.write_text(json.dumps(master), encoding="utf-8")
+                applied[y] = n
+            self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

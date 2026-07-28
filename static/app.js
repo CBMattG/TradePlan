@@ -2295,11 +2295,12 @@ const IMPORT_DEFS = [
   { id: 'landed', label: 'Landed Costs',   input: 'landed-file',     when: () => (SETTINGS && SETTINGS.landed_updated_at) || null },
   { id: 'duty',   label: 'Duty Rates',     input: 'duty-file',       when: () => (SETTINGS && SETTINGS.duty_updated_at) || null },
   { id: 'chanidx', label: 'Channel Index', input: 'chanidx-file',   when: () => (CHANNEL_INDEX && CHANNEL_INDEX.importedAt) || null },
+  { id: 'cartons', label: 'Carton Sizes',  input: 'cartons-file',   when: () => (SETTINGS && SETTINGS.cartons_updated_at) || null },
 ];
 const IMPORT_DEF = Object.fromEntries(IMPORT_DEFS.map(d => [d.id, d]));
 const DEFAULT_IMPORT_GROUPS = [
   { name: 'Weekly',  cadence: 'weekly',  items: ['websa', 'qlik', 'buying', 'wksales'] },
-  { name: 'Monthly', cadence: 'monthly', items: ['asp', 'landed', 'duty', 'chanidx'] },
+  { name: 'Monthly', cadence: 'monthly', items: ['asp', 'landed', 'duty', 'chanidx', 'cartons'] },
 ];
 // Persisted groups (SETTINGS.import_groups), validated so every import appears exactly once.
 function importGroups() {
@@ -3317,6 +3318,98 @@ function applyDutyToMemory(map, years) {
   return n;
 }
 
+/* ---------- bulk carton dimensions from the Tradeplan workbook's "TIxHI" sheet ----------
+   Fills each product's carton sizes + pack size so the pallet-space maths, the item-CBM
+   calculation and the pack-size order warnings have real data to work from. It does
+   NOT change any product's CBM, loading qty or Pallet/Stillage flag: warehouse spacing
+   keeps using the workbook's own "Full Pallet Qty" until a product is reviewed in the
+   carton editor, where the calculated figure is shown next to the one in use. */
+let CARTONS_PARSED = null;   // { map:{code:{cartons,pack,excelFpq,excelType}}, fileSkus, fname }
+async function cartonsFileChosen(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const status = document.getElementById('cartons-status');
+  status.textContent = 'Reading ' + file.name + '… (the Tradeplan workbook is large)';
+  try {
+    const r = await fetch('/api/parse-tixhi', { method: 'POST', body: await file.arrayBuffer() });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Could not read the file: ' + (j.error || 'unknown')); return; }
+    CARTONS_PARSED = { map: j.cartons || {}, fileSkus: j.fileSkus, fname: file.name };
+    status.textContent = '';
+    openCartonsImportDialog();
+  } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
+}
+function openCartonsImportDialog() {
+  const p = CARTONS_PARSED; if (!p) return;
+  const matched = M.skus.filter(s => p.map[s.code]);
+  const P = palletDims();
+  let multi = 0, packs = 0, agree = 0, higher = 0, lower = 0, nofit = 0, noFpq = 0;
+  for (const s of matched) {
+    const rec = p.map[s.code];
+    if (rec.cartons.length > 1) multi++;
+    if (rec.pack > 1) packs++;
+    const m = cartonMetrics(rec.cartons, rec.pack);
+    const excel = +s.fpq || 0;
+    if (m.needsStillage) { nofit++; continue; }
+    if (!excel) { noFpq++; continue; }
+    const d = Math.abs(m.volumeQty - excel) / excel;
+    if (d <= 0.05) agree++; else if (m.volumeQty > excel) higher++; else lower++;
+  }
+  document.getElementById('cartons-years').innerHTML = YEARS.slice().sort().map(y =>
+    `<label class="asp-yr"><input type="checkbox" value="${y}"${y >= String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
+  document.getElementById('cartons-summary').innerHTML =
+    `<p>From <b>${esc(p.fname)}</b> (TIxHI sheet): <b>${matched.length}</b> of ${YEAR}'s ${M.skus.length} products matched (${p.fileSkus} rows read).</p>`
+    + `<p class="muted-note"><b>${multi}</b> products ship in more than one carton · <b>${packs}</b> have a pack size above 1.`
+    + ` Carton weights aren't in this sheet — add those per product when you need weight-limited loading.</p>`;
+  document.getElementById('cartons-compare').innerHTML =
+    `<div class="bc-headline">For information: calculated loading vs the workbook's Full Pallet Qty</div>`
+    + `<p class="muted-note">Against your pallet space of ${P.l}×${P.w}×${P.h} cm. <b>Nothing here is applied</b> —`
+    + ` each product keeps the Full Pallet Qty it uses today, and the carton editor shows both figures so you can switch the ones you want.</p>`
+    + `<div class="ci-grid">`
+    + `<div class="ci-cell"><b>${agree}</b><span>agree (±5%)</span></div>`
+    + `<div class="ci-cell"><b>${higher}</b><span>calculated higher</span></div>`
+    + `<div class="ci-cell"><b>${lower}</b><span>calculated lower</span></div>`
+    + `<div class="ci-cell"><b>${nofit}</b><span>wouldn't fit → Stillage</span></div>`
+    + (noFpq ? `<div class="ci-cell"><b>${noFpq}</b><span>no qty in the app</span></div>` : '')
+    + `</div>`;
+  document.getElementById('cartons-apply').disabled = matched.length === 0;
+  document.getElementById('cartons-dialog').showModal();
+}
+async function applyCartonsImport() {
+  const p = CARTONS_PARSED; if (!p) return;
+  const years = [...document.querySelectorAll('#cartons-years input:checked')].map(i => i.value);
+  if (!years.length) { alert('Pick at least one year to apply to.'); return; }
+  const status = document.getElementById('save-status'); status.textContent = 'Importing carton sizes…';
+  try {
+    const r = await fetch('/api/apply-tixhi', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cartons: p.map, years }) });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Import failed: ' + (j.error || 'unknown')); return; }
+    const n = applyCartonsImportToMemory(p.map, years);
+    SETTINGS.cartons_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
+    document.getElementById('cartons-dialog').close();
+    document.getElementById('settings-dialog').close();
+    status.textContent = `Carton sizes imported (${(j.years || []).join(', ')})`;
+    alert(`Carton sizes imported.\n\nApplied to ${(j.years || []).join(', ')}${years.includes(String(YEAR)) ? ` — ${n} products in ${YEAR}` : ''}.\n\nCBM, loading quantities and Pallet/Stillage flags are unchanged: open a product's CBM chip to compare the calculated figures and switch that product over.`);
+    CARTONS_PARSED = null;
+  } catch (err) { status.textContent = ''; alert('Import error: ' + err.message); }
+}
+function applyCartonsImportToMemory(map, years) {
+  if (!years.includes(String(YEAR))) return 0;
+  let n = 0;
+  for (const s of M.skus) {
+    const rec = map[s.code];
+    if (!rec || !rec.cartons || !rec.cartons.length) continue;
+    s.cartons = rec.cartons.map(c => ({ l: +c.l, w: +c.w, h: +c.h }));
+    s.pack_size = Math.max(1, Math.round(rec.pack || 1));
+    s.cartons_src = 'import';
+    n++;
+  }
+  if (currentView === 'plan') renderPlan(); else setView(currentView);   // chips + pack-size warnings
+  return n;
+}
+
 /* ---------- weekly actual sales upload (the "WKnn Sales" export) ----------
    File = Product SKU + Sales TY (£) + Qty TY (units) for ONE week. Applies to the
    VIEWED year only: sets each matched SKU's actual[week] (units straight from the
@@ -3621,7 +3714,21 @@ function cartonRecalc() {
   }
   const used = cartonLoadQty(m, weightLimited);
   lines += `<div class="carton-used">Used for spacing: <b>${used.toLocaleString()}</b> units/pallet <span class="carton-basis">(${weightLimited && m.hasWeight ? 'weight-limited' : 'by volume'})</span></div>`;
+  // What the warehouse graph uses RIGHT NOW. Until this product is saved from here its
+  // spacing comes from the imported "Full Pallet Qty", which may disagree with the
+  // calculation above — show both so the switch is a deliberate, informed one.
+  const sku = skuById.get(CARTON_EDIT.id);
+  const live = sku && +sku.fpq > 0 ? Math.round(sku.fpq) : null;
+  if (live && sku.fpq_src !== 'calc') {
+    const diff = used > 0 ? Math.round((used / live - 1) * 100) : 0;
+    lines += `<div class="carton-live">In use now: <b>${live.toLocaleString()}</b> units/pallet `
+      + `<span class="carton-basis">(from the ${sku.fpq_src === 'manual' ? 'manual entry' : 'Excel import'})</span>`
+      + (Math.abs(diff) >= 5 ? ` · calculated is <b>${diff > 0 ? '+' : ''}${diff}%</b>` : ` · calculated agrees`)
+      + ` <button type="button" id="carton-keep" class="carton-keeplink" title="Keep ${live.toLocaleString()} units/pallet — saves the carton sizes without changing warehouse spacing">keep ${live.toLocaleString()}</button></div>`;
+  }
   out.innerHTML = lines;
+  { const kb = document.getElementById('carton-keep');
+    if (kb) kb.addEventListener('click', () => { document.getElementById('carton-qty').value = live; }); }
   wlWrap.hidden = !m.hasWeight;
   lbl.textContent = 'Override loading qty (optional)'; wrap.hidden = false; qty.placeholder = String(used);
 }
@@ -3857,7 +3964,12 @@ function openAddProductDialog() {
   ['ap-code', 'ap-name', 'ap-fob', 'ap-landed', 'ap-asp', 'ap-cbm', 'ap-stock', 'ap-forecast', 'ap-fpq',
    'ap-image', 'ap-category', 'ap-sup-name', 'ap-sup-origin', 'ap-sup-port', 'ap-sup-contact', 'ap-sup-email',
    'ap-sup-number'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
-  document.getElementById('ap-season').value = 'Continuity';
+  // season + category stick between entries (like the supplier) — several new products
+  // for one supplier are usually the same season and category
+  const seasonSel = document.getElementById('ap-season');
+  const lastSeason = loadPref('tp_ap_season', 'Continuity');
+  seasonSel.value = [...seasonSel.options].some(o => o.value === lastSeason) ? lastSeason : 'Continuity';
+  document.getElementById('ap-category').value = loadPref('tp_ap_category', '') || '';
   document.getElementById('ap-status').value = 'Live';
   document.getElementById('ap-pallet').value = '';
   document.getElementById('ap-msg').textContent = '';
@@ -3870,9 +3982,10 @@ function apToggleNewSupplier() {
   document.getElementById('ap-newsup').hidden = document.getElementById('ap-supplier').value !== '__new__';
 }
 // ---- carton mini-editor embedded in the Add-product form (auto-fills the CBM field) ----
-let AP_CARTONS = [], AP_CBM_MANUAL = false;
+let AP_CARTONS = [], AP_CBM_MANUAL = false, AP_FPQ_MANUAL = false, AP_PALLET_MANUAL = false;
 function apCartonReset() {
-  AP_CARTONS = [{ l: '', w: '', h: '', kg: '' }]; AP_CBM_MANUAL = false;
+  AP_CARTONS = [{ l: '', w: '', h: '', kg: '' }];
+  AP_CBM_MANUAL = false; AP_FPQ_MANUAL = false; AP_PALLET_MANUAL = false;
   document.getElementById('ap-pack').value = 1;
   document.getElementById('ap-weightlimit').checked = true;
   apCartonRender();
@@ -3900,17 +4013,42 @@ function apCartonRead() {
   apCartonRecalc();
 }
 function apCartonMetrics() { return cartonMetrics(AP_CARTONS, Math.max(1, parseInt(document.getElementById('ap-pack').value, 10) || 1)); }
+// Keeps CBM, Units per pallet and Pallet type in step with the carton entries. Each of
+// the three is auto-filled until the user types in it themselves, after which their
+// value wins (the *_MANUAL flags). A product too big for a pallet flips to Stillage,
+// where no loading qty can be derived — so the field turns into a required entry.
 function apCartonRecalc() {
   const m = apCartonMetrics();
   const out = document.getElementById('ap-carton-calc');
   const weightLimited = document.getElementById('ap-weightlimit').checked;
-  if (m.cbm == null) { out.innerHTML = `<span class="muted-note">Optional — add carton sizes to auto-calculate CBM and pallet loading.</span>`; return; }
+  const fpqEl = document.getElementById('ap-fpq'), palEl = document.getElementById('ap-pallet');
+  const fpqLbl = document.getElementById('ap-fpq-lbl'), fpqNote = document.getElementById('ap-fpq-note');
+  const palNote = document.getElementById('ap-pallet-note');
+  if (m.cbm == null) {                       // no dimensions yet → nothing to derive
+    out.innerHTML = `<span class="muted-note">Optional — add carton sizes to auto-calculate CBM, pallet loading and pallet type.</span>`;
+    fpqLbl.textContent = 'Units per pallet'; fpqNote.textContent = 'optional';
+    fpqEl.classList.remove('ap-need'); palNote.textContent = '';
+    return;
+  }
   if (!AP_CBM_MANUAL) document.getElementById('ap-cbm').value = m.cbm.toFixed(4);   // auto-fill CBM (still editable)
   if (m.needsStillage) {
-    out.innerHTML = `<span class="carton-flag">⚠ Too big for a pallet → Stillage. Add it, then set the stillage qty via its CBM chip.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
+    if (!AP_PALLET_MANUAL) palEl.value = 'Stillage';
+    palNote.textContent = 'auto: too big for a pallet';
+    fpqLbl.textContent = 'Units per stillage *';
+    fpqNote.textContent = 'enter this — it can\'t be calculated';
+    fpqEl.placeholder = 'units per stillage';
+    fpqEl.classList.toggle('ap-need', !(parseFloat(fpqEl.value) > 0));
+    out.innerHTML = `<span class="carton-flag">⚠ ${m.cartons > 1 ? 'A carton is' : 'The carton is'} too big for the ${palletDims().l}×${palletDims().w}×${palletDims().h} cm pallet space → <b>Stillage</b>. Enter how many units fit on a stillage.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
     return;
   }
   const used = cartonLoadQty(m, weightLimited);
+  if (!AP_PALLET_MANUAL && palEl.value !== 'Racking') palEl.value = 'Pallet';
+  palNote.textContent = AP_PALLET_MANUAL ? '' : 'auto from cartons';
+  fpqLbl.textContent = 'Units per pallet';
+  fpqNote.textContent = AP_FPQ_MANUAL ? 'your figure — clear it to go back to auto' : 'auto from cartons — editable';
+  fpqEl.classList.remove('ap-need');
+  fpqEl.placeholder = String(used);
+  if (!AP_FPQ_MANUAL) fpqEl.value = used;
   let s = `CBM <b>${m.cbm.toFixed(4)}</b> m³ · volume <b>${m.volumeQty}</b>/pallet`;
   if (m.hasWeight) s += ` (${Math.round(m.volWeight)} kg${m.overweightPct > 0.5 ? `, <span class="carton-flag">${m.overweightPct.toFixed(0)}% over</span>` : ''}) · weight-limit <b>${m.effWeightQty}</b>/pallet`;
   s += ` · using <b>${used}</b>/pallet`;
@@ -3965,6 +4103,14 @@ async function submitAddProduct() {
   const pack = Math.max(1, parseInt(val('ap-pack'), 10) || 1);
   const weightLimited = document.getElementById('ap-weightlimit').checked;
   const cm = cartons.length ? cartonMetrics(cartons, pack) : null;
+  // a stillage line has no derivable loading qty — it must be entered on creation,
+  // exactly like the pallet figure is auto-derived for everything else
+  if (cm && cm.needsStillage && !(numv('ap-fpq') > 0)) {
+    const el = document.getElementById('ap-fpq');
+    el.classList.add('ap-need'); el.focus();
+    msg.textContent = 'This product needs a stillage — enter how many units fit on one.';
+    return;
+  }
   const cbmField = numv('ap-cbm');
   const payload = {
     code, name, supplier,
@@ -3976,7 +4122,7 @@ async function submitAddProduct() {
     // weekly split of the annual figure, shaped by the product's season (flat for continuity)
     baseForecast: apSpreadForecast(numv('ap-forecast') || 0, val('ap-season'), val('ap-category')),
     fpq: numv('ap-fpq') != null ? numv('ap-fpq') : (cm ? cartonLoadQty(cm, weightLimited) : null),
-    palletType: cm && cm.needsStillage ? 'Stillage' : (val('ap-pallet') || (cm ? 'Pallet' : '')),
+    palletType: val('ap-pallet') || (cm ? (cm.needsStillage ? 'Stillage' : 'Pallet') : ''),
     image: val('ap-image'),
     cartons, packSize: pack, loadBasis: weightLimited ? 'weight' : 'volume',
     newSupplier: newSup, years,
@@ -3990,6 +4136,8 @@ async function submitAddProduct() {
     document.getElementById('settings-dialog').close();
     currentSupplier = supplier;                       // focus the (possibly new) supplier
     try { localStorage.setItem('tp_supplier', supplier); } catch {}
+    savePref('tp_ap_season', payload.season);         // pre-fill the next entry
+    savePref('tp_ap_category', payload.category || '');
     await loadYear(YEAR);                             // reload so the SKU + supplier show up
     setView('plan');
     document.getElementById('save-status').textContent = `Added ${code} (${supplier.slice(0, 20)}) to ${years.join(', ')}`;
@@ -5612,6 +5760,9 @@ async function init() {
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);
   document.getElementById('duty-cancel').addEventListener('click', () => document.getElementById('duty-dialog').close());
   document.getElementById('duty-apply').addEventListener('click', applyDutyUpdates);
+  document.getElementById('cartons-file').addEventListener('change', cartonsFileChosen);
+  document.getElementById('cartons-cancel').addEventListener('click', () => document.getElementById('cartons-dialog').close());
+  document.getElementById('cartons-apply').addEventListener('click', applyCartonsImport);
   document.getElementById('chanidx-file').addEventListener('change', chanFileChosen);
   document.getElementById('channel-close').addEventListener('click', () => document.getElementById('channel-dialog').close());
   document.getElementById('wksales-file').addEventListener('change', wksalesFileChosen);
@@ -5638,6 +5789,15 @@ async function init() {
   document.getElementById('ap-weightlimit').addEventListener('change', apCartonRecalc);
   document.getElementById('ap-carton-add').addEventListener('click', () => { AP_CARTONS.push({ l: '', w: '', h: '', kg: '' }); apCartonRender(); });
   document.getElementById('ap-cbm').addEventListener('input', () => { AP_CBM_MANUAL = true; });   // hand-edited CBM wins
+  // same for the loading qty + pallet type: a typed value wins, blanking it hands back to auto
+  document.getElementById('ap-fpq').addEventListener('input', e => {
+    AP_FPQ_MANUAL = (e.target.value || '').trim() !== '';
+    if (!AP_FPQ_MANUAL) apCartonRecalc(); else e.target.classList.remove('ap-need');
+  });
+  document.getElementById('ap-pallet').addEventListener('change', e => {
+    AP_PALLET_MANUAL = (e.target.value || '') !== '';
+    apCartonRecalc();
+  });
   document.getElementById('carton-pack').addEventListener('input', cartonReadState);
   document.getElementById('carton-weightlimit').addEventListener('change', cartonRecalc);
   document.getElementById('carton-add').addEventListener('click', () => { CARTON_EDIT.cartons.push({ l: '', w: '', h: '', kg: '' }); cartonRenderRows(); });

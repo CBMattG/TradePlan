@@ -1318,6 +1318,9 @@ dialog fieldset { min-width: 0; }
 .ap-newsup legend { font-size: 12px; font-weight: 700; padding: 0 6px; }
 .ap-msg { font-size: 12px; color: #b23b2c; font-weight: 600; }
 .ap-fcnote { display: block; margin-top: 3px; font-size: 11px; font-weight: 600; opacity: .72; min-height: 13px; }
+/* a field the form still needs (stillage loading qty on a product too big for a pallet) */
+.ap-grid input.ap-need { border-color: #d2822c; box-shadow: 0 0 0 2px rgba(210, 130, 44, .18); }
+[data-theme="dark"] .ap-grid input.ap-need { border-color: #e8a95a; }
 /* Carton editor dialog */
 #carton-dialog { width: min(560px, 94vw); max-width: 94vw; max-height: 90vh; overflow: auto; }
 .carton-pack-lbl input { width: 90px; }
@@ -1419,6 +1422,18 @@ td.ocell input.pack-warn { background: #fdecea; box-shadow: inset 0 0 0 1.5px #e
   padding-top: 8px; margin-top: 8px; border-top: 1px solid var(--line); }
 #plan-toolbar .rb-bar-sum { font-size: 11px; color: var(--dim); }
 #plan-toolbar .rb-bar-sum b { color: var(--text); }
+/* carton-import preview: calculated loading vs the workbook's Full Pallet Qty */
+#cartons-dialog { width: min(680px, 94vw); }
+.ci-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-top: 8px; }
+.ci-cell { border: 1px solid var(--glass-brd); border-radius: var(--r-card); padding: 8px 10px; text-align: center; }
+.ci-cell b { display: block; font-size: 18px; font-weight: 750; }
+.ci-cell span { font-size: 11px; color: var(--dim); }
+/* carton editor: the loading qty the graph is using right now, next to the calculation */
+.carton-live { margin-top: 4px; font-size: 12px; color: var(--dim); }
+.carton-live b { color: var(--text); }
+.carton-keeplink { border: 1px solid var(--glass-brd); border-radius: 999px; padding: 1px 8px; margin-left: 4px;
+  font-size: 11px; font-weight: 650; cursor: pointer; background: transparent; color: inherit; }
+.carton-keeplink:hover { border-color: var(--text); }
 /* advisory only: the rebuy suggestions were built before something they depend on moved */
 #plan-toolbar .rb-stale { font-size: 11px; font-weight: 700; color: #b0761f; white-space: nowrap; }
 [data-theme="dark"] #plan-toolbar .rb-stale { color: #e8b053; }

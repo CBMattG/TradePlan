@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=97">
+<link rel="stylesheet" href="style.css?v=99">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -256,6 +256,7 @@
       <input type="file" id="duty-file" accept=".xlsx" hidden>
       <input type="file" id="wksales-file" accept=".xlsx" hidden>
       <input type="file" id="chanidx-file" accept=".xlsx" hidden>
+      <input type="file" id="cartons-file" accept=".xlsx" hidden>
       <div id="po-status" class="muted-note imp-status"></div>
       <div id="asp-status" class="muted-note imp-status"></div>
       <div id="landed-status" class="muted-note imp-status"></div>
@@ -263,6 +264,7 @@
       <div id="duty-status" class="muted-note imp-status"></div>
       <div id="wksales-status" class="muted-note imp-status"></div>
       <div id="chanidx-status" class="muted-note imp-status"></div>
+      <div id="cartons-status" class="muted-note imp-status"></div>
     </div>
 
     <!-- DATA -->
@@ -453,6 +455,19 @@
   </div>
 </dialog>
 
+<dialog id="cartons-dialog">
+  <div class="settings-head"><h2>Import carton sizes</h2></div>
+  <p class="ex-sub">Reads the Tradeplan workbook's <b>TIxHI</b> sheet and fills each product's carton dimensions and pack size. This feeds the item&#8209;CBM calculation, the pallet&#8209;space maths and the order pack&#8209;size warnings. Existing CBM, loading quantities and Pallet/Stillage flags are <b>left as they are</b>.</p>
+  <div id="cartons-summary"></div>
+  <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
+    <div id="cartons-years" class="asp-years"></div></div>
+  <div id="cartons-compare"></div>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" id="cartons-cancel">Cancel</button>
+    <button type="button" id="cartons-apply" class="primary">Import carton sizes</button>
+  </div>
+</dialog>
+
 <dialog id="export-dialog">
   <form method="dialog" id="export-form">
     <div class="settings-head"><h2>Export supplier forms</h2></div>
@@ -523,8 +538,10 @@
     <label>Current stock (units)<input type="number" id="ap-stock" step="1" min="0" placeholder="0"></label>
     <label>Annual sales forecast (units)<input type="number" id="ap-forecast" step="1" min="0" placeholder="spread over the year by season">
       <small class="ap-fcnote" id="ap-fc-note"></small></label>
-    <label>Units per pallet<input type="number" id="ap-fpq" step="1" min="0" placeholder="optional"></label>
-    <label>Pallet type<select id="ap-pallet"><option value="">—</option><option>Pallet</option><option>Stillage</option><option>Racking</option></select></label>
+    <label><span id="ap-fpq-lbl">Units per pallet</span> <small id="ap-fpq-note">auto from cartons &mdash; editable</small>
+      <input type="number" id="ap-fpq" step="1" min="0" placeholder="optional"></label>
+    <label>Pallet type <small id="ap-pallet-note">auto from cartons</small>
+      <select id="ap-pallet"><option value="">—</option><option>Pallet</option><option>Stillage</option><option>Racking</option></select></label>
     <label class="ap-wide">Image URL <small>optional</small><input type="text" id="ap-image" autocomplete="off" placeholder="https://…"></label>
   </div>
   <fieldset class="ap-newsup">
@@ -585,6 +602,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=137"></script>
+<script src="app.js?v=139"></script>
 </body>
 </html>
