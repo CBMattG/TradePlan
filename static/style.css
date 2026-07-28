@@ -268,6 +268,8 @@ body {
 .badge.live { background: #e3f4e7; color: #1e7e34; border: 1px solid #b6e0c2; }
 .badge.notlive { background: #eceff3; color: #5f7387; border: 1px solid #ccd5e0; }
 .badge.unknown { background: #fdf4e3; color: #b8860b; border: 1px solid #ead9a6; }
+/* New Product Development — shown only in the product's first plan year */
+.badge.npd { background: #ede7fb; color: #5b3fa8; border: 1px solid #c9bcec; letter-spacing: .03em; }
 .skuhead.notlive { opacity: .68; }
 .skuhead.notlive .code { color: #6b7785; }
 .c-live { color: #1e7e34; }
@@ -568,6 +570,9 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .wh-wk { font-size: 12px; color: var(--dim); font-weight: 600; }
 /* the leaderboards track the hovered week — sits between the title and the week picker */
 .wh-follow { margin-right: auto; font-size: 11px; color: var(--dim); font-style: italic; }
+.wh-npd { font-size: 12px; color: var(--dim); font-weight: 600; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.wh-npd b { color: #5b3fa8; letter-spacing: .03em; }
+[data-theme="dark"] .wh-npd b { color: #b9a6f0; }
 .wh-wk select { margin-left: 6px; padding: 5px 8px; font: inherit; font-size: 12.5px; border-radius: var(--r-ctl, 8px);
   border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
 .wh-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
@@ -955,6 +960,7 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 [data-theme="dark"] .badge.live { background: #16352b; color: #6fd49a; border-color: #225a43; }
 [data-theme="dark"] .badge.notlive { background: #202b38; color: #93a3b8; border-color: #33414f; }
 [data-theme="dark"] .badge.unknown { background: #3a2e1a; color: #e0b65a; border-color: #5c4a22; }
+[data-theme="dark"] .badge.npd { background: #2a2340; color: #b9a6f0; border-color: #453a68; }
 [data-theme="dark"] .si-stk.stk-na { color: #5f6f80; }
 [data-theme="dark"] .si-stk.stk-lo { background: #3a2220; color: #ff8b7d; }
 [data-theme="dark"] .si-stk.stk-mid { background: #3a2e1a; color: #e0b65a; }
@@ -1384,6 +1390,12 @@ dialog fieldset { min-width: 0; }
 .ap-newsup { border: 1px solid var(--glass-brd); border-radius: var(--r-card); padding: 10px 14px 12px; margin: 12px 0 4px; }
 .ap-newsup legend { font-size: 12px; font-weight: 700; padding: 0 6px; }
 .ap-msg { font-size: 12px; color: #b23b2c; font-weight: 600; }
+/* full-width tick row in the add-product grid (NPD tag) */
+.ap-check { display: flex !important; align-items: flex-start; gap: 7px; font-size: 12px; }
+.ap-check input { width: auto !important; margin-top: 2px; flex: 0 0 auto; }
+.ap-check small { display: block; color: var(--dim); font-weight: 400; }
+.ap-check b { color: #5b3fa8; }
+[data-theme="dark"] .ap-check b { color: #b9a6f0; }
 .ap-fcnote { display: block; margin-top: 3px; font-size: 11px; font-weight: 600; opacity: .72; min-height: 13px; }
 /* a field the form still needs (stillage loading qty on a product too big for a pallet) */
 .ap-grid input.ap-need { border-color: #d2822c; box-shadow: 0 0 0 2px rgba(210, 130, 44, .18); }

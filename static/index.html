@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=102">
+<link rel="stylesheet" href="style.css?v=103">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -37,7 +37,7 @@
 
 <div id="layout">
   <aside id="sidebar">
-    <input id="search" type="search" placeholder="Search supplier or SKU...">
+    <input id="search" type="search" placeholder="Search supplier, SKU, or NPD..." title="Type part of a supplier name, product code or product name. Type NPD to show only this year's New Product Development lines.">
     <div id="sidebar-tools">
       <div id="sidebar-legend">Sorted by <b>forecast sales 2026</b> (£ next to each supplier = its total projected sales value for the year)</div>
       <div id="sort-controls">
@@ -588,6 +588,8 @@
     <label>Pallet type <small id="ap-pallet-note">auto from cartons</small>
       <select id="ap-pallet"><option value="">—</option><option>Pallet</option><option>Stillage</option><option>Racking</option></select></label>
     <label class="ap-wide">Image URL <small>optional</small><input type="text" id="ap-image" autocomplete="off" placeholder="https://…"></label>
+    <label class="ap-wide ap-check"><input type="checkbox" id="ap-npd" checked>
+      <span>Tag as <b>NPD</b> (New Product Development) <small>carried for its first plan year, then dropped automatically &mdash; untick when back-filling an older product</small></span></label>
   </div>
   <fieldset class="ap-newsup">
     <legend>Cartons &amp; pack size <small>optional — fills CBM and pallet loading</small></legend>
@@ -647,6 +649,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=143"></script>
+<script src="app.js?v=144"></script>
 </body>
 </html>

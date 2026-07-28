@@ -963,6 +963,13 @@ class Handler(SimpleHTTPRequestHandler):
                 common["load_basis"] = "volume" if str(b.get("loadBasis")) == "volume" else "weight"
                 common["cbm_src"] = "calc"
                 common["fpq_src"] = "calc"
+            # New Product Development tag: carried for the plan year the product was
+            # entered for (the earliest target year) and dropped automatically from the
+            # next year on, since the client only shows it while npd_year == the year
+            # being viewed. Unticking the form's NPD box leaves it untagged (e.g. when
+            # back-filling an older product).
+            if b.get("npd"):
+                common["npd_year"] = min(targets)
             ns = b.get("newSupplier") or {}
             supplier_rec = {"name": supplier, "number": ns.get("number"),
                             "contact": ns.get("contact") or None, "port": ns.get("port") or None,
@@ -1070,7 +1077,8 @@ class Handler(SimpleHTTPRequestHandler):
         never edited here. Fields that carry provenance are stamped 'manual' (or 'calc'
         for a CBM that came from cartons). Optional baseForecast replaces the 53-week
         planner forecast. Logged as one revertable changelog entry."""
-        TEXT = {"name", "supplier", "season", "category", "status", "image", "pallet_type"}
+        TEXT = {"name", "supplier", "season", "category", "status", "image", "pallet_type",
+                "npd_year"}   # blank clears the NPD tag
         NUM = {"fob", "landed", "asp", "duty_rate", "cbm", "pack_size", "fpq", "stock_now"}
         SRC = {"fob": "fob_src", "landed": "landed_src", "asp": "asp_src",
                "cbm": "cbm_src", "fpq": "fpq_src"}

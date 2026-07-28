@@ -665,10 +665,17 @@ function fillTotals() {
 }
 
 /* ---------------- sidebar ---------------- */
+// Searching for "npd" is treated as a tag filter rather than text: it keeps the products
+// tagged NPD for the viewed year (and the suppliers that have one), since no product code
+// or name contains the word. Any other term stays a plain code/name search.
+function isNpdTerm(term) { return term === 'npd'; }
+function skuMatchesTerm(k, term) {
+  if (isNpdTerm(term)) return isNpd(k);
+  return k.code.toLowerCase().includes(term) || (k.name || '').toLowerCase().includes(term);
+}
 function supplierMatches(sup, term) {
-  if (sup.name.toLowerCase().includes(term)) return true;
-  return M.skus.some(k => k.supplier === sup.name &&
-    (k.code.toLowerCase().includes(term) || (k.name || '').toLowerCase().includes(term)));
+  if (!isNpdTerm(term) && sup.name.toLowerCase().includes(term)) return true;
+  return M.skus.some(k => k.supplier === sup.name && skuMatchesTerm(k, term));
 }
 function supTotalSales(name) {
   const t = AGG.bySup.get(name);
@@ -830,6 +837,16 @@ function poRowHtml(supName) {
   return `<tr class="po-row"><td class="lbl">PO <span class="po-row-note">/ container</span></td>${cells}<td class="tot">${poCount || ''}</td></tr>`;
 }
 
+/* ---- NPD (New Product Development) tag ----
+   A manually-entered product stores `npd_year` = the plan year it was entered for. The
+   tag shows only while that year is the one being viewed, so a line added for 2027
+   carries NPD across the whole 2027 plan and drops it as soon as you open 2028 — no
+   dating logic or clean-up run needed. Clearing npd_year (Details dialog) removes it. */
+function isNpd(sku) { return !!sku.npd_year && String(sku.npd_year) === String(YEAR); }
+function npdBadge(sku) {
+  if (!isNpd(sku)) return '';
+  return `<span class="badge npd" title="New Product Development — first plan year (${esc(String(sku.npd_year))}). The tag drops automatically from ${+sku.npd_year + 1}.">NPD</span>`;
+}
 function statusBadge(status) {
   const s = status || 'Unknown';
   const cls = s === 'Live' ? 'live' : s === 'Not Live' ? 'notlive' : 'unknown';
@@ -879,7 +896,7 @@ function skuRowsHtml(sku, idx) {
   let h = `<tr class="${headCls}" data-acc="${esc(sku.id)}"><td colspan="${WEEKS + 2}"><div class="skuhead-inner"><span class="acc-car" title="Click to expand / collapse this product">▶</span><div class="skh-main">${img}<div class="skh-body">`
     + `<div class="skh-left">`
     +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><button class="sku-details" data-sku="${esc(sku.id)}" title="Product details — edit every stored value (supplier, season, costs, packing, weekly forecast)">Details</button><span class="inf">${inf}</span></div>`
-    +   `<div class="skh-pills">${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}</div>`
+    +   `<div class="skh-pills">${statusBadge(sku.status)}${npdBadge(sku)}${aspChip(sku)}${wkAspChip(sku)}</div>`
     +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${cbmChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
     + `</div>`
     + `<div class="skh-right">${statsHtml}${ytdHtml}</div>`
@@ -1527,8 +1544,10 @@ function renderPlan() {
   if (statusFilter === 'live') skus = skus.filter(k => k.status === 'Live');
   else if (statusFilter === 'notlive') skus = skus.filter(k => k.status === 'Not Live');
   if (term) {
-    const hit = skus.filter(k => k.code.toLowerCase().includes(term) || (k.name || '').toLowerCase().includes(term));
-    if (hit.length) skus = hit;
+    const hit = skus.filter(k => skuMatchesTerm(k, term));
+    // a text search that hits nothing shows the whole supplier (as before), but an NPD
+    // search must be able to say "this supplier has none" rather than silently show all
+    if (hit.length || isNpdTerm(term)) skus = hit;
   }
   const meta = [
     sup.number ? `No. <b>${esc(sup.number)}</b>` : null,
@@ -1571,8 +1590,12 @@ function renderPlan() {
   const scopeProd = rebuyScope === 'sup' ? supProd : gt.skuCount;
   let body = '';
   skus.forEach((k, i) => body += skuRowsHtml(k, i));
-  if (!skus.length)
-    body = `<tr class="skuhead"><td colspan="${WEEKS + 2}"><div class="skuhead-inner" style="color:var(--dim);font-weight:400">No ${statusFilter === 'live' ? 'Live' : statusFilter === 'notlive' ? 'Not Live' : 'matching'} products for this supplier.</div></td></tr>`;
+  if (!skus.length) {
+    const why = term
+      ? (isNpdTerm(term) ? `products tagged NPD for ${YEAR}` : `products matching “${esc(searchTerm)}”`)
+      : `${statusFilter === 'live' ? 'Live' : statusFilter === 'notlive' ? 'Not Live' : 'matching'} products`;
+    body = `<tr class="skuhead"><td colspan="${WEEKS + 2}"><div class="skuhead-inner" style="color:var(--dim);font-weight:400">No ${why} for this supplier.</div></td></tr>`;
+  }
 
   const se = SEASON();
   const mode = seasonModeFor(YEAR);
@@ -1996,6 +2019,7 @@ function renderSummary() {
 let WH_WEEK = 0;    // the week the leaderboards show (follows the graph hover)
 let WH_PIN = 0;     // clicked week: holds WH_WEEK against hover until clicked again
 const WH_FIND = { pal: '', still: '' };   // per-table search (code / name / supplier)
+let WH_NPD = false;                       // narrow both tables + the chart to NPD lines
 const WH_TOP = 15;  // leaderboard length — always rendered, so the panels never resize
 // Capacity utilisation chart — same visual language as salesChart. Two lines:
 // pallets+racking and stillage, each as a % of their capacity, with a dashed 100%
@@ -2049,7 +2073,9 @@ function whMatch(sku, q) {
       || (sku.supplier || '').toLowerCase().includes(q);
 }
 function whQuery(side) { return (WH_FIND[side] || '').trim().toLowerCase(); }
-function whFiltering() { return !!(whQuery('pal') || whQuery('still')); }
+function whFiltering() { return !!(whQuery('pal') || whQuery('still') || WH_NPD); }
+// the NPD toggle applies to both sides and combines with each side's text search
+function whPass(sku, q) { return (!WH_NPD || isNpd(sku)) && whMatch(sku, q); }
 // The set of SKUs the chart / cards / weekly table should cover: null = everything,
 // otherwise the products matching whichever searches are active (each search only
 // applies to its own side, so a pallet search never hides stillage lines).
@@ -2060,7 +2086,8 @@ function whSelectedIds() {
   for (const sku of M.skus) {
     if (!whHolds(sku)) continue;
     const q = whSide(sku) === 'still' ? qs : qp;
-    if (q && whMatch(sku, q)) ids.add(sku.id);
+    // with only the NPD toggle on, both sides are in scope; a side's text search narrows it
+    if ((q || WH_NPD) && whPass(sku, q)) ids.add(sku.id);
   }
   return ids;
 }
@@ -2091,7 +2118,7 @@ function whSeries(ids) {
 function whRank(week, side) {
   const w = week - 1, q = whQuery(side), out = [];
   for (const sku of M.skus) {
-    if (!whHolds(sku) || whSide(sku) !== side || !whMatch(sku, q)) continue;
+    if (!whHolds(sku) || whSide(sku) !== side || !whPass(sku, q)) continue;
     const r = RES.get(sku.id); if (!r) continue;
     const spaces = Math.ceil((r.stock[w] || 0) / sku.fpq);
     if (spaces <= 0) continue;
@@ -2152,6 +2179,7 @@ function renderWarehouse() {
     <div class="wh-head">
       <h2 class="sect" style="margin:0">Most space-demanding products</h2>
       <span class="wh-follow" id="wh-follow"></span>
+      <label class="wh-npd" title="Show only products tagged NPD for ${YEAR}"><input type="checkbox" id="wh-npd"${WH_NPD ? ' checked' : ''}> <b>NPD</b> only</label>
       <label class="wh-wk">Week <select id="wh-week">${weekOpts}</select></label>
     </div>
     <div id="wh-lists" class="wh-lists">
@@ -2179,6 +2207,7 @@ function renderWarehouse() {
       [Math.round(s.stillTotal).toLocaleString(), 'Stillage capacity'],
     ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
     const terms = ['pal', 'still'].filter(k => whQuery(k)).map(k => `“${esc(WH_FIND[k].trim())}”`);
+    if (WH_NPD) terms.unshift(`<b>NPD ${YEAR}</b>`);
     document.getElementById('wh-banner').innerHTML = ids
       ? `<div class="wh-sel">Showing <b>${s.products}</b> product${s.products === 1 ? '' : 's'} matching ${terms.join(' + ')}`
         + ` — still measured against full warehouse capacity. <button type="button" id="wh-sel-clear">show everything</button></div>`
@@ -2196,9 +2225,10 @@ function renderWarehouse() {
     ]);
     const clr = document.getElementById('wh-sel-clear');
     if (clr) clr.addEventListener('click', () => {
-      WH_FIND.pal = ''; WH_FIND.still = '';
+      WH_FIND.pal = ''; WH_FIND.still = ''; WH_NPD = false;
       document.getElementById('wh-find-pal').value = '';
       document.getElementById('wh-find-still').value = '';
+      document.getElementById('wh-npd').checked = false;
       drawView(); drawRows();
     });
   };
@@ -2245,6 +2275,10 @@ function renderWarehouse() {
       drawView(); drawRows();
     });
   }
+  document.getElementById('wh-npd').addEventListener('change', e => {
+    WH_NPD = e.target.checked;
+    drawView(); drawRows();
+  });
   main.querySelectorAll('.wh-find-x').forEach(b => b.addEventListener('click', () => {
     const side = b.dataset.side;
     WH_FIND[side] = '';
@@ -3778,8 +3812,8 @@ function skuNumField(id, label, value, step, note) {
   return `<label>${label} ${note || ''}<input type="number" id="sku-${id}" step="${step}" value="${v}"></label>`;
 }
 function skuSelField(id, label, value, options, note, pretty) {
-  const opts = [...new Set(options.filter(o => o !== ''))].map(o =>
-    `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${esc(pretty ? titleCase(o) : o)}</option>`).join('');
+  const opts = [...new Set(options)].map(o =>
+    `<option value="${esc(o)}"${o === value ? ' selected' : ''}>${o === '' ? '— none —' : esc(pretty ? titleCase(o) : o)}</option>`).join('');
   return `<label>${label} ${note || ''}<select id="sku-${id}">${opts}</select></label>`;
 }
 function openSkuDialog(id) {
@@ -3806,6 +3840,8 @@ function openSkuDialog(id) {
     + `<label>Category<input type="text" id="sku-category" list="sku-cat-list" value="${esc(sku.category || '')}">`
     + `<datalist id="sku-cat-list">${cats.map(c => `<option value="${esc(c)}"></option>`).join('')}</datalist></label>`
     + skuSelField('status', 'Status', sku.status || 'Live', ['Live', 'Not Live'])
+    + skuSelField('npd_year', 'NPD year', String(sku.npd_year || ''), ['', ...YEARS.slice().sort()],
+        `<small>${isNpd(sku) ? 'tagged NPD in ' + YEAR : (sku.npd_year ? 'tag applies to ' + sku.npd_year : 'not tagged')}</small>`)
     + `<label class="ap-wide">Image URL<input type="text" id="sku-image" value="${esc(sku.image || '')}"></label>`;
   document.getElementById('sku-id-note').innerHTML = `Internal id <code>${esc(sku.id)}</code>`
     + (sku.supplier ? ` · currently under <b>${esc(titleCase(sku.supplier))}</b>` : '')
@@ -3938,6 +3974,7 @@ async function submitSkuDetails() {
   setIf('season', txt('season'), sku.season);
   setIf('category', txt('category') || null, sku.category);
   setIf('status', txt('status'), sku.status);
+  setIf('npd_year', txt('npd_year') || null, sku.npd_year);   // blank = drop the NPD tag
   setIf('image', txt('image') || null, sku.image);
   setIf('pallet_type', txt('pallet_type'), sku.pallet_type);
   for (const k of ['fob', 'landed', 'asp', 'duty_rate', 'cbm', 'pack_size', 'fpq', 'stock_now']) setIf(k, nOf(k), sku[k]);
@@ -4354,6 +4391,7 @@ function openAddProductDialog() {
   seasonSel.value = [...seasonSel.options].some(o => o.value === lastSeason) ? lastSeason : 'Continuity';
   document.getElementById('ap-category').value = loadPref('tp_ap_category', '') || '';
   document.getElementById('ap-status').value = 'Live';
+  document.getElementById('ap-npd').checked = true;   // on by default every time the form opens
   document.getElementById('ap-pallet').value = '';
   document.getElementById('ap-msg').textContent = '';
   apForecastNote();
@@ -4508,6 +4546,7 @@ async function submitAddProduct() {
     palletType: val('ap-pallet') || (cm ? (cm.needsStillage ? 'Stillage' : 'Pallet') : ''),
     image: val('ap-image'),
     cartons, packSize: pack, loadBasis: weightLimited ? 'weight' : 'volume',
+    npd: document.getElementById('ap-npd').checked,   // tags its first plan year
     newSupplier: newSup, years,
   };
   msg.textContent = 'Adding…';
