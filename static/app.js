@@ -384,7 +384,13 @@ function computeSkuModel(sku) {
     lyNum += v;
     if (suspect) suspectCount++; else lyDen += prof[w];
   }
-  const rateLy = lyDen > 0 ? lyNum / lyDen : null;
+  // A product with NO last-year sales at all (a brand-new line) has *no* prior-year
+  // signal — 53 zeros mean "no history", not "we sold nothing". Reading them as a
+  // genuine rate of 0 gives that zero an ~80% vote and crushes the level towards
+  // nothing, so a new line entered with a 70/yr forecast would model out at ~6/yr
+  // and round to 0 in every week. Drop the LY term instead and let the planner's
+  // own annual figure (rateOrig) carry the level.
+  const rateLy = (lyDen > 0 && lyNum > 0) ? lyNum / lyDen : null;
   // (c) original planner forecast as a stabiliser
   const rateOrig = sku.base_forecast.reduce((a, b) => a + b, 0) / WEEKS;
   let wTy = rateTy != null ? Math.min(tyDen, 8) : 0;
@@ -621,16 +627,8 @@ async function saveNow() {
   } catch { document.getElementById('save-status').textContent = 'Save failed!'; }
 }
 window.addEventListener('beforeunload', e => { if (saveTimer) { saveNow(); e.preventDefault(); } });
-// Silently keep this year's proposed.json fresh on disk so supplier exports for
-// OTHER years can show this year's proposed volume in the cross-year summary.
-// (/api/save only writes the keys present, so orders/settings are untouched.)
-function persistProposed() {
-  fetch('/api/save?year=' + encodeURIComponent(YEAR), { method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ proposed: serializeProposed() }) }).catch(() => {});
-}
-// Remember the prior-year-end stock a forecast year was last chained to, so we only
-// rebuild its rebuys when that basis actually changes (not on every visit).
+// Remember the prior-year-end stock a forecast year was last chained to, so we can tell
+// when a year's rebuy suggestions have gone stale (not on every visit).
 function persistStockbase(obj) {
   fetch('/api/save?year=' + encodeURIComponent(YEAR), { method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -882,7 +880,7 @@ function skuRowsHtml(sku, idx) {
     + `<div class="skh-left">`
     +   `<div class="skh-line1"><span class="code acc-hit" title="Click to expand / collapse this product">${esc(sku.code)}</span><span class="nm acc-hit" title="Click to expand / collapse this product"> ${esc(sku.name || '')}</span><button class="sku-explain" data-sku="${esc(sku.id)}" title="Explain this forecast">&#9432;</button><span class="inf">${inf}</span></div>`
     +   `<div class="skh-pills">${statusBadge(sku.status)}${aspChip(sku)}${wkAspChip(sku)}</div>`
-    +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
+    +   `<div class="skh-pills">${fobChip(sku)}${landedChip(sku)}${cbmChip(sku)}${estLandedChip(sku)}${chanChip(sku)}</div>`
     + `</div>`
     + `<div class="skh-right">${statsHtml}${ytdHtml}</div>`
     + `</div></div></div></td></tr>`;
@@ -1476,6 +1474,15 @@ function initSparkTooltip() {
         }
         tip.innerHTML = h;
       }
+    } else if (sl.dataset.kind === 'cap') {
+      const w = +sl.dataset.w, pallet = +sl.dataset.pallet, racking = +sl.dataset.racking, stillage = +sl.dataset.stillage;
+      const ruse = +sl.dataset.ruse, suse = +sl.dataset.suse;
+      const rcls = ruse > 100 ? 'st-var-down' : 'st-var-up', scls = suse > 100 ? 'st-var-down' : 'st-var-up';
+      tip.innerHTML = `<div class="st-wk">Week ${w} · w/c ${weekDate(w)}</div>`
+        + `<div class="st-val st-sales">Pallets &amp; racking: <b>${fmtU(pallet + racking)}</b> spaces · <b class="${rcls}">${ruse}%</b> of capacity</div>`
+        + (racking ? `<div class="st-val"><span class="st-lywk">${fmtU(pallet)} pallet + ${fmtU(racking)} racking</span></div>` : '')
+        + `<div class="st-val st-stock">Stillages: <b>${fmtU(stillage)}</b> spaces · <b class="${scls}">${suse}%</b> of capacity</div>`
+        + (ruse > 100 || suse > 100 ? `<div class="st-cum st-note st-var-down">over capacity this week ✗</div>` : '');
     } else {
       const w = +sl.dataset.w, sales = +sl.dataset.sales, fc = +sl.dataset.fc, stock = +sl.dataset.stock, cont = +sl.dataset.cont;
       const csales = +sl.dataset.csales, cfc = +sl.dataset.cfc;
@@ -1607,7 +1614,8 @@ function renderPlan() {
         <button id="btn-acc-all" class="tbtn" title="${allOpen ? 'Collapse every product to its summary strip' : 'Expand every product to its full weekly grid'}">${allOpen ? '⌃ Collapse all' : '⌄ Expand all'}</button>
         <span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span>
         <span class="spacer"></span>
-        <button id="btn-run-rebuy" class="tbtn" title="(Re)build the Proposed Rebuy row for ${scopeWord} from the current committed orders.">&#8635; Run rebuy</button>
+        ${REBUY_STALE ? `<span class="rb-stale" title="Suggestions are only ever built when you click Run rebuy — nothing has been changed for you.">⚠ suggestions may be out of date</span>` : ''}
+        <button id="btn-run-rebuy" class="tbtn${REBUY_STALE ? ' rb-nudge' : ''}" title="(Re)build the Proposed Rebuy row for ${scopeWord} from the current committed orders.">&#8635; Run rebuy</button>
         <button id="btn-clear-prop" class="tbtn"${scoped.units ? '' : ' disabled'} title="Remove proposed rebuy suggestions for ${scopeWord}">Clear</button>
         <button id="btn-commit-all" class="tbtn primary"${scoped.units ? '' : ' disabled'} title="Add ${scopeWord}'s proposed rebuys (teal row) to Committed Orders as confirmed orders">&#10003; Commit ${fmtU(scoped.units)}</button>
         ${moreDD}
@@ -1682,6 +1690,7 @@ function renderPlan() {
   document.getElementById('btn-commit-all').addEventListener('click', () => { labelNextSave(`Commit rebuy · ${scopeTag()}`); commitRebuy(scopeArg()); });
   document.getElementById('btn-run-rebuy').addEventListener('click', () => {
     labelNextSave(`Run rebuy · ${scopeTag()}`);
+    REBUY_STALE = false;
     resetProposed(scopeArg()); computeAll(); markDirty(); renderPlan();
     document.getElementById('save-status').textContent = `Rebuy re-run · ${scopeTag()}`;
   });
@@ -1691,7 +1700,10 @@ function renderPlan() {
     document.getElementById('save-status').textContent = `Suggestions cleared · ${scopeTag()}`;
   });
   main.querySelectorAll('.rb-mode').forEach(b => b.addEventListener('change', () => {
-    SETTINGS.rebuy.mode = b.dataset.mode; resetProposed(); computeAll(); markDirty();
+    // remember the container basket, but don't re-run anything: it applies on the next
+    // "Run rebuy" click, so switching the setting can't wipe suggestions already curated
+    SETTINGS.rebuy.mode = b.dataset.mode; markDirty();
+    REBUY_STALE = true;
     reopenDD = 'dd-rebuy'; renderPlan();
   }));
   const rv = document.getElementById('season-revert-link');
@@ -1702,7 +1714,8 @@ function renderPlan() {
   if (ed) ed.addEventListener('click', openSettings);
   main.querySelectorAll('.sku-explain').forEach(b => b.addEventListener('click', () => explainSku(b.dataset.sku)));
   main.querySelectorAll('.asp-chip').forEach(b => b.addEventListener('click', () => editAspInline(b.dataset.aspSku)));
-  main.querySelectorAll('.cost-chip').forEach(b => b.addEventListener('click', () => editCostInline(b.dataset.costSku, b.dataset.costK)));
+  main.querySelectorAll('.cost-chip:not(.cbm-chip)').forEach(b => b.addEventListener('click', () => editCostInline(b.dataset.costSku, b.dataset.costK)));
+  main.querySelectorAll('.cbm-chip').forEach(b => b.addEventListener('click', () => openCartonDialog(b.dataset.cbmSku)));
   main.querySelectorAll('.chan-chip').forEach(b => b.addEventListener('click', () => openChannelDialog(b.dataset.chanSku)));
   bindOrderInputs(main);
   const cw = main.querySelector('thead th.curwk');
@@ -1710,12 +1723,27 @@ function renderPlan() {
 }
 
 /* ---- editing ---- */
+// Highlight an order/rebuy input when the qty isn't a whole multiple of the product's
+// pack size (non-blocking — just flags it, with the nearest valid quantities).
+function flagPackSize(inp, id, v) {
+  const sku = skuById.get(id);
+  const ps = sku && Math.round(+sku.pack_size || 0);
+  const bad = ps > 1 && v > 0 && (v % ps !== 0);
+  inp.classList.toggle('pack-warn', bad);
+  if (bad) {
+    const lo = Math.floor(v / ps) * ps, hi = lo + ps;
+    inp.title = `⚠ ${v} isn't a multiple of the pack size (${ps}) — nearest ${lo ? lo + ' or ' : ''}${hi}`;
+  } else if (inp.title) {
+    inp.title = '';
+  }
+}
 function bindOrderInputs(root) {
   root.querySelectorAll('td.ocell input').forEach(inp => {
     inp.addEventListener('change', () => commitEdit(inp));
     inp.addEventListener('keydown', e => orderKeyNav(e, inp));
     inp.addEventListener('paste', e => orderPaste(e, inp));
     inp.addEventListener('focus', () => inp.select());
+    flagPackSize(inp, inp.dataset.sku, +inp.value || 0);   // flag any pre-existing non-multiples on render
   });
 }
 function commitEdit(inp) {
@@ -1724,6 +1752,7 @@ function commitEdit(inp) {
   if (!isFinite(v) || v < 0) v = 0;
   v = Math.round(v);
   inp.value = v || '';
+  flagPackSize(inp, id, v);          // warn if the qty isn't a whole multiple of the pack size
   if (layer === 'proposed') {
     if (!PROPOSED) PROPOSED = new Map();
     if (!PROPOSED.has(id)) PROPOSED.set(id, zeros());
@@ -1962,6 +1991,123 @@ function renderSummary() {
   }));
 }
 
+/* ================= Warehouse Capacity view ================= */
+let WH_WEEK = 0;   // remembers the leaderboard week across re-renders
+// Capacity utilisation chart — same visual language as salesChart. Two lines:
+// pallets+racking and stillage, each as a % of their capacity, with a dashed 100%
+// reference. Hit columns drive the shared hover tooltip (kind='cap').
+function capacityChart(d, opt) {
+  opt = opt || {};
+  const W = 1000, H = opt.h || 150, padT = 12, padB = 22, n = d.rackUse.length;
+  const innerH = H - padT - padB, base = padT + innerH;
+  const maxV = Math.max(1.05, ...d.rackUse, ...d.stillUse) * 1.05;
+  const x = i => (i / (n - 1)) * W;
+  const y = v => padT + (1 - v / maxV) * innerH;
+  let rl = '', area = `M0 ${base.toFixed(1)}`;
+  for (let i = 0; i < n; i++) { const px = x(i).toFixed(1), py = y(d.rackUse[i]).toFixed(1); rl += (i ? 'L' : 'M') + px + ' ' + py + ' '; area += ` L${px} ${py}`; }
+  area += ` L${W} ${base.toFixed(1)} Z`;
+  let sl2 = '';
+  for (let i = 0; i < n; i++) sl2 += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(d.stillUse[i]).toFixed(1) + ' ';
+  const capY = y(1).toFixed(1);
+  const capLine = `<line class="cap-100" x1="0" y1="${capY}" x2="${W}" y2="${capY}"/>`
+    + `<text class="sl-ax cap-100-lbl" x="4" y="${(+capY - 3).toFixed(1)}" text-anchor="start">capacity 100%</text>`;
+  let grid = '', axis = `<text class="sl-ax" x="2" y="${H - 4}" text-anchor="start">W1</text>`;
+  [13, 26, 39].forEach(qk => {
+    const gx = x(qk);
+    grid += `<line class="sl-grid" x1="${gx.toFixed(1)}" y1="${padT}" x2="${gx.toFixed(1)}" y2="${base.toFixed(1)}"/>`;
+    axis += `<text class="sl-ax" x="${gx.toFixed(1)}" y="${H - 4}" text-anchor="middle">W${qk + 1}</text>`;
+  });
+  axis += `<text class="sl-ax" x="${(W - 2).toFixed(1)}" y="${H - 4}" text-anchor="end">W${n}</text>`;
+  let curLine = ''; const cw = highlightWeek();
+  if (cw >= 1 && cw <= n) { const cx = x(cw - 1).toFixed(1); curLine = `<line class="sl-cur" x1="${cx}" y1="${padT}" x2="${cx}" y2="${base.toFixed(1)}"/>`; }
+  const hw = W / (n - 1); let hits = '';
+  for (let i = 0; i < n; i++) {
+    hits += `<rect class="sl-hit" x="${(x(i) - hw / 2).toFixed(1)}" y="0" width="${hw.toFixed(1)}" height="${H}" fill="transparent"`
+      + ` data-kind="cap" data-w="${i + 1}" data-pallet="${Math.round(d.pallet[i])}" data-racking="${Math.round(d.racking[i])}"`
+      + ` data-stillage="${Math.round(d.stillage[i])}" data-ruse="${(d.rackUse[i] * 100).toFixed(0)}" data-suse="${(d.stillUse[i] * 100).toFixed(0)}"></rect>`;
+  }
+  return `<svg class="saleschart" viewBox="0 0 ${W} ${H}">${grid}${capLine}<path class="sl-area" d="${area}"/>`
+    + `<path class="sl-line" d="${rl}"/><path class="sl-stock" d="${sl2}"/>${curLine}${axis}${hits}</svg>`;
+}
+// Ranked "most space-demanding products" leaderboards for one week — pallets+racking
+// and stillages, each a horizontal bar list sorted by spaces used.
+function whSpaceLists(week) {
+  const w = week - 1;
+  const pal = [], still = [];
+  for (const sku of M.skus) {
+    if (!(sku.fpq > 0) || !sku.pallet_type) continue;
+    const r = RES.get(sku.id); if (!r) continue;
+    const spaces = Math.ceil((r.stock[w] || 0) / sku.fpq);
+    if (spaces <= 0) continue;
+    const rec = { code: sku.code, name: sku.name || '', supplier: sku.supplier, spaces, type: sku.pallet_type };
+    (sku.pallet_type === 'Stillage' ? still : pal).push(rec);
+  }
+  const list = (arr, title, cls) => {
+    arr.sort((a, b) => b.spaces - a.spaces);
+    if (!arr.length) return `<div class="wh-col"><div class="wh-col-h">${title}</div><div class="muted-note">No stock held in this week.</div></div>`;
+    const top = arr.slice(0, 15), max = top[0].spaces || 1, tot = arr.reduce((a, b) => a + b.spaces, 0);
+    const rows = top.map(r => `<div class="wh-row">`
+      + `<div class="wh-bar-wrap"><div class="wh-bar ${cls}" style="width:${(r.spaces / max * 100).toFixed(1)}%"></div>`
+      + `<span class="wh-code">${esc(r.code)}</span><span class="wh-nm" title="${esc(r.supplier)}">${esc(r.name)}</span></div>`
+      + `<span class="wh-sp"><b>${fmtU(r.spaces)}</b> ${r.type === 'Racking' ? 'rack' : 'sp'}</span></div>`).join('');
+    return `<div class="wh-col"><div class="wh-col-h">${title}<span class="wh-col-tot">${fmtU(tot)} spaces · ${arr.length} products</span></div>`
+      + rows + (arr.length > top.length ? `<div class="muted-note">+${arr.length - top.length} more</div>` : '') + `</div>`;
+  };
+  return list(pal, 'Pallets &amp; racking', 'wh-bar-pal') + list(still, 'Stillages', 'wh-bar-still');
+}
+function renderWarehouse() {
+  const g = AGG.g;
+  const cap = SETTINGS.capacities || {};
+  const rackTotal = (+cap.racking_websa || 0) + (+cap.racking_express || 0) + (+cap.racking_refit || 0);
+  const stillTotal = (+cap.stillage_websa || 0) + (+cap.stillage_lough || 0) + (+cap.stillage_express || 0) + (+cap.stillage_free || 0);
+  const chart = capacityChart({ rackUse: g.rackUseTotal, stillUse: g.stillUseTotal, pallet: g.pallet, racking: g.racking, stillage: g.stillage }, { h: 150 });
+  const cards = [
+    [(g.peakRack * 100).toFixed(0) + '%', 'Peak pallet/racking use (W' + g.peakRackWk + ')'],
+    [(g.peakStill * 100).toFixed(0) + '%', 'Peak stillage use (W' + g.peakStillWk + ')'],
+    [Math.round(Math.max(0, ...g.pallet)).toLocaleString(), 'Peak pallet spaces'],
+    [Math.round(Math.max(0, ...g.stillage)).toLocaleString(), 'Peak stillage spaces'],
+    [Math.round(rackTotal).toLocaleString(), 'Racking capacity'],
+    [Math.round(stillTotal).toLocaleString(), 'Stillage capacity'],
+  ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  const legend = `<div class="sum-legend">
+    <span class="lg-line">Pallets &amp; racking (% of capacity)</span>
+    <span class="lg-stock">Stillages (% of capacity)</span>
+    <span class="lg-cap">100% capacity</span>
+    ${highlightWeek() ? '<span class="lg-cur">Current week</span>' : ''}
+    <span class="lg-hint">Hover for weekly detail</span></div>`;
+  const combo = g.pallet.map((p, w) => p + g.racking[w] + g.stillage[w]);
+  const peakW = combo.indexOf(Math.max(...combo)) + 1;
+  const defW = (WH_WEEK >= 1 && WH_WEEK <= WEEKS) ? WH_WEEK : (highlightWeek() || peakW);
+  const weekOpts = Array.from({ length: WEEKS }, (_, i) =>
+    `<option value="${i + 1}"${i + 1 === defW ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <div class="cards">${cards}</div>
+    <div class="sum-grand">
+      <div class="sum-sec-title">Warehouse space utilisation — ${YEAR}</div>
+      ${chart}
+      ${legend}
+    </div>
+    <div class="wh-head">
+      <h2 class="sect" style="margin:0">Most space-demanding products</h2>
+      <label class="wh-wk">Week <select id="wh-week">${weekOpts}</select></label>
+    </div>
+    <div id="wh-lists" class="wh-lists"></div>
+    <h2 class="sect">Weekly capacity totals — ${YEAR}</h2>
+    ${weeklyTable([
+      ['Pallet spaces', g.pallet, fmtU],
+      ['Racking spaces', g.racking, fmtU],
+      ['Stillage spaces', g.stillage, fmtU],
+      ['Pallet/racking use', g.rackUseTotal, fmtPct],
+      ['Stillage use', g.stillUseTotal, fmtPct],
+    ])}
+    <div style="height:30px"></div>`;
+  const sel = document.getElementById('wh-week');
+  const draw = () => { WH_WEEK = +sel.value; document.getElementById('wh-lists').innerHTML = whSpaceLists(WH_WEEK); };
+  sel.addEventListener('change', draw);
+  draw();
+}
+
 /* ---------------- seasonality apply / weather ---------------- */
 async function loadWeather() {
   const se = SEASON();
@@ -1979,11 +2125,11 @@ function weatherSummary() {
   if (!wks.length) return 'weather: no forecast weeks in range';
   return `weather: W${wks[0]}–W${wks[wks.length - 1]} live (${WEATHER.lat?.toFixed?.(2)}, ${WEATHER.lon?.toFixed?.(2)})`;
 }
-// opts.resetProp (default true): rebuild the proposed-rebuy layer from the new
-// forecast. Pass false for the on-load weather refinement so a year's saved/cleared
-// proposed layer is preserved (the user's per-year state is remembered).
+// Never touches the proposed-rebuy layer: changing the forecast makes the existing
+// suggestions stale (flagged in the Plan toolbar), but only a "Run rebuy" click may
+// rebuild them — otherwise applying a forecast setting would silently undo every
+// supplier the user had already reviewed and cleared.
 async function applySeasonality(opts = {}) {
-  const resetProp = opts.resetProp !== false;
   const se = SEASON();
   const status = document.getElementById('season-status');
   if (seasonActiveFor(YEAR) && se.useWeather) {
@@ -1992,8 +2138,6 @@ async function applySeasonality(opts = {}) {
   }
   buildModeledForecasts();
   computeAll();
-  if (resetProp) resetProposed();   // rebuys flow from the (possibly target-scaled) forecast
-  computeAll();                     // re-run so the whole-plan band reflects the proposals
   renderSidebar(); setView(currentView);
   if (status) status.textContent = seasonActiveFor(YEAR) ? weatherSummary() : 'Model off — showing original figures.';
 }
@@ -2253,6 +2397,7 @@ function openSettings() {
     const el = document.getElementById('cap-' + k);
     if (el) el.value = SETTINGS.capacities[k];
   }
+  { const P = palletDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) el.value = P[k]; }); }
   coverDraft = (SETTINGS.cover_bands || defaultCoverBands()).map(b => ({ max: b.max, bg: b.bg }));
   if (!coverDraft.length || coverDraft[coverDraft.length - 1].max !== null)
     coverDraft.push({ max: null, bg: '#c27ba0' });   // ensure a catch-all exists
@@ -2393,6 +2538,7 @@ function applySettings() {
     const el = document.getElementById('cap-' + k);
     if (el) SETTINGS.capacities[k] = parseFloat(el.value) || 0;
   }
+  { const pd = SETTINGS.pallet_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) pd[k] = parseFloat(el.value) || PALLET_DEFAULT[k]; }); SETTINGS.pallet_dims = pd; }
   // normalise cover bands: finite thresholds sorted ascending, single catch-all last
   const cat = coverDraft.find(b => b.max === null || b.max === undefined || b.max === '');
   const finite = coverDraft.filter(b => !(b.max === null || b.max === undefined || b.max === ''))
@@ -2447,7 +2593,10 @@ function applySettings() {
       deposit_pct: pct('sf-deposit', d.deposit_pct),
     }; }
   markDirty();
-  applySeasonality();   // rebuilds model + rebuy plan, recomputes and re-renders
+  // rebuilds the forecast model, recomputes and re-renders. Existing rebuy suggestions
+  // are LEFT ALONE (just flagged stale) — only "Run rebuy" may rebuild them.
+  if (PROPOSED && PROPOSED.size) REBUY_STALE = true;
+  applySeasonality();
 }
 async function restoreImportedOrders() {
   if (!confirm(`Replace ALL ${YEAR} order quantities with the ones imported from the Excel file? Your edits will be lost.`)) return;
@@ -3350,6 +3499,168 @@ async function editCostInline(id, which) {
   document.getElementById('save-status').textContent = `${isFob ? 'FOB' : 'Landed cost'} set for ${sku.code}`;
 }
 
+/* ---- carton dimensions → item CBM + pallet/stillage loading ----
+   Item CBM = (Σ carton L×W×H ÷ 1,000,000) ÷ pack size. Pallet loading = cartons that
+   fit per layer (best footprint orientation) × layers under the max stack height,
+   scaled to items. A carton that can't sit on the pallet ⇒ Stillage (manual qty). */
+const PALLET_DEFAULT = { l: 120, w: 100, h: 180, maxKg: 1000 };   // cm + max load weight (kg)
+function palletDims() { const p = SETTINGS.pallet_dims || {}; return { l: +p.l || PALLET_DEFAULT.l, w: +p.w || PALLET_DEFAULT.w, h: +p.h || PALLET_DEFAULT.h, maxKg: +p.maxKg || PALLET_DEFAULT.maxKg }; }
+function cartonList(sku) { return Array.isArray(sku.cartons) ? sku.cartons : []; }
+function cartonMetrics(cartons, packSize) {
+  const P = palletDims();
+  const pack = Math.max(1, Math.round(packSize || 1));
+  const valid = (cartons || []).filter(c => +c.l > 0 && +c.w > 0 && +c.h > 0);
+  const N = valid.length;
+  const vol = valid.reduce((a, c) => a + (+c.l) * (+c.w) * (+c.h), 0);   // cm³ total across the pack's cartons
+  const cbm = N ? +((vol / 1e6) / pack).toFixed(4) : null;              // m³ per single item
+  const packKg = valid.reduce((a, c) => a + (+c.kg || 0), 0);          // kg per pack (Σ carton weights)
+  const kgPerItem = packKg > 0 ? packKg / pack : 0;                    // kg per single item
+  let rep = null, area = -1;                                            // largest-footprint carton drives the fit
+  for (const c of valid) { const a = (+c.l) * (+c.w); if (a > area) { area = a; rep = c; } }
+  let fits = false, perPallet = 0;
+  if (rep) {
+    const perLayer = Math.max(Math.floor(P.l / rep.l) * Math.floor(P.w / rep.w),
+                              Math.floor(P.l / rep.w) * Math.floor(P.w / rep.l));
+    const layers = Math.floor(P.h / rep.h);
+    if (perLayer > 0 && layers > 0) { fits = true; perPallet = perLayer * layers; }
+  }
+  const volumeQty = fits ? Math.max(1, Math.floor(perPallet * (pack / Math.max(1, N)))) : 0;   // by dimensions
+  const volWeight = volumeQty * kgPerItem;                             // weight of a volume-full pallet
+  const weightQty = (P.maxKg > 0 && kgPerItem > 0) ? Math.floor(P.maxKg / kgPerItem) : null;   // items the weight allows
+  const effWeightQty = weightQty != null ? Math.max(0, Math.min(volumeQty, weightQty)) : volumeQty;
+  const overweightPct = (P.maxKg > 0 && volWeight > P.maxKg) ? (volWeight / P.maxKg - 1) * 100 : 0;
+  return { cbm, fits, palletQty: volumeQty, volumeQty, weightQty, effWeightQty, volWeight, kgPerItem,
+           overweightPct, maxKg: P.maxKg, hasWeight: kgPerItem > 0, needsStillage: N > 0 && !fits, cartons: N, pack };
+}
+// The loading qty to use for warehouse spacing, given the weight-limit toggle.
+function cartonLoadQty(m, weightLimited) {
+  if (m.needsStillage) return null;                                    // stillage → manual qty
+  return (weightLimited && m.hasWeight) ? m.effWeightQty : m.volumeQty;
+}
+// CBM chip — clickable like the cost chips; opens the carton editor. Provenance:
+// 'calc' (from carton sizes), 'manual' (hand-set), else 'import'.
+function cbmSrcTag(sku) { return sku.cbm_src === 'calc' ? 'calc' : sku.cbm_src === 'manual' ? 'manual' : 'import'; }
+function cbmChip(sku) {
+  const src = cbmSrcTag(sku);
+  const lbl = { import: 'from the last import', manual: 'manually set', calc: 'calculated from carton sizes' }[src];
+  const cc = src === 'calc' ? 'cc-calc' : src === 'manual' ? 'cc-manual' : 'cc-orig';
+  const nC = cartonList(sku).length;
+  const extra = nC ? ` · ${nC} carton${nC > 1 ? 's' : ''}${(+sku.pack_size > 1) ? ` · pack ${sku.pack_size}` : ''}` : '';
+  const still = sku.pallet_type === 'Stillage' ? ' · Stillage' : '';
+  return `<button class="cost-chip cbm-chip ${cc}" data-cbm-sku="${esc(sku.id)}" title="Item CBM (m³) — ${lbl}${extra}. Click to edit carton sizes &amp; pack.">CBM ${sku.cbm ? (+sku.cbm).toFixed(3) : '—'}${still}</button>`;
+}
+// ---- carton editor dialog ----
+let CARTON_EDIT = null;
+function openCartonDialog(id) {
+  const sku = skuById.get(id); if (!sku) return;
+  const cartons = cartonList(sku).map(c => ({ l: +c.l || '', w: +c.w || '', h: +c.h || '', kg: +c.kg || '' }));
+  if (!cartons.length) cartons.push({ l: '', w: '', h: '', kg: '' });
+  CARTON_EDIT = { id, code: sku.code, pack: +sku.pack_size || 1, cartons };
+  document.getElementById('carton-title').textContent = `${sku.code} — ${sku.name || ''}`;
+  document.getElementById('carton-pack').value = CARTON_EDIT.pack;
+  document.getElementById('carton-weightlimit').checked = (sku.load_basis !== 'volume');   // default: weight-limited
+  const P = palletDims();
+  document.getElementById('carton-pallet-note').textContent = `Pallet space: ${P.l}×${P.w}×${P.h} cm, max ${P.maxKg} kg (edit in Settings → Capacity)`;
+  const qtyInp = document.getElementById('carton-qty');
+  qtyInp.value = (sku.fpq_src === 'manual' && sku.fpq) ? Math.round(sku.fpq) : '';
+  document.getElementById('carton-msg').textContent = '';
+  cartonRenderRows();
+  document.getElementById('carton-dialog').showModal();
+}
+function cartonRenderRows() {
+  const box = document.getElementById('carton-rows');
+  box.innerHTML = CARTON_EDIT.cartons.map((c, i) => `<div class="carton-row" data-i="${i}">`
+    + `<span class="carton-n">#${i + 1}</span>`
+    + `<input type="number" class="carton-l" min="0" step="0.1" value="${c.l}" placeholder="L">`
+    + `<input type="number" class="carton-w" min="0" step="0.1" value="${c.w}" placeholder="W">`
+    + `<input type="number" class="carton-h" min="0" step="0.1" value="${c.h}" placeholder="H">`
+    + `<input type="number" class="carton-kg" min="0" step="0.01" value="${c.kg}" placeholder="kg">`
+    + `<button type="button" class="carton-del" data-i="${i}" title="Remove carton"${CARTON_EDIT.cartons.length > 1 ? '' : ' disabled'}>✕</button></div>`).join('');
+  box.querySelectorAll('.carton-row input').forEach(inp => inp.addEventListener('input', cartonReadState));
+  box.querySelectorAll('.carton-del').forEach(b => b.addEventListener('click', () => {
+    CARTON_EDIT.cartons.splice(+b.dataset.i, 1); cartonRenderRows();
+  }));
+  cartonRecalc();
+}
+function cartonReadState() {
+  CARTON_EDIT.pack = Math.max(1, parseInt(document.getElementById('carton-pack').value, 10) || 1);
+  document.querySelectorAll('#carton-rows .carton-row').forEach(row => {
+    const i = +row.dataset.i;
+    CARTON_EDIT.cartons[i] = { l: parseFloat(row.querySelector('.carton-l').value) || 0,
+      w: parseFloat(row.querySelector('.carton-w').value) || 0, h: parseFloat(row.querySelector('.carton-h').value) || 0,
+      kg: parseFloat(row.querySelector('.carton-kg').value) || 0 };
+  });
+  cartonRecalc();
+}
+function cartonRecalc() {
+  const m = cartonMetrics(CARTON_EDIT.cartons, CARTON_EDIT.pack);
+  const out = document.getElementById('carton-calc');
+  const wrap = document.getElementById('carton-qty-wrap');
+  const lbl = document.getElementById('carton-qty-lbl');
+  const qty = document.getElementById('carton-qty');
+  const wlWrap = document.getElementById('carton-wl-wrap');
+  const weightLimited = document.getElementById('carton-weightlimit').checked;
+  if (m.cbm == null) {
+    out.innerHTML = `<div class="muted-note">Enter at least one carton's dimensions to calculate CBM and loading.</div>`;
+    wrap.hidden = true; wlWrap.hidden = true; return;
+  }
+  const cbmLine = `<div class="carton-cbm">Item CBM: <b>${m.cbm.toFixed(4)}</b> m³${m.hasWeight ? ` · item weight <b>${m.kgPerItem.toFixed(2)}</b> kg` : ''}</div>`;
+  if (m.needsStillage) {
+    out.innerHTML = `<div class="carton-flag stillage">⚠ Too large for a pallet — flagged <b>Stillage</b> storage.</div>` + cbmLine;
+    lbl.textContent = 'Stillage loading qty (units) *'; wrap.hidden = false; qty.placeholder = 'units per stillage'; wlWrap.hidden = true;
+    return;
+  }
+  // both loading figures: by volume (dimensions) and by the weight cap
+  let lines = cbmLine + `<div class="carton-cbm">By volume: <b>${m.volumeQty.toLocaleString()}</b> units/pallet`;
+  if (m.hasWeight) {
+    lines += ` — weighs <b>${Math.round(m.volWeight).toLocaleString()}</b> kg`;
+    lines += m.overweightPct > 0.5 ? ` <span class="carton-flag">(${m.overweightPct.toFixed(0)}% over the ${m.maxKg} kg limit)</span>` : ` (within the ${m.maxKg} kg limit)`;
+    lines += `</div><div class="carton-cbm">By weight limit: <b>${m.effWeightQty.toLocaleString()}</b> units/pallet</div>`;
+  } else {
+    lines += `</div><div class="muted-note">Add carton weights to also cap loading by the pallet weight limit.</div>`;
+  }
+  const used = cartonLoadQty(m, weightLimited);
+  lines += `<div class="carton-used">Used for spacing: <b>${used.toLocaleString()}</b> units/pallet <span class="carton-basis">(${weightLimited && m.hasWeight ? 'weight-limited' : 'by volume'})</span></div>`;
+  out.innerHTML = lines;
+  wlWrap.hidden = !m.hasWeight;
+  lbl.textContent = 'Override loading qty (optional)'; wrap.hidden = false; qty.placeholder = String(used);
+}
+async function submitCartons() {
+  cartonReadState();
+  const sku = skuById.get(CARTON_EDIT.id); if (!sku) return;
+  const msg = document.getElementById('carton-msg');
+  const cartons = CARTON_EDIT.cartons.filter(c => c.l > 0 && c.w > 0 && c.h > 0);
+  if (!cartons.length) { msg.textContent = 'Enter at least one carton with L, W and H.'; return; }
+  const m = cartonMetrics(cartons, CARTON_EDIT.pack);
+  const weightLimited = document.getElementById('carton-weightlimit').checked;
+  const raw = (document.getElementById('carton-qty').value || '').trim();
+  const override = raw ? Math.max(1, Math.round(parseFloat(raw))) : null;
+  const loadingQty = override != null ? override : cartonLoadQty(m, weightLimited);
+  if (m.needsStillage && loadingQty == null) { msg.textContent = 'Enter the stillage loading qty.'; return; }
+  const years = manualAspYears();
+  const payload = { code: sku.code, cartons, packSize: CARTON_EDIT.pack, cbm: m.cbm,
+    palletType: m.needsStillage ? 'Stillage' : (sku.pallet_type === 'Racking' ? 'Racking' : 'Pallet'),
+    fpq: loadingQty, fpqSrc: override != null ? 'manual' : 'calc', loadBasis: weightLimited ? 'weight' : 'volume', years };
+  msg.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/apply-cartons', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if (!j.ok) { msg.textContent = j.error || 'Save failed.'; return; }
+    applyCartonsToMemory(sku.code, payload);
+    document.getElementById('carton-dialog').close();
+    document.getElementById('save-status').textContent = `Carton details saved for ${sku.code} (${years.join(', ')})`;
+  } catch (e) { msg.textContent = 'Error: ' + e.message; }
+}
+function applyCartonsToMemory(code, p) {
+  for (const s of M.skus) if (s.code === code) {
+    s.cartons = p.cartons; s.pack_size = p.packSize; s.load_basis = p.loadBasis;
+    if (p.cbm != null) { s.cbm = p.cbm; s.cbm_src = 'calc'; }
+    s.pallet_type = p.palletType; if (p.fpq != null) s.fpq = p.fpq; s.fpq_src = p.fpqSrc;
+  }
+  computeAll(); renderSidebar();
+  if (currentView === 'plan') renderPlan(); else setView(currentView);
+}
+
 /* ------------- estimated future landed cost (mirrors the old Excel "Landed Costs" calc) ------- */
 const LC_DEFAULTS = { container_rate: 3000, fx: 1.31, full_container_cbm: 67, inland_rate: 1100, duty_pct: 0 };
 function landedCalc() { return Object.assign({}, LC_DEFAULTS, SETTINGS.landed_calc || {}); }
@@ -3455,7 +3766,7 @@ async function applyManualAsp() {
 // provenance states — 'import' (from the workbook build) and 'manual' (hand-edited) —
 // so you can see which m³/unit figures came straight from the last import.
 const CBM_SRC_LABEL = { import: 'import', manual: 'manual' };
-function cbmSrc(sku) { return sku.cbm_src === 'manual' ? 'manual' : 'import'; }
+function cbmSrc(sku) { return (sku.cbm_src === 'manual' || sku.cbm_src === 'calc') ? 'manual' : 'import'; }
 function postCbm(cbmMap, years) {
   return fetch('/api/apply-cbm', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cbm: cbmMap, years }) }).then(r => r.json());
@@ -3531,7 +3842,7 @@ async function applyManualCbm() {
    Builds a full SKU (+ supplier if new) in master.json for the current year and all
    later years, then reloads so the supplier appears in the sidebar and its product in
    the Plan grid. No sales history: ly/actual seed to zero, base_forecast to the annual
-   figure spread evenly; costs/CBM/ASP tag as 'manual'. */
+   figure spread by the season curve (see newProductProfile); costs/CBM/ASP tag as 'manual'. */
 function openAddProductDialog() {
   if (!M) return;
   const dlg = document.getElementById('addprod-dialog');
@@ -3550,11 +3861,88 @@ function openAddProductDialog() {
   document.getElementById('ap-status').value = 'Live';
   document.getElementById('ap-pallet').value = '';
   document.getElementById('ap-msg').textContent = '';
+  apForecastNote();
+  apCartonReset();
   apToggleNewSupplier();
   dlg.showModal();
 }
 function apToggleNewSupplier() {
   document.getElementById('ap-newsup').hidden = document.getElementById('ap-supplier').value !== '__new__';
+}
+// ---- carton mini-editor embedded in the Add-product form (auto-fills the CBM field) ----
+let AP_CARTONS = [], AP_CBM_MANUAL = false;
+function apCartonReset() {
+  AP_CARTONS = [{ l: '', w: '', h: '', kg: '' }]; AP_CBM_MANUAL = false;
+  document.getElementById('ap-pack').value = 1;
+  document.getElementById('ap-weightlimit').checked = true;
+  apCartonRender();
+}
+function apCartonRender() {
+  const box = document.getElementById('ap-cartons');
+  box.innerHTML = AP_CARTONS.map((c, i) => `<div class="carton-row" data-i="${i}">`
+    + `<span class="carton-n">#${i + 1}</span>`
+    + `<input type="number" class="apc-l" min="0" step="0.1" value="${c.l}" placeholder="L">`
+    + `<input type="number" class="apc-w" min="0" step="0.1" value="${c.w}" placeholder="W">`
+    + `<input type="number" class="apc-h" min="0" step="0.1" value="${c.h}" placeholder="H">`
+    + `<input type="number" class="apc-kg" min="0" step="0.01" value="${c.kg}" placeholder="kg">`
+    + `<button type="button" class="carton-del" data-i="${i}"${AP_CARTONS.length > 1 ? '' : ' disabled'}>✕</button></div>`).join('');
+  box.querySelectorAll('input').forEach(inp => inp.addEventListener('input', apCartonRead));
+  box.querySelectorAll('.carton-del').forEach(b => b.addEventListener('click', () => { AP_CARTONS.splice(+b.dataset.i, 1); apCartonRender(); }));
+  apCartonRecalc();
+}
+function apCartonRead() {
+  document.querySelectorAll('#ap-cartons .carton-row').forEach(row => {
+    const i = +row.dataset.i;
+    AP_CARTONS[i] = { l: parseFloat(row.querySelector('.apc-l').value) || 0, w: parseFloat(row.querySelector('.apc-w').value) || 0,
+      h: parseFloat(row.querySelector('.apc-h').value) || 0, kg: parseFloat(row.querySelector('.apc-kg').value) || 0 };
+  });
+  AP_CBM_MANUAL = false;   // a carton change re-derives CBM
+  apCartonRecalc();
+}
+function apCartonMetrics() { return cartonMetrics(AP_CARTONS, Math.max(1, parseInt(document.getElementById('ap-pack').value, 10) || 1)); }
+function apCartonRecalc() {
+  const m = apCartonMetrics();
+  const out = document.getElementById('ap-carton-calc');
+  const weightLimited = document.getElementById('ap-weightlimit').checked;
+  if (m.cbm == null) { out.innerHTML = `<span class="muted-note">Optional — add carton sizes to auto-calculate CBM and pallet loading.</span>`; return; }
+  if (!AP_CBM_MANUAL) document.getElementById('ap-cbm').value = m.cbm.toFixed(4);   // auto-fill CBM (still editable)
+  if (m.needsStillage) {
+    out.innerHTML = `<span class="carton-flag">⚠ Too big for a pallet → Stillage. Add it, then set the stillage qty via its CBM chip.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
+    return;
+  }
+  const used = cartonLoadQty(m, weightLimited);
+  let s = `CBM <b>${m.cbm.toFixed(4)}</b> m³ · volume <b>${m.volumeQty}</b>/pallet`;
+  if (m.hasWeight) s += ` (${Math.round(m.volWeight)} kg${m.overweightPct > 0.5 ? `, <span class="carton-flag">${m.overweightPct.toFixed(0)}% over</span>` : ''}) · weight-limit <b>${m.effWeightQty}</b>/pallet`;
+  s += ` · using <b>${used}</b>/pallet`;
+  out.innerHTML = s;
+}
+// Weekly shape to spread a new product's ANNUAL forecast over the 53 weeks. A new line
+// has no sales history of its own, so we use the same baseline curve the forecast model
+// would give it: the calibrated season+category group curve (Summer/Winter land their
+// units in the right part of the year), and a flat line for continuity — which really
+// is the same units every week. Returns a mean-1 profile, so the annual total is kept.
+function newProductProfile(season, category) {
+  if (!M || /continu/i.test(season || '')) return FLAT.slice();
+  ensureCalib();
+  return groupProfile({ season: season || '', category: category || null });
+}
+function apSpreadForecast(annual, season, category) {
+  if (!(annual > 0)) return null;
+  const prof = newProductProfile(season, category);
+  return prof.map(v => +((annual / WEEKS) * v).toFixed(4));
+}
+// Live hint under the annual-forecast field: shows how the units will be spread.
+function apForecastNote() {
+  const el = document.getElementById('ap-fc-note');
+  if (!el) return;
+  const annual = parseFloat(document.getElementById('ap-forecast').value);
+  const season = document.getElementById('ap-season').value;
+  const cat = (document.getElementById('ap-category').value || '').trim();
+  if (!(annual > 0)) { el.textContent = ''; return; }
+  const bf = apSpreadForecast(annual, season, cat);
+  if (/continu/i.test(season)) { el.textContent = `≈ ${(annual / WEEKS).toFixed(1)} units every week`; return; }
+  const pk = peakWeek(bf);
+  el.textContent = `spread by the ${season} curve — peaks wk ${pk} at ~${Math.round(bf[pk - 1])}/wk`;
 }
 async function submitAddProduct() {
   const val = id => (document.getElementById(id).value || '').trim();
@@ -3572,13 +3960,25 @@ async function submitAddProduct() {
     const sn = parseInt(val('ap-sup-number'), 10); if (isFinite(sn)) newSup.number = sn;
   }
   const years = manualAspYears();
+  // carton data (optional): derives CBM + pallet/stillage loading, and the pack size
+  const cartons = AP_CARTONS.filter(c => c.l > 0 && c.w > 0 && c.h > 0);
+  const pack = Math.max(1, parseInt(val('ap-pack'), 10) || 1);
+  const weightLimited = document.getElementById('ap-weightlimit').checked;
+  const cm = cartons.length ? cartonMetrics(cartons, pack) : null;
+  const cbmField = numv('ap-cbm');
   const payload = {
     code, name, supplier,
     season: val('ap-season') || 'No Defined Season', category: val('ap-category'),
     status: val('ap-status') || 'Live',
-    fob: numv('ap-fob'), landed: numv('ap-landed'), asp: numv('ap-asp'), cbm: numv('ap-cbm'),
+    fob: numv('ap-fob'), landed: numv('ap-landed'), asp: numv('ap-asp'),
+    cbm: cbmField != null ? cbmField : (cm ? cm.cbm : null),
     stock_now: numv('ap-stock') || 0, annualForecast: numv('ap-forecast') || 0,
-    fpq: numv('ap-fpq'), palletType: val('ap-pallet'), image: val('ap-image'),
+    // weekly split of the annual figure, shaped by the product's season (flat for continuity)
+    baseForecast: apSpreadForecast(numv('ap-forecast') || 0, val('ap-season'), val('ap-category')),
+    fpq: numv('ap-fpq') != null ? numv('ap-fpq') : (cm ? cartonLoadQty(cm, weightLimited) : null),
+    palletType: cm && cm.needsStillage ? 'Stillage' : (val('ap-pallet') || (cm ? 'Pallet' : '')),
+    image: val('ap-image'),
+    cartons, packSize: pack, loadBasis: weightLimited ? 'weight' : 'volume',
     newSupplier: newSup, years,
   };
   msg.textContent = 'Adding…';
@@ -3699,7 +4099,7 @@ async function importSupplier(e, name) {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
-  if (!confirm(`Import "${file.name}"?\n\nThis confirms ${name}'s orders from the form: each product's Order Forecast is set to match the file exactly (committed + any proposed rebuys you exported and edited), and any week 0/blank in the form becomes blank. Proposed suggestions are then rebuilt on top. Other suppliers are untouched.`))
+  if (!confirm(`Import "${file.name}"?\n\nThis confirms ${name}'s orders from the form: each product's Order Forecast is set to match the file exactly (committed + any proposed rebuys you exported and edited), and any week 0/blank in the form becomes blank. ${titleCase(name)}'s proposed suggestions are cleared (they are now committed) — no new ones are generated unless you click Run rebuy. Other suppliers are untouched.`))
     return;
   const status = document.getElementById('save-status');
   status.textContent = 'Importing…';
@@ -3711,7 +4111,9 @@ async function importSupplier(e, name) {
     const data = await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json();
     ORDERS = data.orders || {};
     for (const sku of M.skus) if (!ORDERS[sku.id]) ORDERS[sku.id] = zeros();
-    computeAll(); resetProposed(); computeAll(); renderSidebar(); setView('plan');
+    // the form's quantities are now COMMITTED, so this supplier's old suggestions would
+    // double-count — clear just those, and leave every other supplier exactly as-is
+    clearProposed(name); computeAll(); markDirty(); renderSidebar(); setView('plan');
     status.textContent = 'Imported ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
     let msg = `Imported from ${file.name}\n\nUpdated ${j.updated} product${j.updated !== 1 ? 's' : ''} across ${j.weeks.length} week${j.weeks.length !== 1 ? 's' : ''} (${(j.total_units || 0).toLocaleString()} units in the form).`;
     if (j.unmatched && j.unmatched.length)
@@ -3767,6 +4169,10 @@ const REBUY_TARGET = 4;          // weeks cover to maintain
 const REBUY_H = 52;              // rolling horizon (weeks ahead), crossing into next year
 let PLAN = null;                 // proposed rebuy plan (separate layer)
 let PROPOSED = null;             // editable Map sku.id -> [53] proposed additional orders (this year)
+// True when something the suggestions were derived from has since moved (a forecast
+// year's opening stock re-chained, the container basket / supplier filter changed).
+// Purely advisory: it shows a hint next to "Run rebuy" — it never rebuilds anything.
+let REBUY_STALE = false;
 
 let CONFIGS = [];                  // saved named configurations (newest first)
 // Refresh the saved-config list + the topbar "Load config" dropdown.
@@ -3837,6 +4243,8 @@ async function loadConfig(file, scope, label) {
     const j = await r.json();
     if (!j.ok) throw new Error(j.error || 'failed');
     await loadYear(YEAR);          // reload from the restored orders / proposed / settings
+    // the restored committed + proposed layers belong together, so nothing is stale
+    if (REBUY_STALE) { REBUY_STALE = false; if (currentView === 'plan') renderPlan(); }
     status.textContent = `Loaded “${label || j.name || file}” (${scope === 'all' || !scope ? 'all years' : scope})`;
   } catch (e) { status.textContent = 'Load failed!'; alert('Load configuration failed: ' + e.message); }
 }
@@ -4186,7 +4594,8 @@ function rebuySuppliersWithProposals() {
 }
 
 function renderRebuy() {
-  if (!PROPOSED) resetProposed();
+  if (!PROPOSED) PROPOSED = new Map();   // never auto-build: only "Run rebuy" may do that
+  if (!PLAN) buildRebuyPlan();           // container roll-over stats only; leaves PROPOSED alone
   const cur = SETTINGS.current_week, CC = SETTINGS.container_cbm || 68;
   const mode = SETTINGS.rebuy.mode || 'full';
   const supChecks = M.suppliers.map(s => {
@@ -4920,6 +5329,7 @@ function setView(v) {
   document.getElementById('main').classList.toggle('plan', v === 'plan');
   if (v === 'plan') renderPlan();
   else if (v === 'arrivals') renderArrivals();
+  else if (v === 'warehouse') renderWarehouse();
   else renderSummary();
 }
 
@@ -5115,19 +5525,18 @@ async function loadYear(year) {
 
   buildModeledForecasts();
   computeAll();
-  // restore the saved proposed layer (preserving clears/edits) — but if a forecast
-  // year's starting stock just changed because the prior year was edited, rebuild
-  // the rebuys so the impact shows.
-  if (data.proposed && !stockChainChanged) {
-    restoreProposed(data.proposed);
-  } else {                         // first visit, or prior-year change → (re)build suggestions and save
-    resetProposed();
-    persistProposed();
-  }
+  // Restore the saved proposed layer EXACTLY as the user left it — including an empty
+  // one, and including a year that has never been run (no suggestions at all). The
+  // rebuy algorithm only ever runs when the user clicks "Run rebuy", so re-opening
+  // the app / restarting the server never re-fills suggestions already cleared or
+  // committed. If a forecast year's starting stock moved because the prior year was
+  // edited, we only FLAG that the suggestions are stale (see the toolbar hint).
+  restoreProposed(data.proposed || {});
+  REBUY_STALE = stockChainChanged && PROPOSED.size > 0;
   computeAll();                    // band reflects the proposed layer
   await refreshLyCache();          // prior-year aggregates for the supplier cards' vs-LY deltas
   renderSidebar(); setView(currentView);   // stay on the page the user was viewing (Plan or Summary)
-  if (seasonActiveFor(YEAR) && SEASON().useWeather) applySeasonality({ resetProp: false });   // refine with live weather, keep saved proposals
+  if (seasonActiveFor(YEAR) && SEASON().useWeather) applySeasonality();   // refine with live weather (never touches proposals)
   document.title = `${YEAR} Tradeplan — week ${SETTINGS.current_week}`;
 }
 
@@ -5220,8 +5629,20 @@ async function init() {
   document.getElementById('btn-apply-manual-cbm').addEventListener('click', applyManualCbm);
   document.getElementById('btn-add-product').addEventListener('click', openAddProductDialog);
   document.getElementById('ap-supplier').addEventListener('change', apToggleNewSupplier);
+  document.getElementById('ap-forecast').addEventListener('input', apForecastNote);
+  document.getElementById('ap-season').addEventListener('change', apForecastNote);
+  document.getElementById('ap-category').addEventListener('input', apForecastNote);
   document.getElementById('ap-cancel').addEventListener('click', () => document.getElementById('addprod-dialog').close());
   document.getElementById('ap-save').addEventListener('click', submitAddProduct);
+  document.getElementById('ap-pack').addEventListener('input', apCartonRecalc);
+  document.getElementById('ap-weightlimit').addEventListener('change', apCartonRecalc);
+  document.getElementById('ap-carton-add').addEventListener('click', () => { AP_CARTONS.push({ l: '', w: '', h: '', kg: '' }); apCartonRender(); });
+  document.getElementById('ap-cbm').addEventListener('input', () => { AP_CBM_MANUAL = true; });   // hand-edited CBM wins
+  document.getElementById('carton-pack').addEventListener('input', cartonReadState);
+  document.getElementById('carton-weightlimit').addEventListener('change', cartonRecalc);
+  document.getElementById('carton-add').addEventListener('click', () => { CARTON_EDIT.cartons.push({ l: '', w: '', h: '', kg: '' }); cartonRenderRows(); });
+  document.getElementById('carton-cancel').addEventListener('click', () => document.getElementById('carton-dialog').close());
+  document.getElementById('carton-save').addEventListener('click', submitCartons);
   document.getElementById('btn-export').addEventListener('click', exportCsv);
   document.getElementById('btn-export-forecast').addEventListener('click', exportForecast);
   document.getElementById('btn-save-config').addEventListener('click', openSaveConfigDialog);

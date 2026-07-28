@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=92">
+<link rel="stylesheet" href="style.css?v=97">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -19,6 +19,7 @@
     <button class="tab active" data-view="plan">Plan</button>
     <button class="tab" data-view="summary">Summary</button>
     <button class="tab" data-view="arrivals" title="Upcoming container arrivals — Qlik bookings joined to WEBSA open PO balances">Arrivals</button>
+    <button class="tab" data-view="warehouse" title="Warehouse space capacity — pallet &amp; stillage utilisation through the year">Warehouse Capacity</button>
   </nav>
   <div id="topbar-right">
     <span id="save-status" title="Changes save automatically"></span>
@@ -147,6 +148,16 @@
           <label>WEBSA stillage <input type="number" id="cap-stillage_websa"></label>
           <label>Lough stillage <input type="number" id="cap-stillage_lough"></label>
           <label>Express stillage <input type="number" id="cap-stillage_express"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Pallet space dimensions</legend>
+        <small>The usable pallet footprint and max stack height (cm), used to estimate each product's pallet loading quantity from its carton sizes. A carton bigger than this is flagged for stillage storage.</small>
+        <div class="cap-grid">
+          <label>Length (cm) <input type="number" step="1" min="1" id="pd-l"></label>
+          <label>Width (cm) <input type="number" step="1" min="1" id="pd-w"></label>
+          <label>Max stack height (cm) <input type="number" step="1" min="1" id="pd-h"></label>
+          <label>Max load weight (kg) <input type="number" step="1" min="1" id="pd-maxKg"></label>
         </div>
       </fieldset>
       <fieldset>
@@ -469,7 +480,7 @@
 
 <dialog id="saveconfig-dialog">
   <div class="settings-head"><h2>Save configuration</h2></div>
-  <p class="ex-sub">Save the current sales forecast and rebuy plans (all years) under a name. You can reload any saved configuration later from the <b>Load config</b> menu.</p>
+  <p class="ex-sub">Saves exactly what is on screen right now: every <b>committed order</b> quantity, the <b>proposed rebuy</b> quantities as they currently stand (including suppliers you have cleared &mdash; those stay empty when reloaded), and the forecast settings. You can reload any saved configuration later from the <b>Load config</b> menu.</p>
   <label>Overwrite an existing config <small>optional &mdash; pick one to replace it, or type a new name below</small>
     <select id="saveconfig-existing-sel" class="sc-wide"></select>
   </label>
@@ -508,13 +519,24 @@
     <label>FOB cost (USD)<input type="number" id="ap-fob" step="0.01" min="0" placeholder="0.00"></label>
     <label>Landed cost (GBP)<input type="number" id="ap-landed" step="0.01" min="0" placeholder="0.00"></label>
     <label>ASP (GBP)<input type="number" id="ap-asp" step="0.01" min="0" placeholder="0.00"></label>
-    <label>CBM (m³)<input type="number" id="ap-cbm" step="0.001" min="0" placeholder="0.000"></label>
+    <label>CBM (m³) <small>auto from cartons — editable</small><input type="number" id="ap-cbm" step="0.0001" min="0" placeholder="0.000"></label>
     <label>Current stock (units)<input type="number" id="ap-stock" step="1" min="0" placeholder="0"></label>
-    <label>Annual sales forecast (units)<input type="number" id="ap-forecast" step="1" min="0" placeholder="spread evenly over the year"></label>
+    <label>Annual sales forecast (units)<input type="number" id="ap-forecast" step="1" min="0" placeholder="spread over the year by season">
+      <small class="ap-fcnote" id="ap-fc-note"></small></label>
     <label>Units per pallet<input type="number" id="ap-fpq" step="1" min="0" placeholder="optional"></label>
     <label>Pallet type<select id="ap-pallet"><option value="">—</option><option>Pallet</option><option>Stillage</option><option>Racking</option></select></label>
     <label class="ap-wide">Image URL <small>optional</small><input type="text" id="ap-image" autocomplete="off" placeholder="https://…"></label>
   </div>
+  <fieldset class="ap-newsup">
+    <legend>Cartons &amp; pack size <small>optional — fills CBM and pallet loading</small></legend>
+    <label class="carton-pack-lbl">Pack size <small>items represented by the carton(s) below</small>
+      <input type="number" id="ap-pack" min="1" step="1" value="1"></label>
+    <div class="carton-head"><span>Carton</span><span>Length (cm)</span><span>Width (cm)</span><span>Height (cm)</span><span>Weight (kg)</span><span></span></div>
+    <div id="ap-cartons"></div>
+    <div class="carton-add"><button type="button" id="ap-carton-add">➕ Add another carton</button></div>
+    <label class="carton-wl"><input type="checkbox" id="ap-weightlimit" checked> Limit pallet loading by the max weight</label>
+    <div id="ap-carton-calc" class="carton-calc"></div>
+  </fieldset>
   <fieldset id="ap-newsup" class="ap-newsup" hidden>
     <legend>New supplier details</legend>
     <div class="ap-grid">
@@ -528,6 +550,22 @@
     <small>Overseas suppliers default to an 11-week lead time; Europe/domestic origins get 3 weeks.</small>
   </fieldset>
   <div class="dialog-actions"><span id="ap-msg" class="ap-msg"></span><span class="spacer"></span><button type="button" id="ap-cancel">Cancel</button><button type="button" id="ap-save" class="primary">Add product</button></div>
+</dialog>
+
+<dialog id="carton-dialog">
+  <div class="settings-head"><h2>Carton details &amp; CBM</h2></div>
+  <p class="ex-sub" id="carton-title"></p>
+  <p class="ex-sub" id="carton-pallet-note"></p>
+  <label class="carton-pack-lbl">Pack size <small>items represented by the carton(s) below</small>
+    <input type="number" id="carton-pack" min="1" step="1" value="1"></label>
+  <div class="carton-head"><span>Carton</span><span>Length (cm)</span><span>Width (cm)</span><span>Height (cm)</span><span>Weight (kg)</span><span></span></div>
+  <div id="carton-rows"></div>
+  <div class="carton-add"><button type="button" id="carton-add">➕ Add another carton</button></div>
+  <div id="carton-calc" class="carton-calc"></div>
+  <label id="carton-wl-wrap" class="carton-wl" hidden><input type="checkbox" id="carton-weightlimit" checked> Limit pallet loading by the max weight (uncheck to use the volume fit even if overweight)</label>
+  <label id="carton-qty-wrap" hidden><span id="carton-qty-lbl">Override loading qty</span>
+    <input type="number" id="carton-qty" min="1" step="1"></label>
+  <div class="dialog-actions"><span id="carton-msg" class="ap-msg"></span><span class="spacer"></span><button type="button" id="carton-cancel">Cancel</button><button type="button" id="carton-save" class="primary">Save carton details</button></div>
 </dialog>
 
 <dialog id="revert-dialog">
@@ -547,6 +585,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=132"></script>
+<script src="app.js?v=137"></script>
 </body>
 </html>

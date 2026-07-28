@@ -281,8 +281,9 @@ class Handler(SimpleHTTPRequestHandler):
                 "master": master,
                 "orders": read_json(ydir / "orders.json", {}),
                 "settings": read_json(DATA / "settings.json", {}),
-                # saved per-year proposed-rebuy layer (null if this year was never
-                # built yet → client auto-builds; {} means the user cleared it)
+                # saved per-year proposed-rebuy layer. null = never run for this year,
+                # {} = the user cleared it: the client restores either as-is and only
+                # ever builds suggestions when "Run rebuy" is clicked.
                 "proposed": read_json(ydir / "proposed.json", None),
                 # prior-year-end stock this (forecast) year was last chained to
                 "stockbase": read_json(ydir / "stockbase.json", None),
@@ -462,6 +463,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.apply_cbm(parse_qs(parsed.query))
         elif parsed.path == "/api/add-product":
             self.add_product(parse_qs(parsed.query))
+        elif parsed.path == "/api/apply-cartons":
+            self.apply_cartons(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-buying":
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
@@ -872,7 +875,8 @@ class Handler(SimpleHTTPRequestHandler):
     def add_product(self, qs):
         """Create a brand-new product (and its supplier, if new) in master.json for the
         given years. No sales history: ly/actual seed to zero, stock history to the
-        entered current stock, and base_forecast to the annual figure spread evenly.
+        entered current stock, and base_forecast to the annual figure spread across the
+        weeks by the product's seasonal curve (sent by the client; flat for continuity).
         Cost/CBM/ASP are tagged 'manual'. Logged as a revertable changelog entry."""
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -909,6 +913,17 @@ class Handler(SimpleHTTPRequestHandler):
             WEEKS = 53
             annual = num(b.get("annualForecast"), 0) or 0
             per = round(annual / WEEKS, 4) if annual > 0 else 0.0
+            # The client sends the annual figure already split by the product's seasonal
+            # curve (flat for continuity). Rescale it to the annual total so the two can
+            # never disagree, and fall back to an even spread if it's missing/unusable.
+            weekly = None
+            bf = b.get("baseForecast")
+            if isinstance(bf, list) and len(bf) == WEEKS and annual > 0:
+                vals = [max(0.0, num(v, 0) or 0) for v in bf]
+                tot = sum(vals)
+                if tot > 0:
+                    k = annual / tot
+                    weekly = [round(v * k, 4) for v in vals]
             stock_now = num(b.get("stock_now"), 0) or 0
             common = {
                 "code": code, "name": name, "supplier": supplier,
@@ -925,6 +940,23 @@ class Handler(SimpleHTTPRequestHandler):
                 "image": (str(b.get("image")).strip() or None) if b.get("image") else None,
                 "duty_rate": None,
             }
+            # optional carton data from the form: sizes/weights + pack size drive the
+            # CBM and pallet loading, so tag those as calculated rather than imported
+            cartons = []
+            for c in (b.get("cartons") or []):
+                cl, cw, ch = num(c.get("l")), num(c.get("w")), num(c.get("h"))
+                if cl and cw and ch and cl > 0 and cw > 0 and ch > 0:
+                    rec = {"l": round(cl, 2), "w": round(cw, 2), "h": round(ch, 2)}
+                    ckg = num(c.get("kg"))
+                    if ckg and ckg > 0:
+                        rec["kg"] = round(ckg, 3)
+                    cartons.append(rec)
+            if cartons:
+                common["cartons"] = cartons
+                common["pack_size"] = max(1, int(num(b.get("packSize")) or 1))
+                common["load_basis"] = "volume" if str(b.get("loadBasis")) == "volume" else "weight"
+                common["cbm_src"] = "calc"
+                common["fpq_src"] = "calc"
             ns = b.get("newSupplier") or {}
             supplier_rec = {"name": supplier, "number": ns.get("number"),
                             "contact": ns.get("contact") or None, "port": ns.get("port") or None,
@@ -944,7 +976,7 @@ class Handler(SimpleHTTPRequestHandler):
                 sku["id"] = sid
                 sku["ly"] = [0.0] * WEEKS
                 sku["actual"] = [0.0] * WEEKS
-                sku["base_forecast"] = [per] * WEEKS
+                sku["base_forecast"] = list(weekly) if weekly else [per] * WEEKS
                 sku["running_stock"] = [float(stock_now)] * WEEKS
                 m.setdefault("skus", []).append(sku)
                 if not any(str(s.get("name", "")).strip() == supplier for s in m.get("suppliers", [])):
@@ -952,6 +984,76 @@ class Handler(SimpleHTTPRequestHandler):
                 (DATA / y / "master.json").write_text(json.dumps(m), encoding="utf-8")
                 applied[y] = sid
             self.send_json({"ok": True, "code": code, "supplier": supplier, "years": targets, "applied": applied})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def apply_cartons(self, qs):
+        """Store a product's carton dimensions + pack size, and the derived CBM /
+        pallet-or-stillage loading qty (computed client-side against the global pallet
+        dimensions), into master.json for the given years, matched by code. CBM is
+        tagged src='calc' (from cartons). Logged as a revertable changelog entry."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            b = json.loads(self.rfile.read(length)) if length else {}
+            code = str(b.get("code") or "").strip()
+            if not code:
+                self.send_json({"ok": False, "error": "Missing product code."}, 400)
+                return
+
+            def num(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            clean = []
+            for c in (b.get("cartons") or []):
+                l, w, h = num(c.get("l")), num(c.get("w")), num(c.get("h"))
+                if l and w and h and l > 0 and w > 0 and h > 0:
+                    rec = {"l": round(l, 2), "w": round(w, 2), "h": round(h, 2)}
+                    kg = num(c.get("kg"))
+                    if kg and kg > 0:
+                        rec["kg"] = round(kg, 3)
+                    clean.append(rec)
+            if not clean:
+                self.send_json({"ok": False, "error": "Enter at least one carton with length, width and height."}, 400)
+                return
+            pack = max(1, int(num(b.get("packSize")) or 1))
+            cbm = num(b.get("cbm"))
+            fpq = num(b.get("fpq"))
+            pallet_type = str(b.get("palletType") or "Pallet")
+            fpq_src = "manual" if str(b.get("fpqSrc")) == "manual" else "calc"
+            load_basis = "volume" if str(b.get("loadBasis")) == "volume" else "weight"
+            yrs, _ = years_index()
+            targets = [str(y) for y in (b.get("years") or []) if str(y) in yrs]
+            if targets:
+                record_change("edit", f"Carton details {code}", ", ".join(targets),
+                              [f"{y}/master.json" for y in targets])
+            applied = {}
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                n = 0
+                for s in master["skus"]:
+                    if str(s.get("code", "")).strip() != code:
+                        continue
+                    s["cartons"] = [dict(c) for c in clean]
+                    s["pack_size"] = pack
+                    s["load_basis"] = load_basis
+                    if cbm is not None:
+                        s["cbm_prev"] = s.get("cbm")
+                        s["cbm"] = cbm
+                        s["cbm_src"] = "calc"
+                    if fpq is not None:
+                        s["fpq"] = fpq
+                    s["fpq_src"] = fpq_src
+                    s["pallet_type"] = pallet_type
+                    n += 1
+                mpath.write_text(json.dumps(master), encoding="utf-8")
+                applied[y] = n
+            self.send_json({"ok": True, "code": code, "years": targets, "applied": applied})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
