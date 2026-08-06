@@ -552,6 +552,103 @@ def export_forecast(rows, year=None, week1=None):
     return bio
 
 
+def export_search(payload):
+    """Flat workbook of the products behind the current sidebar search — one row per
+    product with supplier, category and the figures a promo/marketing plan needs
+    (stock on hand and its retail value, weeks cover, remaining forecast, YTD vs plan,
+    price and margin). `payload` is the client's already-computed rows, so the file
+    matches the screen exactly. Sheet is autofiltered with a totals row on top."""
+    GBP = '£#,##0.00'
+    cols = [
+        ("Product", 18, "code", None), ("Description", 40, "name", None),
+        ("Supplier", 26, "supplier", None), ("Category", 20, "category", None),
+        ("Season", 14, "season", None), ("Status", 9, "status", None),
+        ("NPD", 6, "npd", None), ("Tags", 34, "tags", None),
+        ("Stock Now", 10, "stock", FMT_QTY_T), ("Stock Value (RRP)", 14, "stockValue", GBP),
+        ("Stock at Cost", 12, "stockCost", GBP),
+        ("Weeks Cover", 11, "cover", "#,##0.0"), ("Out of Stock Wk", 12, "outWeek", "#,##0"),
+        ("Forecast Left", 12, "fcRest", FMT_QTY_T), ("Forecast Year", 12, "fcYear", FMT_QTY_T),
+        ("Sold YTD", 12, "soldValue", GBP), ("YTD vs Plan %", 12, "ytdPct", "+0.0;-0.0;0.0"),
+        ("Committed Left", 12, "committed", FMT_QTY_T), ("Proposed", 10, "proposed", FMT_QTY_T),
+        ("Selling Price", 11, "asp", GBP), ("Landed Cost", 11, "landed", GBP),
+        ("FOB", 10, "fob", GBP), ("Margin %", 9, "margin", "0.0"),
+        ("CBM", 8, "cbm", FMT_CBM), ("Units/Pallet", 11, "fpq", "#,##0"),
+        ("Pallet Type", 11, "palletType", None),
+    ]
+    rows = payload.get("rows") or []
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Products"
+    left = Alignment(horizontal="left", vertical="center")
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    what = payload.get("label") or payload.get("term") or "search"
+    kind = "tagged" if payload.get("isTag") else "matching"
+    ws.cell(row=1, column=1, value=f"{payload.get('year', '')} products {kind} “{what}”").font = \
+        Font(name=FONT, size=13, bold=True)
+    bits = [f"{len(rows)} product{'' if len(rows) == 1 else 's'}",
+            f"as at week {payload.get('week', '')}",
+            f"generated {payload.get('generated', '')}"]
+    if payload.get("statusFilter"):
+        bits.insert(1, payload["statusFilter"])
+    ws.cell(row=2, column=1, value=" · ".join(bits) + (
+        " · stock figures are the current week's; forecast/committed are what remains from"
+        " this week on · sorted by stock value, highest first")
+    ).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+
+    # Totals sit ABOVE the header, not below the data — anything inside the autofilter
+    # range would be treated as a data row and get sorted/hidden with it.
+    tr, hr = 4, 5
+    SUMMED = {"stock", "stockValue", "stockCost", "fcRest", "fcYear", "soldValue", "committed", "proposed"}
+    for c, (_l, _w, k, fmt) in enumerate(cols, start=1):
+        v = "TOTAL" if k == "code" else (sum(r.get(k) or 0 for r in rows) if k in SUMMED else None)
+        cell = ws.cell(row=tr, column=c, value=v)
+        cell.font = Font(name=FONT, size=9, bold=True)
+        cell.fill = _fill(C_REF_HDR)
+        cell.border = BORDER
+        cell.alignment = left if isinstance(v, str) else center
+        if fmt and isinstance(v, (int, float)):
+            cell.number_format = fmt
+
+    for c, (label, width, _k, _f) in enumerate(cols, start=1):
+        cell = ws.cell(row=hr, column=c, value=label)
+        cell.font = Font(name=FONT, size=9, bold=True)
+        cell.fill = _fill(C_SUBHDR)
+        cell.border = BORDER
+        cell.alignment = center
+        ws.column_dimensions[get_column_letter(c)].width = width
+    ws.row_dimensions[hr].height = 26
+
+    r = hr + 1
+    for row in rows:
+        for c, (_l, _w, k, fmt) in enumerate(cols, start=1):
+            v = row.get(k)
+            if v == "":
+                v = None
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name=FONT, size=9)
+            cell.alignment = left if isinstance(v, str) else center
+            cell.border = BORDER
+            if fmt and isinstance(v, (int, float)):
+                cell.number_format = fmt
+            # the two figures a buyer scans for: red when selling behind plan, and a
+            # bold NPD flag
+            if k == "ytdPct" and isinstance(v, (int, float)):
+                cell.font = Font(name=FONT, size=9, bold=abs(v) >= 15,
+                                 color="FFB23B2C" if v <= -15 else "FF1A7E34" if v >= 15 else "FF000000")
+            elif k == "npd" and v:
+                cell.font = Font(name=FONT, size=9, bold=True, color="FF5B3FA8")
+        r += 1
+
+    ws.freeze_panes = ws.cell(row=hr + 1, column=3)   # keep code + description in view
+    ws.auto_filter.ref = f"A{hr}:{get_column_letter(len(cols))}{max(r - 1, hr)}"
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def export_arrivals(payload):
     """"Upcoming Containers" workbook shared from the Arrivals page. One row per
     outstanding product line, flat and autofiltered so the team can sort/pivot:

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=108">
+<link rel="stylesheet" href="style.css?v=109">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -39,6 +39,7 @@
   <aside id="sidebar">
     <input id="search" type="search" placeholder="Search supplier, SKU, or a tag..." title="Type part of a supplier name, product code or product name — or a tag name (NPD, Overstocked, Understocked, Overselling, Underselling…) to filter by condition. Configure the tags in Settings &rarr; Tags.">
     <div id="tag-quick" title="Quick tag filters — click to search, click again to clear"></div>
+    <div id="search-export"></div>
     <div id="sidebar-tools">
       <div id="sidebar-legend">Sorted by <b>forecast sales 2026</b> (£ next to each supplier = its total projected sales value for the year)</div>
       <div id="sort-controls">
@@ -658,6 +659,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=149"></script>
+<script src="app.js?v=150"></script>
 </body>
 </html>

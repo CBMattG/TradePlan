@@ -746,6 +746,7 @@ function renderSidebar() {
     `Sorted by <b>${sortLabel}</b> · <b>£ = forecast sales value</b> (demand × price, uncapped) · <b>% = stocked-in</b> (committed supply vs forecast; &lt;100% needs orders, &gt;100% overstock)`;
   document.querySelectorAll('.sortbtn').forEach(b => b.classList.toggle('active', b.dataset.sort === sortMode));
   renderTagQuick(term);
+  renderSearchExport();
 
   const list = document.getElementById('supplier-list');
   const withProp = suppliersWithProposed();
@@ -760,6 +761,17 @@ function renderSidebar() {
       <span class="si-fc" title="Forecast sales value (uncapped)">${fmtGBPk(fc)}</span>
       <span class="si-stk ${stockedClass(pct)}" title="Stocked-in %: committed supply vs forecast demand">${pctTxt}</span></div>`;
   }).join('') || `<div class="empty">${searchEmptyNote(term)}</div>`;
+}
+// "Export N products" under the search — only while a search is actually filtering.
+function renderSearchExport() {
+  const box = document.getElementById('search-export');
+  if (!box) return;
+  const n = searchMatches().length;
+  if (!n) { box.innerHTML = ''; return; }
+  const label = searchLabel();
+  box.innerHTML = `<button id="btn-search-export" title="Download these ${n} products as an Excel workbook — supplier, category, stock, cover, forecast, price and margin — for planning promotions or marketing">`
+    + `&#11015; Export ${n} <b>${esc(label)}</b> product${n === 1 ? '' : 's'}</button>`;
+  document.getElementById('btn-search-export').addEventListener('click', exportSearch);
 }
 // Why a search found nothing. A tag search that comes up empty is easy to mistake for a
 // broken filter, so name the tag and — for the year-scoped NPD tag — say where to look.
@@ -951,14 +963,16 @@ function tagCfg() {
   return out;
 }
 let TAG_CACHE = null;                       // sku.id -> [tag id]
-function tagsInvalidate() { TAG_CACHE = null; }
+let TAG_METRICS = null;                     // sku.id -> the derived figures the tags test on
+function tagsInvalidate() { TAG_CACHE = null; TAG_METRICS = null; }
 function buildTags() {
   const cfg = tagCfg(), cur = SETTINGS.current_week, aw = cur - 1;
   const ready = poDataReady(), sched = new Map();   // supplier -> PO schedule (built once each)
   TAG_CACHE = new Map();
+  TAG_METRICS = new Map();
   for (const sku of M.skus) {
     const r = RES.get(sku.id);
-    if (!r) { TAG_CACHE.set(sku.id, []); continue; }
+    if (!r) { TAG_CACHE.set(sku.id, []); TAG_METRICS.set(sku.id, {}); continue; }
     const prop = ((PROPOSED && PROPOSED.get(sku.id)) || EMPTY53);
     const com = ORDERS[sku.id] || EMPTY53;
     let outWk = 0;
@@ -996,11 +1010,18 @@ function buildTags() {
       try { if (d.test(sku, m, c.p)) list.push(d.id); } catch { /* a tag never breaks a render */ }
     }
     TAG_CACHE.set(sku.id, list);
+    TAG_METRICS.set(sku.id, m);
   }
 }
 function skuTags(sku) {
   if (!TAG_CACHE) buildTags();
   return TAG_CACHE.get(sku.id) || [];
+}
+// The same derived figures the tags are tested on (cover, stock, remaining forecast,
+// YTD vs plan…), for anything that wants them per product — e.g. the search export.
+function skuMetrics(sku) {
+  if (!TAG_METRICS) buildTags();
+  return TAG_METRICS.get(sku.id) || {};
 }
 function tagCounts() {                       // whole-plan count per tag id
   if (!TAG_CACHE) buildTags();
@@ -5061,6 +5082,80 @@ async function exportForecast() {
     setTimeout(() => URL.revokeObjectURL(url), 4000);
     status.textContent = 'Exported sales unit forecast';
   } catch (e) { status.textContent = 'Export failed!'; alert('Forecast export failed: ' + e.message); }
+}
+
+/* ---------------- search export ----------------
+   Pulls whatever the sidebar search is currently filtering to — a condition tag
+   ("overstocked"), a product code/name, or a supplier — into a flat workbook for
+   planning promotions or marketing off the back of it. */
+// Every product the current term picks out, across all suppliers: the same set the
+// sidebar + plan show. A tag search takes its tagged products; a text search takes
+// code/name hits plus the whole range of any supplier whose NAME matches. The Live /
+// Not Live filter applies, so the file matches what's on screen.
+function searchMatches() {
+  const term = searchTerm.trim().toLowerCase();
+  if (!term || !M) return [];
+  const tag = tagTermId(term);
+  let out = M.skus.filter(k => skuMatchesTerm(k, term) || (!tag && (k.supplier || '').toLowerCase().includes(term)));
+  if (statusFilter === 'live') out = out.filter(k => k.status === 'Live');
+  else if (statusFilter === 'notlive') out = out.filter(k => k.status === 'Not Live');
+  return out;
+}
+// What the search is called in the file + its name ("Overstocked" / “fika”).
+function searchLabel() {
+  const id = tagTermId(searchTerm.trim().toLowerCase());
+  return id ? TAG_DEF[id].label : searchTerm.trim();
+}
+async function exportSearch() {
+  const skus = searchMatches();
+  if (!skus.length) return;
+  const cur = SETTINGS.current_week, sum = a => a.reduce((x, y) => x + y, 0);
+  const n2 = v => (v == null ? null : +v.toFixed(2));
+  const rows = skus.map(sku => {
+    const r = RES.get(sku.id) || {}, m = skuMetrics(sku);
+    const com = ORDERS[sku.id] || EMPTY53;
+    const asp = +sku.asp || 0, landed = +sku.landed || 0, stock = Math.round(m.stock || 0);
+    return {
+      code: sku.code, name: sku.name || '', supplier: titleCase(sku.supplier || ''),
+      category: sku.category || '', season: sku.season || '', status: sku.status || '',
+      npd: isNpd(sku) ? 'NPD' : '',
+      tags: skuTags(sku).map(id => (TAG_DEF[id] || {}).label).filter(Boolean).join(', '),
+      stock, cover: m.cover == null ? null : n2(m.cover), outWeek: m.outWk || null,
+      fcRest: Math.round(m.fcRest || 0), fcYear: Math.round(m.fcYear || 0),
+      soldValue: n2(sum((r.value || []).slice(0, Math.max(0, cur - 1)))),
+      ytdPct: m.ytdPct == null ? null : n2(m.ytdPct),
+      committed: Math.round(sum(com.slice(Math.max(0, cur - 1)))),
+      proposed: Math.round(m.prop || 0),
+      asp: asp || null, landed: landed || null, fob: +sku.fob || null,
+      margin: (asp > 0 && landed > 0) ? n2(((asp - landed) / asp) * 100) : null,
+      stockValue: n2(stock * asp), stockCost: n2(stock * landed),
+      cbm: +sku.cbm || null, fpq: +sku.fpq || null, palletType: sku.pallet_type || '',
+    };
+  });
+  // biggest retail value of stock on hand first — the lines worth promoting
+  rows.sort((a, b) => (b.stockValue || 0) - (a.stockValue || 0));
+  const label = searchLabel();
+  const payload = {
+    rows, year: YEAR, term: searchTerm.trim(), label,
+    isTag: !!tagTermId(searchTerm.trim().toLowerCase()),
+    week: cur, generated: arrTodayUk(),
+    statusFilter: statusFilter === 'live' ? 'Live only' : statusFilter === 'notlive' ? 'Not Live only' : '',
+  };
+  const status = document.getElementById('save-status');
+  status.textContent = 'Building product workbook…';
+  try {
+    const res = await fetch('/api/export-search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!res.ok) throw new Error('server ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safe = label.replace(/[\\\/:*?"<>|]/g, '-');   // nothing illegal in a filename
+    a.download = `${YEAR} ${safe} products.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    status.textContent = `Exported ${rows.length} product${rows.length === 1 ? '' : 's'}`;
+  } catch (e) { status.textContent = 'Export failed!'; alert('Product export failed: ' + e.message); }
 }
 
 /* ---------------- 12-month auto-rebuy container scheduler ---------------- */

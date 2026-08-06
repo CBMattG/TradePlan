@@ -397,6 +397,30 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def export_search(self):
+        """Return the products behind the current sidebar search as an .xlsx — the
+        client sends its already-computed rows (stock, cover, forecast, margin), so
+        the file matches exactly what it is filtering to on screen."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        try:
+            bio = supplier_form.export_search(body)
+            data = bio.getvalue()
+        except Exception as exc:
+            self.send_json({"error": f"export failed: {exc}"}, 500)
+            return
+        label = safe_filename(str(body.get("label") or "search"))
+        fname = f"{body.get('year', '')} {label} products.xlsx".strip()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def export_arrivals(self):
         """Return the Arrivals page as an .xlsx — the client sends its already-joined
         upcoming-container rows (respecting the on-screen filter)."""
@@ -449,6 +473,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.export_forecast(parse_qs(parsed.query))
         elif parsed.path == "/api/export-arrivals":
             self.export_arrivals()
+        elif parsed.path == "/api/export-search":
+            self.export_search()
         elif parsed.path == "/api/import-supplier":
             self.import_supplier(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-asp":
