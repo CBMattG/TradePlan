@@ -119,6 +119,13 @@ function weekDate(w) { // w/c date of week w for the loaded year (from its week1
   d.setDate(d.getDate() + (w - 1) * 7);
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
+function weekIso(w) { // w/c date of week w as 'YYYY-MM-DD' (the date form the Arrivals page works in)
+  const base = (typeof M !== 'undefined' && M && M.week1_start) ? M.week1_start : '2025-12-29';
+  const [y, mo, dd] = base.split('-').map(Number);
+  const d = new Date(Date.UTC(y, mo - 1, dd));
+  d.setUTCDate(d.getUTCDate() + (w - 1) * 7);
+  return d.toISOString().slice(0, 10);
+}
 // The real current planning week — but only for the year that actually contains
 // today (so past/future years get no "this week" highlight). 0 = no highlight.
 function highlightWeek() {
@@ -5967,6 +5974,7 @@ function historyOutside(e) {
    Balance units = ordered − delivered (WEBSA outstanding); arrival date =
    delivery-to-CB else UK-port ETA (same convention as the Plan's PO row). */
 let ARR_FILTER = '';
+let ARR_PLAN = false;   // include plan-side orders that aren't on a PO yet (toolbar toggle)
 const ARR_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 // Booking lead time deducted from a PO's WEBSA due date to get its estimated
 // booking date. User-adjustable in the Arrivals toolbar; persisted in SETTINGS.
@@ -6021,6 +6029,59 @@ function buildArrivalEvents() {
   awaiting.sort((a, b) => (a.date || '9999') < (b.date || '9999') ? -1 : 1);
   return { booked, awaiting };
 }
+/* ---- plan-side arrivals: the outlook the PO files can't see yet ----
+   Two sources, both from the loaded year's plan, current week onwards:
+     committed — order units sitting in a week with no matching PO/container booking
+                 for that supplier (the same rule as the "No PO" tag), i.e. stock the
+                 buyer has committed to in the plan but hasn't raised a PO for;
+     proposed  — every proposed rebuy, which by definition has no PO.
+   Grouped one event per supplier + arrival week + kind, so each reads like a container
+   still to be booked. Arrival date = the w/c date of the plan week, so the same
+   "book by = arrival − lead" maths as an awaiting PO applies. */
+function buildPlanArrivals() {
+  const out = [];
+  if (!M || !M.skus) return out;
+  const cur = SETTINGS.current_week || 1;
+  const CC = SETTINGS.container_cbm || 68;
+  const bySup = new Map();
+  for (const sku of M.skus) {
+    if (!bySup.has(sku.supplier)) bySup.set(sku.supplier, []);
+    bySup.get(sku.supplier).push(sku);
+  }
+  for (const [supplier, skus] of bySup) {
+    // the PO lookup reaches into the uploaded files — a problem there must not take the page down
+    let sched = {};
+    try { sched = supplierPoSchedule(supplier) || {}; } catch { sched = {}; }
+    const buckets = new Map();                       // `week|kind` -> event
+    const add = (week, kind, sku, qty) => {
+      const key = week + '|' + kind;
+      let ev = buckets.get(key);
+      if (!ev) {
+        ev = { plan: true, kind, po: '', supplier, week, date: weekIso(week), lines: [], cbm: 0 };
+        buckets.set(key, ev);
+        out.push(ev);
+      }
+      ev.lines.push({ code: sku.code, qty, due: '', sku });
+      ev.cbm += qty * (+sku.cbm || 0);
+    };
+    for (const sku of skus) {
+      const com = ORDERS[sku.id], prop = (PROPOSED && PROPOSED.get(sku.id)) || null;
+      for (let w = cur; w <= WEEKS; w++) {
+        const c = com ? (com[w - 1] || 0) : 0;
+        if (c > 0.5 && !(sched[w] && sched[w].length)) add(w, 'committed', sku, c);
+        const p = prop ? (prop[w - 1] || 0) : 0;
+        if (p > 0.5) add(w, 'proposed', sku, p);
+      }
+    }
+  }
+  for (const ev of out) {
+    ev.containers = ev.cbm / CC;
+    ev.lines.sort((a, b) => b.qty - a.qty);
+  }
+  out.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1
+    : a.supplier < b.supplier ? -1 : a.supplier > b.supplier ? 1 : a.kind < b.kind ? -1 : 1);
+  return out;
+}
 function arrMatch(ev, q) {
   if (!q) return true;
   if (ev.po.toLowerCase().includes(q) || (ev.supplier || '').toLowerCase().includes(q)) return true;
@@ -6039,6 +6100,18 @@ function arrLinesHtml(lines) {
     + (lines.length > 1 ? `</tbody><tfoot><tr><td colspan="3">Total</td><td class="r"><b>${num(tot)}</b></td><td></td></tr></tfoot></table>` : '</tbody></table>');
 }
 function arrCardHtml(ev) {
+  if (ev.plan) {
+    const prop = ev.kind === 'proposed';
+    const units = ev.lines.reduce((a, l) => a + l.qty, 0);
+    return `<div class="arr-card arr-planc"><div class="arr-card-head">`
+      + `<span class="arr-badge ${prop ? 'arr-propb' : 'arr-commb'}">${prop ? 'PROPOSED REBUY' : 'COMMITTED — NO PO'}</span>`
+      + `<span class="arr-sup">${esc(ev.supplier || '—')}</span>`
+      + `<span class="arr-cno" title="Estimated from the products' CBM at ${SETTINGS.container_cbm || 68} cbm per container">`
+      + `&asymp; ${ev.containers.toFixed(1)} container${ev.containers >= 0.95 && ev.containers < 1.05 ? '' : 's'} &middot; ${fmt1(ev.cbm)} cbm &middot; ${Math.round(units).toLocaleString('en-GB')} units</span>`
+      + `<span class="arr-dates">Plan week ${ev.week} (w/c ${fmtDate(ev.date)})`
+      + `${ev.date ? ` &middot; book by ${fmtDate(arrBookDate(ev.date))}` : ''}</span></div>`
+      + arrLinesHtml(ev.lines) + '</div>';
+  }
   const lg = ev.leg || {};
   const st = (lg.status || '').toUpperCase();
   const badge = ev.leg
@@ -6058,7 +6131,40 @@ function arrCardHtml(ev) {
 function arrFilteredEvents() {
   const q = ARR_FILTER.trim().toLowerCase();
   const all = buildArrivalEvents();
-  return { booked: all.booked.filter(ev => arrMatch(ev, q)), awaiting: all.awaiting.filter(ev => arrMatch(ev, q)) };
+  return { booked: all.booked.filter(ev => arrMatch(ev, q)), awaiting: all.awaiting.filter(ev => arrMatch(ev, q)),
+           plan: ARR_PLAN ? buildPlanArrivals().filter(ev => arrMatch(ev, q)) : [] };
+}
+// Plan orders per estimated booking month — containers are an estimate from CBM,
+// since nothing has been booked (or even raised) for these yet.
+function arrPlanMonthCounts(plan) {
+  const CC = SETTINGS.container_cbm || 68;
+  const byMonth = new Map();
+  for (const ev of plan) {
+    const bd = arrBookDate(ev.date);
+    const k = bd ? bd.slice(0, 7) : 'none';
+    const g = byMonth.get(k) || { cbm: 0, units: 0, groups: 0 };
+    g.cbm += ev.cbm; g.units += ev.lines.reduce((a, l) => a + l.qty, 0); g.groups++;
+    byMonth.set(k, g);
+  }
+  return [...byMonth.keys()].sort().map(k => {
+    const g = byMonth.get(k);
+    return { key: k, label: arrMonthLabel(k), cbm: g.cbm, units: g.units, groups: g.groups, containers: g.cbm / CC };
+  });
+}
+// One entry per estimated booking month, carrying both sides of the workload: real
+// outstanding POs to book, and the plan's own orders with no PO. Both are keyed the
+// same way (arrival − lead), so they belong on one tile; booked containers don't —
+// those are counted by the month they LAND, and stay in their own row.
+function arrBookingMonths(awaiting, plan) {
+  const rows = new Map();
+  const get = k => {
+    let g = rows.get(k);
+    if (!g) rows.set(k, g = { key: k, label: arrMonthLabel(k), pos: 0, containers: 0, cbm: 0, units: 0, groups: 0 });
+    return g;
+  };
+  for (const m of arrBookMonthCounts(awaiting)) get(m.key).pos = m.count;
+  for (const m of arrPlanMonthCounts(plan)) Object.assign(get(m.key), { containers: m.containers, cbm: m.cbm, units: m.units, groups: m.groups });
+  return [...rows.values()].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);   // 'none' sorts last
 }
 // Physical upcoming containers per 'YYYY-MM' (dedup by container no; PO as fallback key).
 function arrMonthCounts(booked) {
@@ -6097,11 +6203,17 @@ function arrBookMonthBlocks(awaiting, body) {
 }
 function arrBodyHtml() {
   const q = ARR_FILTER.trim().toLowerCase();
-  const { booked, awaiting } = arrFilteredEvents();
+  const { booked, awaiting, plan } = arrFilteredEvents();
   const landCards = arrMonthCounts(booked).map(m =>
     `<div class="arr-mcard"><b>${m.count}</b><span>${esc(m.label)} · landing UK</span></div>`).join('');
-  const bookCards = arrBookMonthCounts(awaiting).map(m =>
-    `<div class="arr-mcard arr-mbook"><b>${m.count}</b><span>${esc(m.label)} · to book</span></div>`).join('');
+  // one tile per booking month: outstanding POs alongside the plan's own orders
+  const bookCards = arrBookingMonths(awaiting, plan).map(m => ARR_PLAN
+    ? `<div class="arr-mcard arr-mbook arr-m2" title="${m.pos} outstanding PO${m.pos === 1 ? '' : 's'} to book`
+      + ` · plan: ${Math.round(m.units).toLocaleString('en-GB')} units, ${fmt1(m.cbm)} cbm across ${m.groups} supplier week${m.groups === 1 ? '' : 's'}">`
+      + `<div class="am2"><span class="am2v${m.pos ? '' : ' am2z'}"><b>${m.pos}</b><i>POs</i></span>`
+      + `<span class="am2v am2p${m.containers ? '' : ' am2z'}"><b>&asymp;${m.containers.toFixed(1)}</b><i>plan</i></span></div>`
+      + `<span>${esc(m.label)} · to book</span></div>`
+    : `<div class="arr-mcard arr-mbook"><b>${m.pos}</b><span>${esc(m.label)} · to book</span></div>`).join('');
   const mcards = landCards + bookCards;
   // booked cards grouped into Mon–Sun week blocks (alternating band shading, like
   // the export), each holding its day sub-groups
@@ -6121,7 +6233,18 @@ function arrBodyHtml() {
       + arrBookMonthBlocks(awaiting, evs => evs.map(arrCardHtml).join(''))
       + '</details>'
     : '';
-  return `<div class="arr-mcards">${mcards}</div>${days}${await_}`;
+  const planUnits = plan.reduce((a, ev) => a + ev.lines.reduce((b, l) => b + l.qty, 0), 0);
+  const planSec = !ARR_PLAN ? ''
+    : plan.length
+      ? `<details class="arr-awaiting arr-plansec" open><summary>${plan.length} plan order group${plan.length === 1 ? '' : 's'} not on a PO `
+        + `— committed stock with no PO plus proposed rebuys (${Math.round(planUnits).toLocaleString('en-GB')} units, `
+        + `&asymp;${(plan.reduce((a, ev) => a + ev.cbm, 0) / (SETTINGS.container_cbm || 68)).toFixed(1)} containers), `
+        + `grouped by estimated booking month</summary>`
+        + arrBookMonthBlocks(plan, evs => evs.map(arrCardHtml).join(''))
+        + '</details>'
+      : `<div class="arr-plansec empty">${q ? 'No plan orders match the filter.'
+          : `No committed-without-a-PO or proposed stock in the ${YEAR} plan from week ${SETTINGS.current_week} on.`}</div>`;
+  return `<div class="arr-mcards">${mcards}</div>${days}${await_}${planSec}`;
 }
 // Monday of a date's calendar week + display label (plan week number when in-year,
 // else just the w/c date — e.g. an overdue PO due back in a prior year).
@@ -6150,13 +6273,17 @@ function arrWeekBlocks(events, counts, body) {
 // Export the page (as filtered on screen) to a shareable .xlsx — the client sends
 // its already-joined rows so the workbook always matches what the user is looking at.
 async function exportArrivals() {
-  const { booked, awaiting } = arrFilteredEvents();
+  const { booked, awaiting, plan } = arrFilteredEvents();
   const line = l => ({ code: l.code, name: l.sku ? l.sku.name : '', season: l.sku ? (l.sku.season || '') : '',
     qty: l.qty, stock: l.sku ? Math.round(l.sku.stock_now || 0) : null });
   const flt = ARR_FILTER.trim();
   const payload = {
     generated: `${arrTodayUk()}${flt ? ` · filtered: "${flt}"` : ''}`,
     lead: arrLead(),
+    year: YEAR, containerCbm: SETTINGS.container_cbm || 68,
+    plan: plan.map(ev => ({ date: ev.date, week: ev.week, supplier: ev.supplier, kind: ev.kind,
+      cbm: +ev.cbm.toFixed(2), containers: +ev.containers.toFixed(2), bookDate: arrBookDate(ev.date) || null,
+      lines: ev.lines.map(l => Object.assign(line(l), { cbm: +((l.qty * (+l.sku.cbm || 0)).toFixed(2)) })) })),
     months: arrMonthCounts(booked),
     booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier,
       container: ev.leg.container || '', status: ev.leg.status || '', split: ev.split,
@@ -6181,6 +6308,7 @@ async function exportArrivals() {
 }
 function renderArrivals() {
   const main = document.getElementById('main');
+  ARR_PLAN = !!SETTINGS.arr_plan;   // persisted toggle (follows the loaded config / year)
   if (!poDataReady()) {
     main.innerHTML = '<div class="arr-wrap"><div class="empty">Upload the WEBSA Open PO and Qlik Container exports (Settings → File Imports) to build this page.</div></div>';
     return;
@@ -6189,7 +6317,9 @@ function renderArrivals() {
   const leadInput = (id, label, val) => `<label class="arr-lead-f">${label}<input type="number" id="${id}" min="0" max="365" step="1" value="${val}"> days</label>`;
   main.innerHTML = `<div class="arr-wrap"><div class="arr-top"><h2>Upcoming containers</h2>`
     + `<input id="arr-search" type="search" placeholder="Filter by PO, product, supplier, container…" value="${esc(ARR_FILTER)}">`
-    + `<button id="btn-arr-export" title="Download this page as an Excel workbook to share with the team — respects the current filter">Export xlsx</button>`
+    + `<label class="arr-plan-t" title="Add the ${YEAR} plan's own orders — committed stock with no PO raised, plus proposed rebuys — so you can see the full booking outlook before anything is officially raised. Included in the page and in the export.">`
+    + `<input type="checkbox" id="arr-plan"${ARR_PLAN ? ' checked' : ''}> Include plan orders (no PO)</label>`
+    + `<button id="btn-arr-export" title="Download this page as an Excel workbook to share with the team — respects the current filter and the plan-orders toggle">Export xlsx</button>`
     + `<span class="arr-note">Balance units = ordered − delivered (WEBSA Open PO) · arrival = delivery-to-CB, else UK-port ETA (Qlik) · current stock as of the last weekly data import · click a PO for full detail</span></div>`
     + `<div class="arr-leadbar"><span class="arr-lead-label" title="How far before a PO's due date the container must be booked. The est. booking date used for the ‘to book’ months is the due date minus this total.">Booking lead time</span>`
     + leadInput('arr-lead-sailing', 'Sailing', L.sailing)
@@ -6200,6 +6330,11 @@ function renderArrivals() {
   const inp = document.getElementById('arr-search');
   inp.addEventListener('input', () => { ARR_FILTER = inp.value; document.getElementById('arr-body').innerHTML = arrBodyHtml(); });
   document.getElementById('btn-arr-export').addEventListener('click', exportArrivals);
+  document.getElementById('arr-plan').addEventListener('change', e => {
+    ARR_PLAN = e.target.checked;
+    SETTINGS.arr_plan = ARR_PLAN; markDirty();
+    document.getElementById('arr-body').innerHTML = arrBodyHtml();
+  });
   ['arr-lead-sailing', 'arr-lead-grace', 'arr-lead-inland'].forEach(id =>
     document.getElementById(id).addEventListener('change', arrApplyLead));
 }

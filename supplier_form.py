@@ -637,7 +637,7 @@ def export_arrivals(payload):
                 if isinstance(v, date):
                     cell.number_format = "dd-mm-yyyy"
                 elif isinstance(v, (int, float)):
-                    cell.number_format = "#,##0"
+                    cell.number_format = "#,##0.0" if k in ("cbm", "containers") else "#,##0"
                 # payment / overdue status text colouring (matches the page's badges)
                 if k == "status" and isinstance(v, str) and v:
                     up = v.upper()
@@ -742,6 +742,123 @@ def export_arrivals(payload):
     sheet(wb.create_sheet("Awaiting Booking"), "Outstanding POs awaiting a container booking", await_cols, arows,
           f"POs with outstanding balance but no dated container in the Qlik export · {lead_note}, grouped by booking month.",
           months=await_month_totals, months_title="Containers to book per month", band_key=_await_band)
+
+    # ---- optional plan-side sheets (the "Include plan orders" toggle) ----
+    # Committed stock with no PO raised + proposed rebuys, straight off the plan, so the
+    # booking outlook can be seen before anything is officially raised. Containers are an
+    # estimate from CBM — nothing here is booked, so there is no real container count.
+    plan = payload.get("plan") or []
+    if plan:
+        plan_cols = [
+            ("Arrival w/c", 11, "date"), ("Wk", 5, "week"), ("Est. Booking", 11, "bookDate"),
+            ("Type", 20, "kind"), ("Supplier", 28, "supplier"),
+            ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
+            ("Arrival Units", 12, "qty"), ("CBM", 9, "cbm"), ("Current Stock", 12, "stock"),
+        ]
+        prows = []
+        for ev in plan:
+            kind = "Proposed rebuy" if ev.get("kind") == "proposed" else "Committed - no PO"
+            for ln in ev.get("lines") or [{}]:
+                prows.append({
+                    "_group": f"{ev.get('supplier','')}|{ev.get('week')}|{ev.get('kind')}",
+                    "date": _date(ev.get("date")), "week": ev.get("week"),
+                    "bookDate": _date(ev.get("bookDate")), "kind": kind,
+                    "supplier": ev.get("supplier", ""),
+                    "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
+                    "qty": ln.get("qty"), "cbm": ln.get("cbm"), "stock": ln.get("stock"),
+                })
+        ccbm = float(payload.get("containerCbm") or 68) or 68
+        pmon = {}
+        for row in prows:
+            dv = row.get("bookDate")
+            key = (dv.year, dv.month) if isinstance(dv, date) else None
+            g = pmon.setdefault(key, {"cbm": 0.0, "units": 0.0})
+            g["cbm"] += row.get("cbm") or 0
+            g["units"] += row.get("qty") or 0
+        plan_month_totals = [
+            ("No est. booking date" if k is None else f"{MONTH_NAMES[k[1] - 1]} {k[0]}",
+             f"~{g['cbm'] / ccbm:.1f} containers", f"{int(round(g['units'])):,} units ({g['cbm']:,.1f} cbm)")
+            for k, g in sorted(pmon.items(), key=lambda kv: (kv[0] is None, kv[0] or (0, 0)))]
+
+        def _plan_band(row):   # band by estimated booking month, like the awaiting sheet
+            dv = row.get("bookDate")
+            return (dv.year, dv.month) if isinstance(dv, date) else None
+
+        sheet(wb.create_sheet("Plan Orders (No PO)"),
+              f"{payload.get('year', '')} plan orders with no PO raised".strip(),
+              plan_cols, prows,
+              "Committed order units in a week with no matching PO/container, plus all proposed rebuys, "
+              f"from the current week on · est. booking = arrival week − {ls + lg + li} days · "
+              f"containers estimated at {ccbm:g} cbm each — nothing here is booked.",
+              months=plan_month_totals, months_title="Plan orders to book per month", band_key=_plan_band)
+
+        # ---- Full Outlook: one row per month, booked arrivals alongside everything
+        # still to be booked (real POs + plan orders), so the whole forward view reads
+        # off a single table.
+        ws = wb.create_sheet("Full Outlook", 0)
+        ws.cell(row=1, column=1, value="Full container outlook by month").font = Font(name=FONT, size=13, bold=True)
+        ws.cell(row=2, column=1, value=(
+            f"Generated {payload.get('generated', '')} · booked = dated Qlik containers, by arrival month · "
+            "to book = outstanding POs and plan orders, by ESTIMATED BOOKING month (arrival − lead) · "
+            f"plan containers estimated from CBM at {ccbm:g} cbm each")
+        ).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+        oc = [("Month", 18), ("Booked containers arriving", 15), ("Booked units", 13),
+              ("POs to book", 11), ("PO units", 12),
+              ("Plan orders to book (est. containers)", 16), ("Plan units", 12),
+              ("Total units to book", 15)]
+        hr = 4
+        for c, (label, width) in enumerate(oc, start=1):
+            cell = ws.cell(row=hr, column=c, value=label)
+            cell.font = Font(name=FONT, size=9, bold=True)
+            cell.fill = _fill(C_SUBHDR)
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws.column_dimensions[get_column_letter(c)].width = width
+        ws.row_dimensions[hr].height = 30
+
+        def _mkey(label):   # "January 2027" -> (2027, 1); the "no date" buckets sort last
+            try:
+                nm, yr = str(label).rsplit(" ", 1)
+                return (int(yr), MONTH_NAMES.index(nm) + 1)
+            except (ValueError, IndexError):
+                return None
+
+        cols_by_month = {}
+        for label, cont, units in month_totals:          # booked arrivals
+            cols_by_month.setdefault(_mkey(label), {})["booked"] = (cont, units)
+        for label, pos, units in await_month_totals:     # POs awaiting a booking
+            cols_by_month.setdefault(_mkey(label), {})["po"] = (pos, units)
+        for label, cont, units in plan_month_totals:     # plan orders
+            cols_by_month.setdefault(_mkey(label), {})["plan"] = (cont, units)
+
+        def _n(txt):        # first number out of "12 containers" / "3,450 units (12.3 cbm)"
+            m = re.match(r"~?([\d,]+(?:\.\d+)?)", str(txt or ""))
+            return float(m.group(1).replace(",", "")) if m else 0.0
+
+        r = hr + 1
+        tot = [0.0] * 6
+        for k in sorted(cols_by_month, key=lambda x: (x is None, x or (0, 0))):
+            g = cols_by_month[k]
+            label = "No date" if k is None else f"{MONTH_NAMES[k[1] - 1]} {k[0]}"
+            vals = [_n(g.get("booked", ("", ""))[0]), _n(g.get("booked", ("", ""))[1]),
+                    _n(g.get("po", ("", ""))[0]), _n(g.get("po", ("", ""))[1]),
+                    _n(g.get("plan", ("", ""))[0]), _n(g.get("plan", ("", ""))[1])]
+            tot = [a + b for a, b in zip(tot, vals)]
+            for c, v in enumerate([label] + vals + [vals[3] + vals[5]], start=1):
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.font = Font(name=FONT, size=10)
+                cell.border = BORDER
+                if isinstance(v, float):
+                    cell.number_format = "#,##0.0" if c == 6 else "#,##0"
+            r += 1
+        for c, v in enumerate(["Total"] + tot + [tot[3] + tot[5]], start=1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name=FONT, size=10, bold=True)
+            cell.fill = _fill(C_REF_HDR)
+            cell.border = BORDER
+            if isinstance(v, float):
+                cell.number_format = "#,##0.0" if c == 6 else "#,##0"
+        ws.freeze_panes = ws.cell(row=hr + 1, column=1)
 
     bio = io.BytesIO()
     wb.save(bio)
