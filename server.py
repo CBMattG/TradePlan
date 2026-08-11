@@ -351,13 +351,17 @@ class Handler(SimpleHTTPRequestHandler):
             names = list(dict.fromkeys(s["supplier"] for s in master["skus"]))
         buf = io.BytesIO()
         used = set()
+        failed = []
         fcfg = supplier_form_cfg()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for name in names:
                 try:
                     bio = supplier_form.export_supplier(name, data_dir=ydir, year=year, form_cfg=fcfg)
-                except Exception:
-                    continue  # skip a supplier that fails rather than break the whole zip
+                except Exception as exc:
+                    # skip a supplier that fails rather than break the whole zip — but
+                    # never silently: a missing form used to look like a missing supplier
+                    failed.append(f"{name}: {type(exc).__name__}: {exc}")
+                    continue
                 fname = f"{safe_filename(name)} - {year} Order Planning.xlsx"
                 n, base = 2, fname
                 while fname in used:  # avoid collisions after filename sanitising
@@ -365,6 +369,12 @@ class Handler(SimpleHTTPRequestHandler):
                     n += 1
                 used.add(fname)
                 zf.writestr(fname, bio.getvalue())
+            if failed:
+                zf.writestr(
+                    "_FORMS THAT FAILED - PLEASE READ.txt",
+                    f"{len(failed)} supplier form(s) could not be built for {year} and are "
+                    "NOT in this zip:\r\n\r\n" + "\r\n".join(failed) + "\r\n",
+                )
         data = buf.getvalue()
         zipname = f"{year} Order Planning forms.zip"
         self.send_response(200)

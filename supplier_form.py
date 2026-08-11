@@ -99,6 +99,22 @@ def _fill(c):
     return PatternFill("solid", fgColor=c)
 
 
+def _num(v, default=0.0):
+    """A numeric field out of master.json, coerced to a real number.
+
+    A manually-added product carries null (or simply no) fob / cbm / asp until it's
+    been costed — and `dict.get("fob", 0)` still hands back None when the key exists
+    and is null, which then blows up the round() / arithmetic downstream. Every read
+    of a number out of the master goes through here, so a half-filled new product
+    exports as a zero rather than failing the whole workbook.
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return default if f != f else f          # NaN -> default
+
+
 def _year_totals_for_codes(ydir, codes, container_cbm=CONTAINER_CBM):
     """Order Quantity / Value / Containers for a set of SKU codes in one year's
     data folder. Years are matched by SKU code (supplier names differ between
@@ -122,10 +138,11 @@ def _year_totals_for_codes(ydir, codes, container_cbm=CONTAINER_CBM):
     for s in master["skus"]:
         if s["code"] not in codes:
             continue
-        tot = sum(orders.get(s["id"]) or [0] * WEEKS) + sum(prop.get(s["id"]) or [])
+        tot = sum(_num(v) for v in (orders.get(s["id"]) or [0] * WEEKS)) \
+            + sum(_num(v) for v in (prop.get(s["id"]) or []))
         qty += tot
-        val += tot * s.get("fob", 0)
-        cbm += tot * s.get("cbm", 0)
+        val += tot * _num(s.get("fob"))
+        cbm += tot * _num(s.get("cbm"))
     return qty, val, (cbm / container_cbm if container_cbm else 0.0)
 
 
@@ -167,11 +184,14 @@ def _prev_year_by_code(ddir, year, codes):
         c = s["code"]
         if c not in codes:
             continue
-        units = sum(orders.get(s["id"]) or [0] * WEEKS)
+        units = sum(_num(v) for v in (orders.get(s["id"]) or [0] * WEEKS))
         if c in out:
             out[c]["units"] += units
         else:
-            out[c] = {"fob": s.get("fob", 0), "units": units}
+            # None = "last year's FOB was never recorded", which the caller turns into
+            # this year's cost. Coercing it to 0 here would report the line as having
+            # gone from £0 to its current price.
+            out[c] = {"fob": _num(s.get("fob"), None), "units": units}
     return out
 
 
@@ -277,15 +297,16 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
         ov = ordv(s)
         total_order = sum(ov)
         prev = prevmap.get(s["code"], {})
-        prev_units = int(round(prev.get("units", 0)))            # previous year's ORDER units (not sales)
-        prev_fob = round(prev.get("fob", s["fob"]), 2)           # previous year's FOB cost (fallback to current)
+        fob = _num(s.get("fob"))                                  # a new product may not be costed yet
+        prev_units = int(round(_num(prev.get("units"))))          # previous year's ORDER units (not sales)
+        prev_fob = round(_num(prev.get("fob"), fob), 2)           # previous year's FOB cost (fallback to current)
         status = {"Live": "LIVE", "Not Live": "NOT LIVE"}.get(s.get("status"), "")
         put(r, 1, s["code"], align=left, fill=C_SKU)
         put(r, 2, status, fill=C_STATUS if status else None)
         put(r, 3, prev_fob, fmt=FMT_USD)                              # previous-year FOB
-        put(r, 4, round(s["fob"], 2), fmt=FMT_USD, fill=C_STATUS)     # current-year FOB (editable)
+        put(r, 4, round(fob, 2), fmt=FMT_USD, fill=C_STATUS)          # current-year FOB (editable)
         put(r, 5, f"=IFERROR((D{r}/C{r})-1,0)", fmt=FMT_PCT)
-        put(r, 6, round(s["cbm"], 6), fmt=FMT_CBM)
+        put(r, 6, round(_num(s.get("cbm")), 6), fmt=FMT_CBM)
         put(r, 7, prev_units, fmt=FMT_QTY_T)                          # previous-year order units
         put(r, 8, f"=G{r}*C{r}", fmt=FMT_USD)
         put(r, 9, total_order, fmt=FMT_QTY_T, fill=C_INPUT, bold=True)  # current-year proposed total
