@@ -4177,7 +4177,7 @@ function openSkuDialog(id) {
   if (sku.supplier && !sups.includes(sku.supplier)) sups.unshift(sku.supplier);
   const cats = [...new Set(M.skus.map(s => s.category).filter(Boolean))].sort();
   document.getElementById('sku-f-id').innerHTML =
-    `<label>Product code <small>the import match key — not editable</small><input type="text" value="${esc(sku.code)}" disabled></label>`
+    `<label>Product code <small>the import &amp; PO match key</small><input type="text" id="sku-code" value="${esc(sku.code)}" spellcheck="false" autocomplete="off"></label>`
     + `<label>Product name<input type="text" id="sku-name" value="${esc(sku.name || '')}"></label>`
     + skuSelField('supplier', 'Supplier', sku.supplier, sups, '<small>moves the product</small>', true)
     + skuSelField('season', 'Season', sku.season || 'No Defined Season',
@@ -4191,7 +4191,9 @@ function openSkuDialog(id) {
     + `<label class="ap-wide">Image URL<input type="text" id="sku-image" value="${esc(sku.image || '')}"></label>`;
   document.getElementById('sku-id-note').innerHTML = `Internal id <code>${esc(sku.id)}</code>`
     + (sku.supplier ? ` · currently under <b>${esc(titleCase(sku.supplier))}</b>` : '')
+    + (sku.code_prev ? ` · renamed from <code>${esc(sku.code_prev)}</code>` : '')
     + `. Moving a product to another supplier re-groups it in the sidebar and in every supplier export.`;
+  document.getElementById('sku-code-warn').innerHTML = '';
 
   // --- costs ---
   document.getElementById('sku-f-cost').innerHTML =
@@ -4277,7 +4279,51 @@ function openSkuDialog(id) {
     const lbl = document.getElementById('sku-fpq-lbl');
     if (lbl) lbl.textContent = `Units per ${e.target.value === 'Stillage' ? 'stillage' : 'pallet'}`;
   });
+  document.getElementById('sku-code').addEventListener('input', skuCodeWarn);
   document.getElementById('sku-dialog').showModal();
+}
+/* ---- renaming the product code ----
+   The code is the key every code-matched lookup runs on (cost/status/sales imports, the
+   WEBSA/Qlik PO match, the previous-year comparison), so a typo here quietly detaches a
+   product from all of it. Committed orders and proposed rebuys are keyed by the internal
+   id, so those follow the product regardless. Warn live while typing, then confirm. */
+function skuCodeIssue(next) {
+  if (!next) return 'The product code can\'t be empty.';
+  if (M.skus.some(s => s.id !== SKU_EDIT.id && s.code === next))
+    return `<b>${esc(next)}</b> is already used by another product in ${YEAR} — codes must be unique.`;
+  return '';
+}
+function skuCodeWarn() {
+  const box = document.getElementById('sku-code-warn');
+  if (!box) return;
+  const next = (document.getElementById('sku-code').value || '').trim();
+  if (next === SKU_EDIT.code) { box.innerHTML = ''; return; }
+  const bad = skuCodeIssue(next);
+  if (bad) { box.innerHTML = `<div class="sku-warn sku-codebad">${bad}</div>`; return; }
+  box.innerHTML = `<div class="sku-warn sku-codebad">Renaming <code>${esc(SKU_EDIT.code)}</code> &rarr; <code>${esc(next)}</code>.`
+    + ` The code is what the cost, status and sales imports match on, and what the WEBSA/Qlik`
+    + ` <b>PO match</b> and the previous-year comparison look up — those will follow the <i>new</i>`
+    + ` code from now on. Committed orders and proposed rebuys are unaffected.`
+    + ` You'll be asked to confirm.</div>`;
+}
+// The typed-in code if it differs and is valid; '' if unchanged; null if it can't be used.
+function skuCodeChange(msg) {
+  const next = (document.getElementById('sku-code').value || '').trim();
+  if (next === SKU_EDIT.code) return '';
+  const bad = skuCodeIssue(next);
+  if (bad) { msg.innerHTML = bad; return null; }
+  const ok = confirm(
+    `Change this product's code?\n\n`
+    + `    ${SKU_EDIT.code}   →   ${next}\n\n`
+    + `The product code is the match key for:\n`
+    + `  · the cost, status and weekly sales imports\n`
+    + `  · the WEBSA / Qlik purchase-order and container match\n`
+    + `  · the previous-year FOB and order-unit comparison\n\n`
+    + `From now on those will look for "${next}", so the source reports need to use the new code too.\n`
+    + `Committed orders and proposed rebuys are keyed internally and will NOT be affected.\n\n`
+    + `This is logged in History and can be reverted. Continue?`);
+  if (!ok) { msg.textContent = 'Code left as ' + SKU_EDIT.code + '.'; return null; }
+  return next;
 }
 // 53 editable weekly cells + a live annual total
 function skuFcRender() {
@@ -4329,22 +4375,27 @@ async function submitSkuDetails() {
   setIf('pallet_type', txt('pallet_type'), sku.pallet_type);
   for (const k of ['fob', 'landed', 'asp', 'duty_rate', 'cbm', 'pack_size', 'fpq', 'stock_now']) setIf(k, nOf(k), sku[k]);
   const wChanged = SKU_EDIT.weekly.some((v, w) => Math.abs(v - SKU_EDIT.weekly0[w]) > 0.0005);
-  if (!Object.keys(fields).length && !wChanged) { msg.textContent = 'Nothing changed yet.'; return; }
-  const payload = { code: sku.code, years, fields, baseForecast: wChanged ? SKU_EDIT.weekly : null };
+  const newCode = skuCodeChange(msg);        // '' = unchanged, null = rejected/cancelled
+  if (newCode === null) return;
+  if (!Object.keys(fields).length && !wChanged && !newCode) { msg.textContent = 'Nothing changed yet.'; return; }
+  const payload = { code: sku.code, newCode: newCode || null, years, fields, baseForecast: wChanged ? SKU_EDIT.weekly : null };
   msg.textContent = 'Saving…';
   try {
     const r = await fetch('/api/apply-sku', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const j = await r.json();
     if (!j.ok) { msg.textContent = j.error || 'Save failed.'; return; }
-    applySkuToMemory(sku.code, fields, wChanged ? SKU_EDIT.weekly : null, years);
+    applySkuToMemory(sku.code, fields, wChanged ? SKU_EDIT.weekly : null, years, newCode);
     document.getElementById('sku-dialog').close();
     const what = (j.changed || []).length;
     document.getElementById('save-status').textContent =
-      `${sku.code}: ${what} field${what === 1 ? '' : 's'} updated (${years.join(', ')})`;
-    if (fields.supplier) alert(`${sku.code} moved to ${titleCase(fields.supplier)}.\n\nIt now appears under that supplier in the sidebar and in their export.`);
+      `${newCode || sku.code}: ${what} field${what === 1 ? '' : 's'} updated (${years.join(', ')})`;
+    if (newCode) alert(`Renamed ${payload.code} to ${newCode} in ${years.join(', ')}.\n\n`
+      + `Any future cost, status or sales import — and the PO/container match — will now look for "${newCode}".\n\n`
+      + `Undo it from History if that wasn't intended.`);
+    else if (fields.supplier) alert(`${sku.code} moved to ${titleCase(fields.supplier)}.\n\nIt now appears under that supplier in the sidebar and in their export.`);
   } catch (e) { msg.textContent = 'Error: ' + e.message; }
 }
-function applySkuToMemory(code, fields, weekly, years) {
+function applySkuToMemory(code, fields, weekly, years, newCode) {
   if (!years.includes(String(YEAR))) return;
   const moved = fields.supplier;
   for (const s of M.skus) {
@@ -4355,6 +4406,7 @@ function applySkuToMemory(code, fields, weekly, years) {
       if (tag) s[tag] = 'manual';
     }
     if (weekly) { s.base_forecast = weekly.slice(); s.base_forecast_src = 'manual'; }
+    if (newCode) { s.code_prev = s.code; s.code = newCode; }   // last: it's the loop's match key
   }
   if (moved && !M.suppliers.some(s => s.name === moved)) M.suppliers.push({ name: moved });
   supByName = new Map(M.suppliers.map(s => [s.name, s]));

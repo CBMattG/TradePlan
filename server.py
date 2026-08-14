@@ -1109,10 +1109,15 @@ class Handler(SimpleHTTPRequestHandler):
     def apply_sku(self, qs):
         """Hand-edited product details from the per-product Details dialog. Writes only the
         fields the client says changed into master.json for the given years, matched by
-        code. The product code and id are the keys every import matches on, so they are
-        never edited here. Fields that carry provenance are stamped 'manual' (or 'calc'
-        for a CBM that came from cartons). Optional baseForecast replaces the 53-week
-        planner forecast. Logged as one revertable changelog entry."""
+        code. Fields that carry provenance are stamped 'manual' (or 'calc' for a CBM that
+        came from cartons). Optional baseForecast replaces the 53-week planner forecast.
+        Logged as one revertable changelog entry.
+
+        An optional `newCode` renames the product. The code is the key every import and
+        the PO/container match run on, so it is handled apart from the ordinary fields:
+        it must be non-empty and unused by any other product in each target year. The
+        internal id never changes, so committed orders and proposed rebuys (keyed by id)
+        follow the product across the rename untouched."""
         TEXT = {"name", "supplier", "season", "category", "status", "image", "pallet_type",
                 "npd_year"}   # blank clears the NPD tag
         NUM = {"fob", "landed", "asp", "duty_rate", "cbm", "pack_size", "fpq", "stock_now"}
@@ -1158,7 +1163,10 @@ class Handler(SimpleHTTPRequestHandler):
                 except (TypeError, ValueError):
                     self.send_json({"ok": False, "error": "The weekly forecast must be numbers."}, 400)
                     return
-            if not fields and weekly is None:
+            new_code = str(b.get("newCode") or "").strip()
+            if new_code == code:
+                new_code = ""
+            if not fields and weekly is None and not new_code:
                 self.send_json({"ok": False, "error": "Nothing changed."}, 400)
                 return
             yrs, _ = years_index()
@@ -1166,8 +1174,25 @@ class Handler(SimpleHTTPRequestHandler):
             if not targets:
                 self.send_json({"ok": False, "error": "No valid target years."}, 400)
                 return
-            changed = sorted(list(fields.keys()) + (["base_forecast"] if weekly else []))
-            record_change("edit", f"Product details {code}",
+            if new_code:
+                # the code has to stay unique per year, or every code-matched lookup
+                # (imports, PO matching, prev-year comparison) becomes ambiguous
+                clash = []
+                for y in targets:
+                    m = read_json(DATA / y / "master.json", None)
+                    if not m:
+                        continue
+                    if any(str(s.get("code", "")).strip() == new_code
+                           and str(s.get("code", "")).strip() != code for s in m["skus"]):
+                        clash.append(y)
+                if clash:
+                    self.send_json({"ok": False,
+                                    "error": f"'{new_code}' is already used by another product in "
+                                             f"{', '.join(clash)}. Product codes must be unique."}, 400)
+                    return
+            changed = sorted(list(fields.keys()) + (["base_forecast"] if weekly else [])
+                             + (["code"] if new_code else []))
+            record_change("edit", f"Product details {code}" + (f" → {new_code}" if new_code else ""),
                           f"{', '.join(changed)} · {', '.join(targets)}",
                           [f"{y}/master.json" for y in targets])
             applied, missing = {}, []
@@ -1190,6 +1215,9 @@ class Handler(SimpleHTTPRequestHandler):
                     if weekly is not None:
                         s["base_forecast"] = list(weekly)
                         s["base_forecast_src"] = "manual"
+                    if new_code:
+                        s["code_prev"] = code       # what it was, so the rename is traceable
+                        s["code"] = new_code
                     n += 1
                 # a product moved to a supplier this year doesn't know about yet
                 sup = fields.get("supplier")
@@ -1200,7 +1228,8 @@ class Handler(SimpleHTTPRequestHandler):
                     missing.append(y)
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
-            self.send_json({"ok": True, "code": code, "years": targets, "applied": applied,
+            self.send_json({"ok": True, "code": new_code or code, "oldCode": code,
+                            "renamed": bool(new_code), "years": targets, "applied": applied,
                             "changed": changed, "missing": missing})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)

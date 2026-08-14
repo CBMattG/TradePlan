@@ -789,6 +789,11 @@ dialog h2 { margin: 0 0 10px; font-size: 16px; }
 .sku-stat b { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
 .sku-warn { font-size: 11.5px; line-height: 1.45; padding: 6px 10px; margin-bottom: 8px; border-radius: 6px;
   background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+/* live warning while the product code (the import / PO match key) is being retyped */
+.sku-warn.sku-codebad { background: #fff4e5; border-color: #e0b070; margin-top: 8px; }
+.sku-warn.sku-codebad code { background: rgba(0, 0, 0, .06); padding: 0 4px; border-radius: 4px; font-size: 11px; }
+[data-theme="dark"] .sku-warn.sku-codebad { background: #3a2e1a; border-color: #7a5f2a; }
+[data-theme="dark"] .sku-warn.sku-codebad code { background: rgba(255, 255, 255, .09); }
 .sku-fc-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
 .sku-fc-tools label { font-size: 11.5px; color: var(--dim); font-weight: 600; }
 .sku-fc-tools input { width: 90px; margin-left: 5px; }
