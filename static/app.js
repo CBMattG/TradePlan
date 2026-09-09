@@ -788,15 +788,66 @@ function searchEmptyNote(term) {
 }
 
 /* ---------------- plan view ---------------- */
-function headerRow(propWeeks) {
+// Per-week sales value across the rows actually on screen, so the figure in the header
+// describes the grid beneath it (identical to the whole supplier when nothing is
+// filtered out). Uses the combined committed + proposed value where proposals exist.
+function weekSalesFor(skus) {
+  const out = zeros();
+  for (const sku of skus) {
+    const v = (RESC && RESC.get(sku.id)) || (RES.get(sku.id) || {}).value;
+    if (!v) continue;
+    for (let w = 0; w < WEEKS; w++) out[w] += v[w];
+  }
+  return out;
+}
+// Compact £ for the week header. Deliberately narrower than the w/c date already sitting
+// under the week number, so adding it can never widen a column — with 53 of them, any
+// extra width costs real horizontal space.
+function fmtGBPtight(n) {
+  const a = Math.abs(n);
+  if (a < 0.5) return '';
+  if (a < 1000) return '£' + Math.round(n);
+  if (a < 10000) return '£' + (n / 1000).toFixed(1) + 'k';
+  if (a < 1e6) return '£' + Math.round(n / 1000) + 'k';
+  return '£' + (n / 1e6).toFixed(2) + 'm';
+}
+function headerRow(propWeeks, sales) {
   const hw = highlightWeek();
   let h = '<tr><th class="lbl">Week</th>';
   for (let w = 1; w <= WEEKS; w++) {
     const cls = [w === hw ? 'curwk' : '', propWeeks && propWeeks.has(w) ? 'has-prop' : ''].filter(Boolean).join(' ');
     const tip = propWeeks && propWeeks.has(w) ? ' title="Proposed rebuy orders present in this week"' : '';
-    h += `<th class="${cls}"${tip}>W${w}<span class="d">${weekDate(w)}</span></th>`;
+    h += `<th class="${cls}"${tip}>W${w}<span class="d">${weekDate(w)}</span>`
+      + (sales ? `<span class="hs" data-hs="${w - 1}" title="Week ${w} sales value on screen: ${fmtGBP(sales[w - 1])}">${fmtGBPtight(sales[w - 1])}</span>` : '')
+      + `</th>`;
   }
-  return h + '<th>Total</th></tr>';
+  const tot = sales ? sales.reduce((a, b) => a + b, 0) : 0;
+  return h + `<th>Total`
+    + (sales ? `<span class="d">&nbsp;</span><span class="hs hs-tot" title="Total sales value on screen: ${fmtGBP(tot)}">${fmtGBPtight(tot)}</span>` : '')
+    + `</th></tr>`;
+}
+// Keep the header's weekly sales in step with an order / rebuy edit, without re-rendering
+// the whole grid (53 columns x every product is not cheap).
+function refreshWeekSales() {
+  const ths = document.querySelectorAll('.grid thead th .hs');
+  if (!ths.length) return;
+  const ids = new Set();
+  // every rendered product, including ones collapsed shut — folding a row away
+  // shouldn't change what the week totals say
+  document.querySelectorAll('.grid tbody tr[data-skurow]').forEach(tr => ids.add(tr.dataset.skurow));
+  const skus = ids.size ? [...ids].map(id => skuById.get(id)).filter(Boolean)
+                        : M.skus.filter(s => s.supplier === currentSupplier);
+  const sales = weekSalesFor(skus);
+  let tot = 0;
+  for (const el of ths) {
+    if (el.classList.contains('hs-tot')) continue;
+    const w = +el.dataset.hs;
+    tot += sales[w];
+    el.textContent = fmtGBPtight(sales[w]);
+    el.title = `Week ${w + 1} sales value on screen: ${fmtGBP(sales[w])}`;
+  }
+  const totEl = document.querySelector('.grid thead th .hs-tot');
+  if (totEl) { totEl.textContent = fmtGBPtight(tot); totEl.title = `Total sales value on screen: ${fmtGBP(tot)}`; }
 }
 
 // Set of week numbers (1-based) that contain any proposed rebuy across the given SKUs.
@@ -1187,7 +1238,15 @@ function skuRowsHtml(sku, idx) {
         if (def.key === 'forecast' && wk >= cur && seasonActiveFor(YEAR)) cls += 'modeled ';
         if (def.key === 'ly' && lyIsForecast(w)) cls += 'ly-fc ';
         if (Math.abs(v) < .5 && def.key !== 'cover') cls += 'zero';
-        const ttl = def.key === 'ly' && lyIsForecast(w) ? ' title="Forecast — prior-year actual sales not yet available for this week"' : '';
+        let ttl = def.key === 'ly' && lyIsForecast(w) ? ' title="Forecast — prior-year actual sales not yet available for this week"' : '';
+        // a week whose closing is fixed by a real Buying Report reading rather than chained
+        if (def.key === 'stock' && wk < cur && stockSnapAt(sku, wk + 1) != null) {
+          cls += 'stk-real ';
+          ttl = ` title="Measured — the Buying Report read ${fmtU(stockSnapAt(sku, wk + 1))} units on the Monday of W${wk + 1}, so W${wk} closed here"`;
+        } else if (def.key === 'stock' && wk < cur && stockSnapAt(sku, wk) != null) {
+          cls += 'stk-real ';
+          ttl = ` title="Anchored on the Buying Report reading of ${fmtU(stockSnapAt(sku, wk))} units taken on the Monday of W${wk}"`;
+        }
         h += `<td class="${cls.trim()}"${style}${ttl} data-sku="${esc(sku.id)}" data-k="${def.key}" data-w="${w}">${def.fmt(v)}</td>`;
       }
     }
@@ -1203,6 +1262,12 @@ function skuRowsHtml(sku, idx) {
     }
   }
   return h;
+}
+
+// The Buying Report free-stock reading recorded for a given week, or null.
+function stockSnapAt(sku, wk) {
+  const a = sku && sku.stock_snap;
+  return (Array.isArray(a) && wk >= 1 && wk <= a.length && a[wk - 1] != null) ? +a[wk - 1] : null;
 }
 
 /* ---------------- supplier summary panel (visual subtotals) ---------------- */
@@ -1913,7 +1978,7 @@ function renderPlan() {
     </div>
     ${LY_CACHE ? `<div id="sup-panel-head"><label class="ghost-toggle" title="Overlay each card with a faint dashed ${LY_CACHE.year} trend line"><input type="checkbox" id="ghost-chk"${GHOST_ON ? ' checked' : ''}><span>${LY_CACHE.year} trend</span></label></div>` : ''}
     <div id="sup-panel">${supplierPanelHtml(t, sup.name)}</div>
-    <div class="gridwrap"><table class="grid"><thead>${headerRow(proposedWeekSet(skus))}${poRowHtml(sup.name)}</thead>
+    <div class="gridwrap"><table class="grid"><thead>${headerRow(proposedWeekSet(skus), weekSalesFor(skus))}${poRowHtml(sup.name)}</thead>
       <tbody>${body}</tbody>
       <tfoot>${supCbmFooterHtml(sup.name, CC, highlightWeek())}</tfoot></table></div>`;
   if (reopenDD) { const dd = document.getElementById(reopenDD); if (dd) dd.open = true; reopenDD = null; }
@@ -2052,6 +2117,7 @@ function commitEdit(inp) {
     refreshSkuCells(id);        // projection (committed + proposed) updates live
     refreshSupplierPanel();
     refreshCbmFooter();         // weekly container-fill footer updates live
+    refreshWeekSales();         // the header's weekly sales follow the edit live
     refreshPropWeekHeaders();   // week-number highlight follows the edit live
     refreshPoRow();             // "No PO" flags follow the edit live
     fillTotals();               // whole-plan band proposed breakdown updates live
@@ -2067,6 +2133,7 @@ function commitEdit(inp) {
   refreshSkuCells(id);
   refreshSupplierPanel();
   refreshCbmFooter();           // weekly container-fill footer updates live
+  refreshWeekSales();           // the header's weekly sales follow the edit live
   refreshPoRow();               // "No PO" flags follow the edit live
   fillTotals();
   updateSidebarKpi(skuById.get(id).supplier);
@@ -3730,6 +3797,17 @@ function openBuyingDialog() {
   }
   document.getElementById('buying-years').innerHTML = YEARS.slice().sort().map(y =>
     `<label class="asp-yr"><input type="checkbox" value="${y}"${y >= String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
+  // the reading is a Monday snapshot — stamp it against the week it was taken in, so a
+  // late import doesn't silently land on the wrong week
+  document.getElementById('buying-week').innerHTML =
+    `<label class="bw-lbl">Stock reading is for week
+       <input type="number" id="buying-week-n" min="1" max="53" step="1" value="${SETTINGS.current_week}"></label>`
+    + `<span class="bw-note">w/c <b id="buying-week-d">${weekDate(SETTINGS.current_week)}</b> — the report's free stock is`
+    + ` recorded against this week, building the stock history the plan reads back.</span>`;
+  document.getElementById('buying-week-n').addEventListener('input', e => {
+    const w = Math.max(1, Math.min(WEEKS, parseInt(e.target.value, 10) || 1));
+    document.getElementById('buying-week-d').textContent = weekDate(w);
+  });
   document.getElementById('buying-summary').innerHTML =
     `<p>From <b>${esc(p.fname)}</b>: <b>${matched.length}</b> of ${YEAR}'s ${M.skus.length} products matched (WEBSA rows only; ${p.fileSkus} in the file).</p>`
     + `<p class="muted-note">Status in file: <b>${live}</b> Live · <b>${notlive}</b> Not Live. <b>${changes.length}</b> status change(s), <b>${ospN}</b> outstanding-purchase update(s), <b>${stkN}</b> live-stock update(s) (Stock now refreshes from this report).</p>`;
@@ -3744,6 +3822,12 @@ function openBuyingDialog() {
   document.getElementById('buying-apply').disabled = matched.length === 0;
   document.getElementById('buying-dialog').showModal();
 }
+// The plan week the Buying Report's stock reading belongs to (its Monday).
+function buyingSnapWeek() {
+  const el = document.getElementById('buying-week-n');
+  const w = parseInt(el && el.value, 10);
+  return (w >= 1 && w <= WEEKS) ? w : SETTINGS.current_week;
+}
 async function applyBuyingUpdates() {
   const p = BUYING_PARSED; if (!p) return;
   const years = [...document.querySelectorAll('#buying-years input:checked')].map(i => i.value);
@@ -3751,10 +3835,10 @@ async function applyBuyingUpdates() {
   const status = document.getElementById('save-status'); status.textContent = 'Updating catalogue…';
   try {
     const r = await fetch('/api/apply-buying', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ buying: p.map, years }) });
+      body: JSON.stringify({ buying: p.map, years, week: buyingSnapWeek() }) });
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
-    const n = applyBuyingToMemory(p.map, years);
+    const n = applyBuyingToMemory(p.map, years, buyingSnapWeek());
     SETTINGS.buying_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
     document.getElementById('buying-dialog').close();
     document.getElementById('settings-dialog').close();
@@ -3763,7 +3847,7 @@ async function applyBuyingUpdates() {
     BUYING_PARSED = null;
   } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
 }
-function applyBuyingToMemory(map, years) {
+function applyBuyingToMemory(map, years, snapWeek) {
   if (!years.includes(String(YEAR))) return 0;
   let n = 0;
   for (const s of M.skus) {
@@ -3771,11 +3855,44 @@ function applyBuyingToMemory(map, years) {
     let touched = false;
     if (rec.status) { s.status = rec.status; touched = true; }
     if (rec.osPurchases != null) { s.os_purchases = rec.osPurchases; touched = true; }
-    if (rec.stock != null) { s.stock_now = rec.stock; touched = true; }   // live warehouse stock
+    if (rec.stock != null) {
+      s.stock_now = rec.stock;                                  // live warehouse stock
+      if (snapWeek >= 1 && snapWeek <= WEEKS) {                 // ...and keep it as history
+        if (!Array.isArray(s.stock_snap)) s.stock_snap = new Array(WEEKS).fill(null);
+        while (s.stock_snap.length < WEEKS) s.stock_snap.push(null);
+        s.stock_snap[snapWeek - 1] = rec.stock;
+      }
+      touched = true;
+    }
     if (touched) n++;
   }
+  if (snapWeek >= 1 && snapWeek <= WEEKS) rechainRunningStock(snapWeek);
   computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
+}
+/* ---- weekly closing stock, anchored on the real Buying Report readings ----
+   Mirrors the server's rechain_running_stock so the grid matches what was just written
+   without a reload. A snapshot is the OPENING position of its week, so it also fixes the
+   previous week's closing exactly, and the chain re-anchors on it rather than carrying
+   drift forward from week 1. */
+function rechainRunningStock(start) {
+  const closed = Math.max(start, (+M.data_week || SETTINGS.current_week) - 1);
+  for (const s of M.skus) {
+    if (!Array.isArray(s.running_stock)) s.running_stock = new Array(WEEKS).fill(0);
+    const rs = s.running_stock, snap = s.stock_snap || [], act = s.actual || [];
+    const ordv = ORDERS[s.id] || EMPTY53;
+    for (let w = Math.max(1, start); w <= Math.min(closed, WEEKS); w++) {
+      const sn = snap[w - 1];
+      let opening;
+      if (sn != null) {
+        opening = +sn;
+        if (w >= 2) rs[w - 2] = opening;      // last week closed on exactly this figure
+      } else {
+        opening = w >= 2 ? (+rs[w - 2] || 0) : (+s.stock_now || 0);
+      }
+      rs[w - 1] = Math.max(0, opening + (+ordv[w - 1] || 0) - (+act[w - 1] || 0));
+    }
+  }
 }
 
 /* ---------- update per-product duty rates from the Tradeplan "Landed Costs" sheet ---------- */
@@ -4262,6 +4379,12 @@ function openSkuDialog(id) {
       : 'none'],
     ['Season / category', `${esc(sku.season || '—')} · ${esc(sku.category || '—')}`],
     ['Weekly forecast', srcPill(sku.base_forecast_src || 'orig')],
+    ['Stock readings', (() => {
+      const w = (sku.stock_snap || []).map((v, i) => v != null ? i + 1 : 0).filter(Boolean);
+      if (!w.length) return 'none yet — weekly stock is chained from arrivals and sales, not measured';
+      const list = w.length > 8 ? `W${w[0]}–W${w[w.length - 1]} (${w.length})` : w.map(x => 'W' + x).join(', ');
+      return `${srcPill('import', list)} Buying Report free stock, one reading per week`;
+    })()],
     ['Cartons', nC ? srcPill(sku.cartons_src || 'manual', `${nC} box${nC > 1 ? 'es' : ''}`) : '—'],
     ['Loading basis', sku.load_basis === 'volume' ? 'carton volume' : (sku.load_basis === 'weight' ? 'weight-limited' : '—')],
     ['Previous CBM', sku.cbm_prev != null ? (+sku.cbm_prev).toFixed(4) : '—'],
@@ -5116,23 +5239,74 @@ function exportCsv() {
   a.download = `tradeplan-orders-${YEAR}.csv`;
   a.click();
 }
-// Export the weekly sales-unit forecast (SKU + W1..W53) to Excel. Uses the
-// client-computed forecast (so it reflects the multiplier / seasonality / target mode).
-async function exportForecast() {
-  const rows = M.skus.map(sku => ({ code: sku.code, status: sku.status || '', forecast: (RES.get(sku.id) || {}).forecast || [] }));
+/* ---- weekly sales-unit forecast export (SKU + W1..W53) ----
+   Two versions, because they answer different questions:
+     demand     — every forecast unit, whether or not stock covers it. What the line
+                  would sell given supply; the basis for buying decisions.
+     achievable — the units actually behind the plan's Sales Value row: banked actuals
+                  for the weeks already traded, then the forecast capped at the stock
+                  projected to be on hand. A line that runs out contributes nothing
+                  after that point, exactly as its £ value shows.
+   Both use the client-computed forecast, so both reflect the multiplier and the
+   seasonality / target mode. */
+const FCEXP_MODES = {
+  demand: { sheet: 'Sales Unit Forecast', file: 'Sales Unit Forecast' },
+  achievable: { sheet: 'Achievable Forecast', file: 'Sales Unit Forecast (achievable)' },
+};
+// The weekly series for one product under the chosen mode.
+function fcExportSeries(sku, mode) {
+  const r = RES.get(sku.id) || {};
+  const fc = r.forecast || [];
+  if (mode !== 'achievable' || !r.stock) return fc;
+  const cur = SETTINGS.current_week;
+  // mirrors computeSku's `value` row exactly, minus the × ASP
+  return fc.map((v, w) => (w + 1) < cur ? (sku.actual[w] || 0) : Math.min(v, r.stock[w]));
+}
+function openForecastExportDialog() {
+  const dlg = document.getElementById('fcexp-dialog');
+  const saved = SETTINGS.fc_export_mode === 'achievable' ? 'achievable' : 'demand';
+  dlg.querySelectorAll('input[name="fcexp-mode"]').forEach(i => { i.checked = i.value === saved; });
+  // what the two versions actually differ by, split into its two causes, so the
+  // choice is informed and the actuals swap isn't a surprise in the numbers
+  const cur = SETTINGS.current_week;
+  let demand = 0, ach = 0, capped = 0, banked = 0;
+  for (const sku of M.skus) {
+    const r = RES.get(sku.id) || {};
+    if (!r.forecast || !r.stock) continue;
+    for (let w = 0; w < WEEKS; w++) {
+      demand += r.forecast[w];
+      if ((w + 1) < cur) banked += (sku.actual[w] || 0) - r.forecast[w];
+      else capped += r.forecast[w] - Math.min(r.forecast[w], r.stock[w]);
+    }
+    ach += fcExportSeries(sku, 'achievable').reduce((a, b) => a + b, 0);
+  }
+  document.getElementById('fcexp-note').innerHTML =
+    `${YEAR}: <b>${fmtU(demand)}</b> demand units · <b>${fmtU(ach)}</b> achievable`
+    + (capped > 0.5 ? ` — the stock cap removes <b>${fmtU(capped)}</b> future units (${(100 * capped / (demand || 1)).toFixed(1)}%) that no stock covers`
+                    : ` — no future week is currently stock-capped`)
+    + (Math.abs(banked) > 0.5
+        ? `, and weeks 1–${cur - 1} switch to banked actuals, ${banked > 0 ? 'adding' : 'removing'} <b>${fmtU(Math.abs(banked))}</b>.`
+        : '.');
+  document.getElementById('fcexp-msg').textContent = '';
+  dlg.showModal();
+}
+async function exportForecast(mode) {
+  const M_ = FCEXP_MODES[mode] || FCEXP_MODES.demand;
+  const rows = M.skus.map(sku => ({ code: sku.code, status: sku.status || '', forecast: fcExportSeries(sku, mode) }));
   const status = document.getElementById('save-status');
   status.textContent = 'Building forecast workbook…';
   try {
     const r = await fetch('/api/export-forecast?year=' + encodeURIComponent(YEAR),
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows, week1: M.week1_start }) });
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows, week1: M.week1_start, mode }) });
     if (!r.ok) throw new Error('server ' + r.status);
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `${YEAR} Sales Unit Forecast.xlsx`;
+    a.href = url; a.download = `${YEAR} ${M_.file}.xlsx`;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    status.textContent = 'Exported sales unit forecast';
+    status.textContent = `Exported ${mode === 'achievable' ? 'achievable' : 'demand'} forecast`;
   } catch (e) { status.textContent = 'Export failed!'; alert('Forecast export failed: ' + e.message); }
 }
 
@@ -6229,6 +6403,20 @@ function buildPlanArrivals() {
     : a.supplier < b.supplier ? -1 : a.supplier > b.supplier ? 1 : a.kind < b.kind ? -1 : 1);
   return out;
 }
+// Recent selling rate from banked actual sales: mean units per week over the last N
+// COMPLETED weeks (weeks 1..current-1 are the ones holding actuals). Returns null when
+// there is no completed week to average yet, so early in a year it reads blank rather
+// than as a misleading zero.
+function arrAvgUnits(sku, n) {
+  if (!sku) return null;
+  const end = Math.max(0, (SETTINGS.current_week || 1) - 1);
+  const start = Math.max(0, end - n);
+  if (end <= start) return null;
+  const a = sku.actual || [];
+  let sum = 0;
+  for (let w = start; w < end; w++) sum += (a[w] || 0);
+  return sum / (end - start);
+}
 function arrMatch(ev, q) {
   if (!q) return true;
   if (ev.po.toLowerCase().includes(q) || (ev.supplier || '').toLowerCase().includes(q)) return true;
@@ -6421,8 +6609,17 @@ function arrWeekBlocks(events, counts, body) {
 // its already-joined rows so the workbook always matches what the user is looking at.
 async function exportArrivals() {
   const { booked, awaiting, plan } = arrFilteredEvents();
-  const line = l => ({ code: l.code, name: l.sku ? l.sku.name : '', season: l.sku ? (l.sku.season || '') : '',
-    qty: l.qty, stock: l.sku ? Math.round(l.sku.stock_now || 0) : null });
+  const line = l => {
+    const a4 = arrAvgUnits(l.sku, 4), a12 = arrAvgUnits(l.sku, 12);
+    const stock = l.sku ? Math.round(l.sku.stock_now || 0) : null;
+    // weeks of cover the delivery buys: what's on hand PLUS what's landing, divided by
+    // the recent selling rate. Blank when nothing has sold in the window — dividing by
+    // a zero rate would read as infinite cover, which is not a number worth printing.
+    const cover = (a4 > 0 && stock != null) ? +(((stock + l.qty) / a4).toFixed(1)) : null;
+    return { code: l.code, name: l.sku ? l.sku.name : '', season: l.sku ? (l.sku.season || '') : '',
+      qty: l.qty, stock, cover,
+      avg4: a4 == null ? null : +a4.toFixed(1), avg12: a12 == null ? null : +a12.toFixed(1) };
+  };
   const flt = ARR_FILTER.trim();
   const payload = {
     generated: `${arrTodayUk()}${flt ? ` · filtered: "${flt}"` : ''}`,
@@ -6857,7 +7054,13 @@ async function init() {
   document.getElementById('carton-cancel').addEventListener('click', () => document.getElementById('carton-dialog').close());
   document.getElementById('carton-save').addEventListener('click', submitCartons);
   document.getElementById('btn-export').addEventListener('click', exportCsv);
-  document.getElementById('btn-export-forecast').addEventListener('click', exportForecast);
+  document.getElementById('btn-export-forecast').addEventListener('click', openForecastExportDialog);
+  document.getElementById('fcexp-go').addEventListener('click', () => {
+    const mode = (document.querySelector('input[name="fcexp-mode"]:checked') || {}).value || 'demand';
+    SETTINGS.fc_export_mode = mode; markDirty();     // remember the last choice
+    document.getElementById('fcexp-dialog').close();
+    exportForecast(mode);
+  });
   document.getElementById('btn-save-config').addEventListener('click', openSaveConfigDialog);
   document.getElementById('config-select').addEventListener('change', e => {
     const file = e.target.value; e.target.value = '';

@@ -24,6 +24,56 @@ WEEK1_START = date(2025, 12, 29)
 _weather_cache = {}   # (lat,lon) -> (timestamp, payload)
 
 
+def _today_iso():
+    from datetime import date as _d
+    return _d.today().isoformat()
+
+
+def rechain_running_stock(master, orders, start, closed_through):
+    """Rebuild each SKU's weekly CLOSING stock over [start, closed_through], anchored on
+    real Buying Report snapshots wherever we hold one.
+
+    `stock_snap[w]` is the free stock read off the Buying Report on the Monday of week
+    w — i.e. that week's OPENING position, measured rather than inferred. Two things
+    follow, and both are exact:
+
+      * closing[w-1] == snapshot[w].  The stock standing on Monday morning IS what last
+        week closed with, so a snapshot repairs the preceding week for free.
+      * the chain RE-ANCHORS at every snapshot instead of carrying forward from week 1.
+
+    That second point is the whole reason for doing this. The old chain was
+    "previous closing + committed arrivals - actual sales" from a single starting point,
+    so any receipt not keyed as a committed order was lost permanently — and the
+    max(0, ...) floor then pinned the line at zero while it carried on selling. Drift can
+    now only build up inside one week before a real reading corrects it.
+
+    Weeks with no snapshot still chain, so nothing is lost where we have no reading.
+    """
+    WEEKS = 53
+    for s in master["skus"]:
+        rs = s.get("running_stock") or [0] * WEEKS
+        while len(rs) < WEEKS:
+            rs.append(0)
+        snap = s.get("stock_snap") or [None] * WEEKS
+        while len(snap) < WEEKS:
+            snap.append(None)
+        act = s.get("actual") or [0] * WEEKS
+        ordv = orders.get(s.get("id")) or [0] * WEEKS
+        for w in range(max(1, start), min(closed_through, WEEKS) + 1):
+            sn = snap[w - 1]
+            if sn is not None:
+                opening = float(sn)
+                if w >= 2:
+                    rs[w - 2] = opening      # last week closed on exactly this figure
+            else:
+                opening = float(rs[w - 2] or 0) if w >= 2 else float(s.get("stock_now") or 0)
+            arrivals = float(ordv[w - 1] or 0) if w - 1 < len(ordv) else 0.0
+            sold = float(act[w - 1] or 0) if w - 1 < len(act) else 0.0
+            rs[w - 1] = max(0.0, opening + arrivals - sold)
+        s["running_stock"] = rs
+        s["stock_snap"] = snap
+
+
 def safe_filename(name):
     return re.sub(r'[\\/:*?"<>|]+', " ", str(name)).strip() or "supplier"
 
@@ -386,20 +436,25 @@ class Handler(SimpleHTTPRequestHandler):
 
     def export_forecast(self, qs):
         """Return an .xlsx of the client-computed weekly sales-unit forecast
-        (SKU in col A, W1..W53 across, Total at the end)."""
+        (SKU in col A, W1..W53 across, Total at the end). `mode` picks which version
+        the client sent: the full demand forecast, or 'achievable' — capped at
+        projected stock, matching the plan's Sales Value row."""
         ydir, year = year_dir(qs)
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
         except (ValueError, json.JSONDecodeError):
             body = {}
+        mode = str(body.get("mode") or "demand")
         try:
-            bio = supplier_form.export_forecast(body.get("rows") or [], year=year, week1=body.get("week1"))
+            bio = supplier_form.export_forecast(body.get("rows") or [], year=year,
+                                                week1=body.get("week1"), mode=mode)
             data = bio.getvalue()
         except Exception as exc:
             self.send_json({"error": f"export failed: {exc}"}, 500)
             return
-        fname = f"{year} Sales Unit Forecast.xlsx"
+        fname = (f"{year} Sales Unit Forecast (achievable).xlsx" if mode == "achievable"
+                 else f"{year} Sales Unit Forecast.xlsx")
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
@@ -1403,11 +1458,18 @@ class Handler(SimpleHTTPRequestHandler):
 
     def apply_buying(self, qs):
         """Write catalogue status + outstanding-purchase quantities into master.json for the
-        given years, matched by code (WEBSA rows only, from the client)."""
+        given years, matched by code (WEBSA rows only, from the client).
+
+        The report's free-stock figure is also RECORDED against the week it was taken in
+        (`stock_snap[week]`), not just overwritten onto stock_now. That gives the plan a
+        real, measured stock history — one reading per Monday — instead of a figure
+        inferred by chaining arrivals and sales, which silently loses any receipt that
+        was never keyed as a committed order."""
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             buying = body.get("buying") or {}
+            snap_week = int(body.get("week") or 0)
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
             if targets:
@@ -1433,12 +1495,27 @@ class Handler(SimpleHTTPRequestHandler):
                         touched = True
                     if rec.get("stock") is not None:
                         s["stock_now"] = rec["stock"]
+                        if 1 <= snap_week <= 53:
+                            snap = s.get("stock_snap") or [None] * 53
+                            while len(snap) < 53:
+                                snap.append(None)
+                            snap[snap_week - 1] = rec["stock"]
+                            s["stock_snap"] = snap
                         touched = True
                     if touched:
                         n += 1
+                if 1 <= snap_week <= 53:
+                    weeks_meta = master.get("stock_snap_weeks") or {}
+                    weeks_meta[str(snap_week)] = _today_iso()
+                    master["stock_snap_weeks"] = weeks_meta
+                    # re-chain from this reading up to the last actualised week, so the
+                    # snapshot corrects the weeks around it straight away
+                    ords = read_json(DATA / y / "orders.json", {}) or {}
+                    closed = max(snap_week, int(master.get("data_week") or 1) - 1)
+                    rechain_running_stock(master, ords, snap_week, closed)
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
-            self.send_json({"ok": True, "applied": applied, "years": targets})
+            self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
@@ -1796,14 +1873,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if wkasp.get(code) is not None:
                     s["asp_wk"] = wkasp[code]
                     s["asp_wk_week"] = week
-                rs = s.get("running_stock") or [0] * 53
-                while len(rs) < 53:
-                    rs.append(0)
-                ordv = orders.get(s.get("id")) or [0] * 53
-                for w in range(week, closed_through + 1):
-                    prev = rs[w - 2] if w >= 2 else float(s.get("stock_now") or 0)
-                    rs[w - 1] = max(0.0, float(prev or 0) + float(ordv[w - 1] or 0) - float(act[w - 1] or 0))
-                s["running_stock"] = rs
+            # closing stock is re-chained for every SKU, anchored on any real Buying
+            # Report snapshot in the window (see rechain_running_stock)
+            rechain_running_stock(master, orders, week, closed_through)
             new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
             record_change("upload", f"Weekly sales · week {week}", f"{n} products · {year}", [f"{year}/master.json"])

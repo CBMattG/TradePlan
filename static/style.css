@@ -290,6 +290,14 @@ table.grid { border-collapse: separate; border-spacing: 0; font-variant-numeric:
   border-bottom: 1px solid var(--line); font-size: 11.5px; color: var(--dim); text-align: right;
 }
 .grid thead th .d { display: block; font-size: 10px; font-weight: 400; color: #9aa8ba; }
+/* weekly sales value under the week number + w/c date. Smaller and tighter than the
+   date above it, so the header can never be what sets a column's width. */
+.grid thead th .hs { display: block; font-size: 9.5px; font-weight: 600; letter-spacing: -.01em;
+  color: #6f7f93; line-height: 1.25; font-variant-numeric: tabular-nums; min-height: 12px; }
+.grid thead th.curwk .hs { color: var(--accent); }
+.grid thead th .hs.hs-tot { color: #5a6b80; }
+[data-theme="dark"] .grid thead th .hs { color: #8ea0b6; }
+[data-theme="dark"] .grid thead th .hs.hs-tot { color: #9fb0c4; }
 .grid .lbl {
   position: sticky; left: 0; z-index: 2; background: var(--panel);
   text-align: left; min-width: 150px; max-width: 150px; color: var(--dim);
@@ -789,6 +797,28 @@ dialog h2 { margin: 0 0 10px; font-size: 16px; }
 .sku-stat b { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
 .sku-warn { font-size: 11.5px; line-height: 1.45; padding: 6px 10px; margin-bottom: 8px; border-radius: 6px;
   background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+/* Buying Report: which week the free-stock reading belongs to */
+.buying-week { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 10px;
+  padding: 9px 12px; border: 1px solid var(--pill-brd); border-radius: var(--r-card); background: var(--pill-bg); }
+.buying-week .bw-lbl { font-size: 12.5px; font-weight: 600; margin: 0; }
+.buying-week .bw-lbl input { width: 62px; margin-left: 6px; padding: 4px 8px; font: inherit; font-size: 12.5px;
+  text-align: right; border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--panel); color: var(--text); }
+.buying-week .bw-note { flex: 1; min-width: 240px; font-size: 11.5px; color: var(--dim); }
+/* a closing-stock cell fixed by a real Buying Report reading, not chained */
+.grid td.stk-real { box-shadow: inset 0 -2px 0 rgba(26, 126, 52, .45); }
+[data-theme="dark"] .grid td.stk-real { box-shadow: inset 0 -2px 0 rgba(111, 212, 154, .40); }
+
+/* forecast-export mode picker (demand vs stock-capped) */
+#fcexp-dialog { width: min(620px, 94vw); }
+.fcexp-opts { display: flex; flex-direction: column; gap: 10px; margin: 12px 0 6px; }
+.fcexp-opt { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 11px 14px; cursor: pointer;
+  border: 1px solid var(--pill-brd); border-radius: var(--r-card); background: var(--pill-bg); }
+.fcexp-opt input { width: auto !important; margin: 3px 0 0; flex: 0 0 auto; cursor: pointer; }
+.fcexp-opt b { font-size: 13px; }
+.fcexp-opt small { display: block; margin-top: 3px; font-size: 11.5px; line-height: 1.45; color: var(--dim); }
+.fcexp-opt:has(input:checked) { border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+#fcexp-note { margin-top: 10px; }
+
 /* live warning while the product code (the import / PO match key) is being retyped */
 .sku-warn.sku-codebad { background: #fff4e5; border-color: #e0b070; margin-top: 8px; }
 .sku-warn.sku-codebad code { background: rgba(0, 0, 0, .06); padding: 0 4px; border-radius: 4px; font-size: 11px; }

@@ -508,14 +508,19 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     return bio
 
 
-def export_forecast(rows, year=None, week1=None):
+def export_forecast(rows, year=None, week1=None, mode=None):
     """Sales-unit forecast workbook: SKU code in column A, catalogue status (Live /
     Not Live) in column B, then one column per week (W1..W53) of forecast sales
     units, with a Total at the far right. `rows` = [{code, status?, forecast:
-    [..53..]}]; `week1` (ISO date) adds the week-commencing date under each header."""
+    [..53..]}]; `week1` (ISO date) adds the week-commencing date under each header.
+
+    `mode` only names the sheet — the client has already capped the numbers it sends.
+    'achievable' = units capped at projected stock (what the plan's Sales Value row is
+    built on); anything else = the full demand forecast. The grid itself is identical
+    either way, so anything reading these files keeps working."""
     wb = Workbook()
     ws = wb.active
-    ws.title = "Sales Unit Forecast"
+    ws.title = "Achievable Forecast" if mode == "achievable" else "Sales Unit Forecast"
     hdr = _fill(C_REF_HDR)
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left = Alignment(horizontal="left", vertical="center")
@@ -755,7 +760,8 @@ def export_arrivals(payload):
                 if isinstance(v, date):
                     cell.number_format = "dd-mm-yyyy"
                 elif isinstance(v, (int, float)):
-                    cell.number_format = "#,##0.0" if k in ("cbm", "containers") else "#,##0"
+                    cell.number_format = ("#,##0.0" if k in ("cbm", "containers", "cover", "avg4", "avg12")
+                                      else "#,##0")
                 # payment / overdue status text colouring (matches the page's badges)
                 if k == "status" and isinstance(v, str) and v:
                     up = v.upper()
@@ -781,6 +787,10 @@ def export_arrivals(payload):
         ("ETD", 9, "etd"), ("ETA UK Port", 11, "etaPort"), ("Delivery to CB", 13, "deliveryCB"),
         ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
         ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
+        # recent selling rate + the cover the delivery buys, so a container can be judged
+        # against how the line is actually shifting rather than against the plan
+        ("Cover Wks (stock+arrival)", 14, "cover"),
+        ("Avg Units/Wk (4wk)", 13, "avg4"), ("Avg Units/Wk (12wk)", 13, "avg12"),
     ]
     rows = []
     for ev in payload.get("booked") or []:
@@ -794,6 +804,7 @@ def export_arrivals(payload):
                 "deliveryCB": _date(ev.get("deliveryCB")),
                 "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
                 "qty": ln.get("qty"), "stock": ln.get("stock"),
+                "cover": ln.get("cover"), "avg4": ln.get("avg4"), "avg12": ln.get("avg12"),
             })
     # monthly totals derived from the rows themselves, so the block always follows
     # the arrival dates actually present in the uploaded Qlik file (months with no
@@ -813,7 +824,10 @@ def export_arrivals(payload):
                      f"{int(round(g['units'])):,} arrival units")
                     for (y, m), g in sorted(mon.items())]
     note = (f"Generated {payload.get('generated', '')} · arrival units = ordered − delivered (WEBSA Open PO)"
-            " · arrival = delivery-to-CB, else UK-port ETA (Qlik)")
+            " · arrival = delivery-to-CB, else UK-port ETA (Qlik)"
+            " · Cover Wks = (current stock + arrival units) / the 4-week average, i.e. how long"
+            " the delivery lasts at the recent selling rate; blank when nothing sold in those 4"
+            " weeks · averages are banked actual sales per week over the last 4 / 12 completed weeks")
     ws = wb.active
     ws.title = "Upcoming Containers"
     sheet(ws, "Upcoming container arrivals", booked_cols, rows, note, months=month_totals)

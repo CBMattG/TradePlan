@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=110">
+<link rel="stylesheet" href="style.css?v=113">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -444,6 +444,7 @@
 <dialog id="buying-dialog">
   <div class="settings-head"><h2>Update catalogue status &amp; purchases</h2></div>
   <div id="buying-summary"></div>
+  <div id="buying-week" class="buying-week"></div>
   <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
     <div id="buying-years" class="asp-years"></div></div>
   <div id="buying-changes"></div>
@@ -508,6 +509,27 @@
   <div class="dialog-actions"><span class="spacer"></span>
     <button type="button" id="sku-cancel">Cancel</button>
     <button type="button" id="sku-save" class="primary">Save changes</button>
+  </div>
+</dialog>
+
+<dialog id="fcexp-dialog">
+  <div class="settings-head"><h2>Export sales unit forecast</h2></div>
+  <p class="ex-sub">Both versions carry every product, one row per SKU with W1&ndash;W53 and a total, and both reflect the multiplier and the forecast mode.</p>
+  <div class="fcexp-opts">
+    <label class="fcexp-opt"><input type="radio" name="fcexp-mode" value="demand" checked>
+      <span><b>Full demand forecast</b>
+        <small>Every forecast unit, whether or not there is stock to sell it. What each line <i>would</i> sell given supply &mdash; the basis for buying and rebuy decisions. This is what the export has always produced.</small>
+      </span></label>
+    <label class="fcexp-opt"><input type="radio" name="fcexp-mode" value="achievable">
+      <span><b>Achievable only &mdash; capped by stock</b>
+        <small>The units actually behind the plan's <b>Sales Value</b> row: banked actual sales for the weeks already traded, then the forecast capped at the stock projected to be on hand. A line that runs out contributes nothing after that week, exactly as its &pound; value shows. Note the traded weeks use what really sold, so a line running <b>ahead</b> of plan can come out higher than its raw forecast.</small>
+      </span></label>
+  </div>
+  <p class="muted-note" id="fcexp-note"></p>
+  <p class="ap-msg" id="fcexp-msg"></p>
+  <div class="dialog-actions"><span class="spacer"></span>
+    <button type="button" onclick="document.getElementById('fcexp-dialog').close()">Cancel</button>
+    <button type="button" id="fcexp-go" class="primary">Download xlsx</button>
   </div>
 </dialog>
 
@@ -660,6 +682,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=151"></script>
+<script src="app.js?v=155"></script>
 </body>
 </html>
