@@ -486,6 +486,32 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def export_stock(self, qs):
+        """Return an .xlsx of the client-computed weekly stock level (SKU in col A,
+        W1..W53 across), with two counts of weeks at zero at the far right: the full
+        year, and the last four completed weeks."""
+        ydir, year = year_dir(qs)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        try:
+            bio = supplier_form.export_stock(body.get("rows") or [], year=year,
+                                             week1=body.get("week1"),
+                                             current_week=body.get("currentWeek"))
+            data = bio.getvalue()
+        except Exception as exc:
+            self.send_json({"error": f"export failed: {exc}"}, 500)
+            return
+        fname = f"{year} Weekly Stock Levels.xlsx"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def export_arrivals(self):
         """Return the Arrivals page as an .xlsx — the client sends its already-joined
         upcoming-container rows (respecting the on-screen filter)."""
@@ -536,6 +562,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.export_suppliers_zip(parse_qs(parsed.query))
         elif parsed.path == "/api/export-forecast":
             self.export_forecast(parse_qs(parsed.query))
+        elif parsed.path == "/api/export-stock":
+            self.export_stock(parse_qs(parsed.query))
         elif parsed.path == "/api/export-arrivals":
             self.export_arrivals()
         elif parsed.path == "/api/export-search":

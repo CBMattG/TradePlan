@@ -5262,6 +5262,28 @@ function fcExportSeries(sku, mode) {
   // mirrors computeSku's `value` row exactly, minus the × ASP
   return fc.map((v, w) => (w + 1) < cur ? (sku.actual[w] || 0) : Math.min(v, r.stock[w]));
 }
+// Weekly stock level per product (SKU + W1..W53), plus two counts of weeks at zero.
+// Uses the same stock series the plan's "Stock Closing" row shows: measured history up
+// to the current week, the plan's projection from there on.
+async function exportStock() {
+  const rows = M.skus.map(sku => ({ code: sku.code, status: sku.status || '',
+    stock: (RES.get(sku.id) || {}).stock || [] }));
+  const status = document.getElementById('save-status');
+  status.textContent = 'Building stock workbook…';
+  try {
+    const r = await fetch('/api/export-stock?year=' + encodeURIComponent(YEAR),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows, week1: M.week1_start, currentWeek: SETTINGS.current_week }) });
+    if (!r.ok) throw new Error('server ' + r.status);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${YEAR} Weekly Stock Levels.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    status.textContent = 'Exported weekly stock levels';
+  } catch (e) { status.textContent = 'Export failed!'; alert('Stock export failed: ' + e.message); }
+}
 function openForecastExportDialog() {
   const dlg = document.getElementById('fcexp-dialog');
   const saved = SETTINGS.fc_export_mode === 'achievable' ? 'achievable' : 'demand';
@@ -7055,6 +7077,7 @@ async function init() {
   document.getElementById('carton-save').addEventListener('click', submitCartons);
   document.getElementById('btn-export').addEventListener('click', exportCsv);
   document.getElementById('btn-export-forecast').addEventListener('click', openForecastExportDialog);
+  document.getElementById('btn-export-stock').addEventListener('click', exportStock);
   document.getElementById('fcexp-go').addEventListener('click', () => {
     const mode = (document.querySelector('input[name="fcexp-mode"]:checked') || {}).value || 'demand';
     SETTINGS.fc_export_mode = mode; markDirty();     // remember the last choice

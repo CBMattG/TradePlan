@@ -578,6 +578,97 @@ def export_forecast(rows, year=None, week1=None, mode=None):
     return bio
 
 
+def export_stock(rows, year=None, week1=None, current_week=None):
+    """Weekly stock-level workbook, laid out like the sales-unit forecast: SKU in column
+    A, catalogue status in B, then one column per week (W1..W53) of closing stock units.
+
+    Instead of the forecast's Total — a running stock level does not meaningfully sum —
+    the two columns at the far right count weeks AT ZERO: across the whole 53-week year,
+    and across the last four completed weeks. Zero is taken as out of stock, on the
+    rounded figure actually printed in the row, so the counts match what is on screen.
+
+    Weeks before `current_week` are history (measured or chained); the current week on is
+    the plan's projection, which the header spells out so the two halves aren't confused.
+    `rows` = [{code, status?, stock: [..53..]}].
+    """
+    NL = chr(10)                      # wrapped header labels
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Weekly Stock"
+    hdr = _fill(C_REF_HDR)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
+    try:
+        y, m, d = (int(x) for x in str(week1).split("-"))
+        wk1 = date(y, m, d)
+    except (ValueError, AttributeError, TypeError):
+        wk1 = None
+    try:
+        cur = int(current_week)
+    except (TypeError, ValueError):
+        cur = 0
+
+    def put(r, c, val, bold=False, fill=None, align=center, fmt=None, colour=None):
+        cell = ws.cell(row=r, column=c, value=val)
+        cell.font = Font(name=FONT, size=9, bold=bold, color=colour)
+        cell.alignment = align
+        cell.border = BORDER
+        if fill:
+            cell.fill = fill
+        if fmt:
+            cell.number_format = fmt
+        return cell
+
+    W0 = 3   # first week column (C) — A=SKU, B=Status
+    put(1, 1, "SKU", bold=True, fill=hdr, align=left)
+    put(1, 2, "Status", bold=True, fill=hdr)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 10
+    for w in range(WEEKS):
+        lbl = f"W{w + 1}"
+        if wk1:
+            lbl += NL + (wk1 + timedelta(days=7 * w)).strftime("%d/%m/%y")
+        # the projected half of the year is tinted, so history and forecast read apart
+        put(1, W0 + w, lbl, bold=True, fill=_fill(C_INPUT) if (cur and w + 1 >= cur) else hdr)
+        ws.column_dimensions[get_column_letter(W0 + w)].width = 8.5
+
+    # the last four COMPLETED weeks — the same window the app's recent-rate figures use
+    r4_hi = max(0, cur - 1)
+    r4_lo = max(0, r4_hi - 4)
+    span = f"W{r4_lo + 1}–W{r4_hi}" if r4_hi > r4_lo else "n/a"
+    c_year, c_recent = W0 + WEEKS, W0 + WEEKS + 1
+    put(1, c_year, "Weeks at 0" + NL + "(full year, W1-W53)", bold=True, fill=_fill(C_TOTAL))
+    put(1, c_recent, "Weeks at 0" + NL + f"(last 4: {span})", bold=True, fill=_fill(C_TOTAL))
+    ws.column_dimensions[get_column_letter(c_year)].width = 13
+    ws.column_dimensions[get_column_letter(c_recent)].width = 13
+
+    r = 2
+    for row in rows:
+        put(r, 1, row.get("code", ""), align=left, fill=_fill(C_SKU))
+        status = row.get("status") or ""
+        put(r, 2, status, align=left, fill=_fill(C_STATUS) if status else None)
+        stock = row.get("stock") or []
+        shown = []
+        for w in range(WEEKS):
+            v = int(round(_num(stock[w] if w < len(stock) else 0)))
+            shown.append(v)
+            put(r, W0 + w, v, fmt=FMT_QTY,
+                # a zero week is the thing being counted, so make it visible in the grid
+                fill=_fill("FFFDE9E7") if v == 0 else (_fill(C_INPUT) if (cur and w + 1 >= cur) else None),
+                colour="FFB23B2C" if v == 0 else None)
+        put(r, c_year, sum(1 for v in shown if v == 0), bold=True, fmt=FMT_QTY_T, fill=_fill(C_TOTAL))
+        put(r, c_recent, sum(1 for v in shown[r4_lo:r4_hi] if v == 0), bold=True, fmt=FMT_QTY_T, fill=_fill(C_TOTAL))
+        r += 1
+
+    ws.freeze_panes = "C2"
+    ws.row_dimensions[1].height = 34
+    ws.auto_filter.ref = f"A1:{get_column_letter(c_recent)}{max(r - 1, 1)}"
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def export_search(payload):
     """Flat workbook of the products behind the current sidebar search — one row per
     product with supplier, category and the figures a promo/marketing plan needs
