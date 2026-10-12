@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=113">
+<link rel="stylesheet" href="style.css?v=115">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -162,6 +162,17 @@
           <label>Width (cm) <input type="number" step="1" min="1" id="pd-w"></label>
           <label>Max stack height (cm) <input type="number" step="1" min="1" id="pd-h"></label>
           <label>Max load weight (kg) <input type="number" step="1" min="1" id="pd-maxKg"></label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Stillage space dimensions</legend>
+        <small>The usable stillage space (cm). A product whose cartons are too big for a pallet is tested against this next, and gets an estimated <b>units per stillage</b> by the same rules as pallet loading &mdash; best of two footprint orientations, layers under the stack height, capped by the weight limit. Only a product too big for <i>both</i> still needs a hand-entered figure.<br>
+        Use the <b>internal</b> clear space, not the external frame: your stillages are 2025&nbsp;&times;&nbsp;1180&nbsp;mm external but <b>1780&nbsp;&times;&nbsp;1035&nbsp;mm</b> internal, and the stack height is the <b>1680&nbsp;mm</b> post. <b>The max load weight has not been supplied</b> &mdash; 1000&nbsp;kg is a placeholder, so please confirm the stillage's rated load.</small>
+        <div class="cap-grid">
+          <label>Length (cm) <input type="number" step="0.5" min="1" id="sd-l"></label>
+          <label>Width (cm) <input type="number" step="0.5" min="1" id="sd-w"></label>
+          <label>Max stack height (cm) <input type="number" step="0.5" min="1" id="sd-h"></label>
+          <label>Max load weight (kg) <input type="number" step="1" min="1" id="sd-maxKg"></label>
         </div>
       </fieldset>
       <fieldset>
@@ -519,7 +530,7 @@
   <div class="fcexp-opts">
     <label class="fcexp-opt"><input type="radio" name="fcexp-mode" value="demand" checked>
       <span><b>Full demand forecast</b>
-        <small>Every forecast unit, whether or not there is stock to sell it. What each line <i>would</i> sell given supply &mdash; the basis for buying and rebuy decisions. This is what the export has always produced.</small>
+        <small>Every forecast unit, whether or not there is stock to sell it. What each line <i>would</i> sell given supply &mdash; the basis for buying and rebuy decisions. <b>Not Live</b> lines are the exception: they are never rebought, so they only forecast the stock they actually hold (no stock &rarr; 0).</small>
       </span></label>
     <label class="fcexp-opt"><input type="radio" name="fcexp-mode" value="achievable">
       <span><b>Achievable only &mdash; capped by stock</b>
@@ -683,6 +694,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=156"></script>
+<script src="app.js?v=160"></script>
 </body>
 </html>

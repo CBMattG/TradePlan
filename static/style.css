@@ -797,6 +797,24 @@ dialog h2 { margin: 0 0 10px; font-size: 16px; }
 .sku-stat b { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
 .sku-warn { font-size: 11.5px; line-height: 1.45; padding: 6px 10px; margin-bottom: 8px; border-radius: 6px;
   background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+/* Summary: ranking + filtering the per-supplier blocks */
+.sum-suptools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 0 0 16px;
+  padding: 9px 13px; border: 1px solid var(--glass-brd); border-radius: var(--r-card);
+  background: var(--card-bg); backdrop-filter: var(--card-blur); box-shadow: var(--shadow-card);
+  position: sticky; top: 0; z-index: 2; }
+.sum-suptools .sst-f { font-size: 12.5px; font-weight: 600; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
+.sum-suptools select, .sum-suptools input[type="search"] { font: inherit; font-size: 12.5px; padding: 5px 9px;
+  border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); margin: 0; }
+.sum-suptools input[type="search"] { width: 168px; }
+.sum-suptools select:focus, .sum-suptools input:focus { outline: none; border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+.sum-suptools .sst-dir, .sum-suptools .sst-reset { font: inherit; font-size: 12px; padding: 5px 11px; cursor: pointer;
+  border-radius: var(--r-pill); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); white-space: nowrap; }
+.sum-suptools .sst-dir:hover, .sum-suptools .sst-reset:hover { border-color: var(--sel-brd); box-shadow: var(--sel-glow); }
+.sum-suptools .sst-n { margin-left: auto; font-size: 12px; color: var(--dim); white-space: nowrap; }
+/* the measure a block is ranked on, shown beside the supplier name when it isn't sales */
+.sum-sup-head .ssh-by { font-size: 12px; font-weight: 700; color: var(--accent);
+  background: var(--accent-soft); border-radius: 999px; padding: 1px 9px; margin-left: 8px; }
+
 /* Buying Report: which week the free-stock reading belongs to */
 .buying-week { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 4px 0 10px;
   padding: 9px 12px; border: 1px solid var(--pill-brd); border-radius: var(--r-card); background: var(--pill-bg); }
@@ -1192,6 +1210,26 @@ body { background: var(--page-grad); }
    system background — pin an explicit solid, readable list for both themes */
 #year-select, #config-select { color-scheme: dark; }
 #year-select option, #config-select option { background-color: #1f2a38; color: #e6ecf4; }
+/* ...and the same trap catches every other select on the page: they are painted with
+   the translucent --pill-bg, so in dark mode the native option list composites over a
+   white system background and the light text on it is unreadable. Pin a solid, readable
+   list for all of them. The closed control also gets a solid fill (a translucent one over
+   a blurred glass card is unpredictable) and a stronger border — at these luminances the
+   border is what actually reads as an edge, not the fill. Dialog and topbar selects are
+   more specific and keep their own fills. */
+[data-theme="dark"] select { color-scheme: dark; }
+[data-theme="dark"] select option,
+[data-theme="dark"] select optgroup { background-color: #1f2a38; color: #e6ecf4; }
+[data-theme="dark"] select:not(#year-select):not(#config-select) {
+  background-color: #243040; border-color: rgba(255, 255, 255, .20); color: var(--text);
+}
+[data-theme="dark"] select:not(#year-select):not(#config-select):hover { border-color: rgba(255, 255, 255, .34); }
+/* native search inputs beside them get the same treatment, so a filter bar reads as one control set */
+[data-theme="dark"] .sum-suptools input[type="search"],
+[data-theme="dark"] .sum-filter input[type="search"],
+[data-theme="dark"] .wh-find input[type="search"] {
+  background-color: #243040; border-color: rgba(255, 255, 255, .20); color: var(--text);
+}
 #year-select:hover, #btn-build-year:hover, #config-select:hover, #topbar-right button:hover { background: rgba(255,255,255,.16); }
 #topbar-right #btn-theme.iconbtn { border-radius: 50%; width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 

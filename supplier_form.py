@@ -516,7 +516,8 @@ def export_forecast(rows, year=None, week1=None, mode=None):
 
     `mode` only names the sheet — the client has already capped the numbers it sends.
     'achievable' = units capped at projected stock (what the plan's Sales Value row is
-    built on); anything else = the full demand forecast. The grid itself is identical
+    built on); anything else = the full demand forecast, except that Not Live lines are
+    capped at their stock in both (they're never rebought). The grid itself is identical
     either way, so anything reading these files keeps working."""
     wb = Workbook()
     ws = wb.active
@@ -869,7 +870,10 @@ def export_arrivals(payload):
                 elif new_group:   # thin rule per container/PO group within the week
                     cell.border = Border(top=thin)
             r += 1
-        ws.freeze_panes = ws.cell(row=hr + 1, column=1)
+        # Deliberately NOT frozen. The pane would have to start below the month-totals
+        # block, so it locks 5 + one-row-per-month + 1 rows to the top — with legacy POs
+        # spanning many months that is most of the screen, and everyone was unfreezing it
+        # by hand. The autofilter below still gives sortable, filterable headers.
         ws.auto_filter.ref = f"A{hr}:{get_column_letter(len(cols))}{max(r - 1, hr)}"
 
     booked_cols = [
@@ -1081,7 +1085,7 @@ def export_arrivals(payload):
             cell.border = BORDER
             if isinstance(v, float):
                 cell.number_format = "#,##0.0" if c == 6 else "#,##0"
-        ws.freeze_panes = ws.cell(row=hr + 1, column=1)
+        # left unfrozen too, to match the other sheets in this workbook
 
     bio = io.BytesIO()
     wb.save(bio)

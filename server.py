@@ -726,6 +726,11 @@ class Handler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             ydir = DATA / year
+            # only ever ADDS a year: overwriting one would wipe its committed orders and
+            # any products added to it since it was built
+            if (ydir / "master.json").exists():
+                self.send_json({"ok": False, "error": f"{year} already exists - existing years are never rebuilt"}, 409)
+                return
             ydir.mkdir(parents=True, exist_ok=True)
             (ydir / "master.json").write_text(json.dumps(body["master"]), encoding="utf-8")
             (ydir / "orders.json").write_text(json.dumps(body.get("orders", {})), encoding="utf-8")

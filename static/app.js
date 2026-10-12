@@ -2263,6 +2263,7 @@ function sumFilterBar() {
 // The filter bar renders once; everything below it is redrawn on each change so typing
 // in a filter box never loses focus.
 function renderSummary() {
+  sumSupLoad();     // restore the saved supplier ranking / filters
   const main = document.getElementById('main');
   main.innerHTML = sumFilterBar() + `<div id="sum-body"></div>`;
   const draw = () => {
@@ -2285,6 +2286,163 @@ function renderSummary() {
     draw();
   });
   draw();
+}
+/* ---- Summary: ranking + filtering the per-supplier blocks ----
+   The blocks used to be a fixed list sorted by sales value. These let the same set be
+   ranked on any of the measures a buyer actually reviews suppliers on, and narrowed to
+   the ones worth looking at. Everything here works off the rows the page has already
+   aggregated, so a re-rank never re-computes the plan. */
+const SUM_SORTS = [
+  { k: 'sales',   lbl: 'Sales value (full year)',      fmt: r => fmtGBP(r.sales) },
+  { k: 'fcast',   lbl: 'Forecast value (full year)',   fmt: r => fmtGBP(r.fcast) },
+  { k: 'ytdAct',  lbl: 'Actual value (YTD)',           fmt: r => fmtGBP(r.ytdAct) },
+  { k: 'ytdFc',   lbl: 'Forecast value (YTD)',         fmt: r => fmtGBP(r.ytdFc) },
+  { k: 'vari',    lbl: 'Variance value (YTD)',         fmt: r => fmtGBP(r.vari) },
+  { k: 'variPct', lbl: 'Variance % (YTD)',             fmt: r => (r.variPct == null ? '–' : r.variPct.toFixed(1) + '%') },
+  { k: 'share',   lbl: 'Share of sales %',             fmt: r => r.share.toFixed(1) + '%' },
+  { k: 'units',   lbl: 'Order units',                  fmt: r => fmtU(r.units) },
+  { k: 'fob',     lbl: 'Order FOB spend',              fmt: r => fmtGBP(r.fob) },
+  { k: 'cont',    lbl: 'Containers',                   fmt: r => fmt1(r.cont) },
+  { k: 'peakShv', lbl: 'Peak stock holding £',         fmt: r => fmtGBP(r.peakShv) },
+  { k: 'stocked', lbl: 'Stocked-in %',                 fmt: r => (r.stocked == null ? '–' : r.stocked.toFixed(0) + '%') },
+  { k: 'skus',    lbl: 'Number of products',           fmt: r => fmtU(r.skus) },
+  { k: 'name',    lbl: 'Supplier name (A–Z)',          fmt: r => '' },
+];
+const SUM_SORT = Object.fromEntries(SUM_SORTS.map(d => [d.k, d]));
+const SUM_SUP = { sort: 'sales', dir: -1, find: '', origin: '', vari: '', top: 0 };
+let SUM_SUPROWS = [];                       // rows built by renderSummaryBody
+let SUM_SUPCTX = { ids: null, CC: 68 };     // what the blocks need to draw
+function sumSupLoad() {
+  const s = (SETTINGS && SETTINGS.sum_sup) || {};
+  if (SUM_SORT[s.sort]) SUM_SUP.sort = s.sort;
+  SUM_SUP.dir = s.dir === 1 ? 1 : -1;
+  SUM_SUP.find = s.find || '';
+  SUM_SUP.origin = s.origin || '';
+  SUM_SUP.vari = s.vari || '';
+  SUM_SUP.top = +s.top || 0;
+}
+function sumSupSave() { SETTINGS.sum_sup = { ...SUM_SUP }; markDirty(); }
+// The rows that survive the filters, in the chosen order. `name` always sorts A–Z on the
+// text; everything else is numeric, with missing values pushed to the bottom either way.
+function sumSupView() {
+  const q = SUM_SUP.find.trim().toLowerCase();
+  let rows = SUM_SUPROWS.filter(r => {
+    if (q && !(r.name.toLowerCase().includes(q) || (r.origin || '').toLowerCase().includes(q))) return false;
+    if (SUM_SUP.origin && (r.origin || '') !== SUM_SUP.origin) return false;
+    if (SUM_SUP.vari === 'ahead' && !(r.vari > 0)) return false;
+    if (SUM_SUP.vari === 'behind' && !(r.vari < 0)) return false;
+    return true;
+  });
+  const k = SUM_SUP.sort, d = SUM_SUP.dir;   // d = -1 is the "first" direction, +1 the reverse
+  // the name sort reads A–Z in its default direction; every numeric measure reads high-first
+  if (k === 'name') rows.sort((a, b) => -d * a.name.localeCompare(b.name));
+  else rows.sort((a, b) => {
+    const av = a[k], bv = b[k];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;                 // no value always sinks, whichever way round
+    if (bv == null) return -1;
+    return d * (av - bv);                     // d=-1 -> b-a (high first); d=+1 -> a-b
+  });
+  if (SUM_SUP.top > 0) rows = rows.slice(0, SUM_SUP.top);
+  return rows;
+}
+// The direction button reads differently for a name sort than for a number.
+function sumSupDirLabel() {
+  const name = SUM_SUP.sort === 'name';
+  if (SUM_SUP.dir === 1) return name ? 'Z &rarr; A' : '&#8593; Low &rarr; High';
+  return name ? 'A &rarr; Z' : '&#8595; High &rarr; Low';
+}
+function sumSupToolbar() {
+  const origins = [...new Set(SUM_SUPROWS.map(r => r.origin).filter(Boolean))].sort();
+  const opt = (v, l, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(l)}</option>`;
+  return `<div class="sum-suptools">
+    <label class="sst-f">Rank by
+      <select id="sst-sort">${SUM_SORTS.map(d => opt(d.k, d.lbl, SUM_SUP.sort)).join('')}</select></label>
+    <button type="button" id="sst-dir" class="sst-dir" title="Reverse the order">${sumSupDirLabel()}</button>
+    <input type="search" id="sst-find" placeholder="supplier or group…" value="${esc(SUM_SUP.find)}" autocomplete="off">
+    ${origins.length ? `<select id="sst-origin">${opt('', 'any group', SUM_SUP.origin)}${origins.map(o => opt(o, o, SUM_SUP.origin)).join('')}</select>` : ''}
+    <select id="sst-vari" title="Filter on year-to-date performance against the plan">
+      ${opt('', 'any performance', SUM_SUP.vari)}${opt('ahead', 'Ahead of plan', SUM_SUP.vari)}${opt('behind', 'Behind plan', SUM_SUP.vari)}</select>
+    <select id="sst-top">${[0, 10, 20, 50].map(n => opt(String(n), n ? `top ${n}` : 'show all', String(SUM_SUP.top))).join('')}</select>
+    <span class="sst-n" id="sst-n"></span>
+    <button type="button" id="sst-reset" class="sst-reset">Reset</button>
+  </div>`;
+}
+function sumSupBlocksHtml(rows) {
+  if (!rows.length) return '<p class="muted-note">No suppliers match these filters.</p>';
+  const d = SUM_SORT[SUM_SUP.sort];
+  return rows.map((r, idx) => {
+    const metrics = [
+      ['Sales', fmtGBP(r.sales)], ['Share', r.share.toFixed(1) + '%'],
+      ['Units', fmtU(r.units)], ['FOB', fmtGBP(r.fob)],
+      ['Containers', fmt1(r.cont)], ['Peak stock', fmtGBP(r.peakShv)],
+    ].map(([l, v]) => `<span>${l} <b>${v}</b></span>`).join('');
+    const ytdHtml = r.hasYtd ? `<div class="sum-sup-ytd"><span class="ssy-lbl">YTD to W${r.aw}:</span>`
+      + `<span>actual <b>${fmtGBP(r.ytdAct)}</b></span>`
+      + `<span>forecast <b>${fmtGBP(r.ytdFc)}</b></span>`
+      + `<span>variance <b class="${r.vari >= 0 ? 'c-up' : 'c-down'}">${r.vari >= 0 ? '+' : '−'}${fmtGBP(Math.abs(r.vari))} (${r.vari >= 0 ? '+' : '−'}${Math.abs(r.variPct || 0).toFixed(0)}%)</b></span></div>` : '';
+    // when ranked on something other than sales, show that measure beside the rank so
+    // the ordering is legible rather than mysterious
+    const by = (d && d.k !== 'sales' && d.fmt(r)) ? `<span class="ssh-by" title="${esc(d.lbl)}">${d.fmt(r)}</span>` : '';
+    return `<div class="sum-sup">
+      <div class="sum-sup-head">
+        <h3><span class="sum-sup-rank">#${idx + 1}</span><a data-sup="${esc(r.name)}" title="Open in Plan view">${esc(r.name)}</a>${r.origin ? `<span class="ssh-grp">${esc(r.origin)}</span>` : ''}${by}</h3>
+        <div class="sum-sup-metrics">${metrics}</div>
+      </div>
+      ${ytdHtml}
+      ${salesChart(r.t.sales, r.cont7, r.t.shv, r.t.fcSales, { h: 84 })}</div>`;
+  }).join('');
+}
+function bindSupLinks(root) {
+  root.querySelectorAll('a[data-sup]').forEach(a => a.addEventListener('click', () => {
+    currentSupplier = a.dataset.sup; savePref('tp_supplier', currentSupplier); setView('plan');
+  }));
+}
+// Re-draw only the supplier section — the charts above it are untouched by a re-rank.
+function renderSupBlocks() {
+  const box = document.getElementById('sum-sups');
+  if (!box) return;
+  const rows = sumSupView();
+  box.innerHTML = sumSupBlocksHtml(rows);
+  bindSupLinks(box);
+  const n = document.getElementById('sst-n');
+  if (n) {
+    const shown = rows.length;
+    n.innerHTML = shown === SUM_SUPROWS.length
+      ? `<b>${shown}</b> supplier${shown === 1 ? '' : 's'}`
+      : `<b>${shown}</b> of ${SUM_SUPROWS.length}`;
+  }
+}
+function bindSupTools() {
+  const re = () => { sumSupSave(); renderSupBlocks(); };
+  const sel = (id, key, num) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', e => { SUM_SUP[key] = num ? +e.target.value : e.target.value; re(); });
+  };
+  const sortSel = document.getElementById('sst-sort');
+  if (sortSel) sortSel.addEventListener('change', e => {
+    SUM_SUP.sort = e.target.value;
+    const d = document.getElementById('sst-dir');
+    if (d) d.innerHTML = sumSupDirLabel();   // "A → Z" for a name sort, arrows for a number
+    re();
+  });
+  sel('sst-origin', 'origin'); sel('sst-vari', 'vari'); sel('sst-top', 'top', true);
+  const find = document.getElementById('sst-find');
+  if (find) find.addEventListener('input', e => { SUM_SUP.find = e.target.value; re(); });
+  const dir = document.getElementById('sst-dir');
+  if (dir) dir.addEventListener('click', () => {
+    SUM_SUP.dir = SUM_SUP.dir === 1 ? -1 : 1;
+    dir.innerHTML = sumSupDirLabel();
+    re();
+  });
+  const reset = document.getElementById('sst-reset');
+  if (reset) reset.addEventListener('click', () => {
+    Object.assign(SUM_SUP, { sort: 'sales', dir: -1, find: '', origin: '', vari: '', top: 0 });
+    sumSupSave();
+    const tools = document.getElementById('sum-suptools-wrap');
+    if (tools) { tools.innerHTML = sumSupToolbar(); bindSupTools(); }
+    renderSupBlocks();
+  });
 }
 function renderSummaryBody() {
   const skus = sumSkus();
@@ -2355,35 +2513,25 @@ function renderSummaryBody() {
 
   // per-supplier breakdown rows (sorted by sales, suppliers with any sales)
   const totSales = g.totSales || 1;
+  const skuCount = {};
+  for (const k of skus) skuCount[k.supplier] = (skuCount[k.supplier] || 0) + 1;
   const supRows = M.suppliers.map(s => {
     const t = A.bySup.get(s.name);
     if (!t) return null;
-    return { name: s.name, origin: s.origin || '', t,
-             sales: sumAll(t.sales), units: sumAll(t.units), fob: sumAll(t.fob),
-             cbm: sumAll(t.cbm), peakShv: Math.max(0, ...t.shv) };
-  }).filter(r => r && r.sales > 0.5).sort((a, b) => b.sales - a.sales);
-
-  const supBlocks = supRows.map((r, idx) => {
-    const cb = supCbmByWeek(r.name, ids);
-    const cont = cb.com.map((c, w) => (c + cb.prop[w]) / CC);
-    const metrics = [
-      ['Sales', fmtGBP(r.sales)], ['Share', (100 * r.sales / totSales).toFixed(1) + '%'],
-      ['Units', fmtU(r.units)], ['FOB', fmtGBP(r.fob)],
-      ['Containers', fmt1(r.cbm / CC)], ['Peak stock', fmtGBP(r.peakShv)],
-    ].map(([l, v]) => `<span>${l} <b>${v}</b></span>`).join('');
-    const sy = ytd(r.t.sales, r.t.fcSales);
-    const ytdHtml = sy ? `<div class="sum-sup-ytd"><span class="ssy-lbl">YTD to W${aw}:</span>`
-      + `<span>actual <b>${fmtGBP(sy.actual)}</b></span>`
-      + `<span>forecast <b>${fmtGBP(sy.fcast)}</b></span>`
-      + `<span>variance <b class="${sy.cls}">${sy.sign}${fmtGBP(Math.abs(sy.v))} (${sy.sign}${Math.abs(sy.pct).toFixed(0)}%)</b></span></div>` : '';
-    return `<div class="sum-sup">
-      <div class="sum-sup-head">
-        <h3><span class="sum-sup-rank">#${idx + 1}</span><a data-sup="${esc(r.name)}" title="Open in Plan view">${esc(r.name)}</a>${r.origin ? `<span class="ssh-grp">${esc(r.origin)}</span>` : ''}</h3>
-        <div class="sum-sup-metrics">${metrics}</div>
-      </div>
-      ${ytdHtml}
-      ${salesChart(r.t.sales, cont, r.t.shv, r.t.fcSales, { h: 84 })}</div>`;
-  }).join('');
+    const sales = sumAll(t.sales);
+    const cb = supCbmByWeek(s.name, ids);
+    const y = ytd(t.sales, t.fcSales);
+    return { name: s.name, origin: s.origin || '', t, aw,
+             sales, fcast: sumAll(t.fcSales), units: sumAll(t.units), fob: sumAll(t.fob),
+             cbm: sumAll(t.cbm), cont: sumAll(t.cbm) / CC, peakShv: Math.max(0, ...t.shv),
+             share: 100 * sales / totSales, stocked: t.stockedPct,
+             skus: skuCount[s.name] || 0,
+             cont7: cb.com.map((c, w) => (c + cb.prop[w]) / CC),
+             hasYtd: !!y, ytdAct: y ? y.actual : null, ytdFc: y ? y.fcast : null,
+             vari: y ? y.v : null, variPct: y ? y.pct : null };
+  }).filter(r => r && r.sales > 0.5);
+  SUM_SUPROWS = supRows;
+  SUM_SUPCTX = { ids, CC };
 
   const scope = filtered
     ? `${skus.length} selected product${skus.length === 1 ? '' : 's'}`
@@ -2416,13 +2564,13 @@ function renderSummaryBody() {
     ])}
     <h2 class="sect">Quarterly sales${filtered ? ' — selection' : ' vs history'}</h2>
     ${filtered ? '<p class="muted-note">Prior-year quarters are whole-plan actuals only, so they are left out while a filter is on.</p>' : ''}${qt}
-    <h2 class="sect">Supplier breakdown — ${supRows.length} supplier${supRows.length === 1 ? '' : 's'} by ${YEAR} sales${filtered ? ' (selection)' : ''}</h2>
-    ${supBlocks || `<p class="muted-note">No products match these filters.${SUM_FILT.npd
-      ? ` No products are tagged NPD in ${YEAR} — the tag only shows in the plan year a product was entered for, so try another year.` : ''}</p>`}
+    <h2 class="sect">Supplier breakdown${filtered ? ' (selection)' : ''}</h2>
+    ${supRows.length ? `<div id="sum-suptools-wrap">${sumSupToolbar()}</div>` : ''}
+    <div id="sum-sups">${supRows.length ? '' : `<p class="muted-note">No products match these filters.${SUM_FILT.npd
+      ? ` No products are tagged NPD in ${YEAR} — the tag only shows in the plan year a product was entered for, so try another year.` : ''}</p>`}</div>
     <div style="height:30px"></div>`;
-  body.querySelectorAll('a[data-sup]').forEach(a => a.addEventListener('click', () => {
-    currentSupplier = a.dataset.sup; savePref('tp_supplier', currentSupplier); setView('plan');
-  }));
+  bindSupLinks(body);
+  if (supRows.length) { bindSupTools(); renderSupBlocks(); }
 }
 
 /* ================= Warehouse Capacity view ================= */
@@ -2993,6 +3141,7 @@ function openSettings() {
     if (el) el.value = SETTINGS.capacities[k];
   }
   { const P = palletDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) el.value = P[k]; }); }
+  { const S = stillageDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('sd-' + k); if (el) el.value = S[k]; }); }
   coverDraft = (SETTINGS.cover_bands || defaultCoverBands()).map(b => ({ max: b.max, bg: b.bg }));
   if (!coverDraft.length || coverDraft[coverDraft.length - 1].max !== null)
     coverDraft.push({ max: null, bg: '#c27ba0' });   // ensure a catch-all exists
@@ -3134,6 +3283,7 @@ function applySettings() {
     if (el) SETTINGS.capacities[k] = parseFloat(el.value) || 0;
   }
   { const pd = SETTINGS.pallet_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) pd[k] = parseFloat(el.value) || PALLET_DEFAULT[k]; }); SETTINGS.pallet_dims = pd; }
+  { const sd = SETTINGS.stillage_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('sd-' + k); if (el) sd[k] = parseFloat(el.value) || STILLAGE_DEFAULT[k]; }); SETTINGS.stillage_dims = sd; }
   // normalise cover bands: finite thresholds sorted ascending, single catch-all last
   const cat = coverDraft.find(b => b.max === null || b.max === undefined || b.max === '');
   const finite = coverDraft.filter(b => !(b.max === null || b.max === undefined || b.max === ''))
@@ -4330,7 +4480,10 @@ function openSkuDialog(id) {
   const cm = nC ? cartonMetrics(cartonList(sku), sku.pack_size || 1) : null;
   document.getElementById('sku-space-note').innerHTML =
     (nC ? `<b>${nC}</b> carton${nC > 1 ? 's' : ''} on file: ${cartonList(sku).map(c => `${c.l}×${c.w}×${c.h}${c.kg ? ` @${c.kg}kg` : ''}`).join(', ')} cm`
-        + (cm ? ` → calculated CBM <b>${cm.cbm.toFixed(4)}</b>${cm.needsStillage ? ' · <b>too big for a pallet</b>' : ` · <b>${cm.volumeQty}</b>/pallet by volume${cm.hasWeight ? `, <b>${cm.effWeightQty}</b> weight-limited` : ''}`}` : '')
+        + (cm ? ` → calculated CBM <b>${cm.cbm.toFixed(4)}</b>${cm.needsStillage
+          ? (cm.oversize ? ' · <b>too big for a pallet or a stillage</b>'
+             : ` · too big for a pallet → <b>${cm.stillQty}</b>/stillage by volume${cm.hasWeight ? `, <b>${cm.stillEffQty}</b> weight-limited` : ''}`)
+          : ` · <b>${cm.volumeQty}</b>/pallet by volume${cm.hasWeight ? `, <b>${cm.effWeightQty}</b> weight-limited` : ''}`}` : '')
         : 'No carton dimensions on file.')
     + ` <button type="button" id="sku-cartons-btn">Edit carton sizes…</button>`
     + `<div class="muted-note">Warehouse space uses <b>units per ${sku.pallet_type === 'Stillage' ? 'stillage' : 'pallet'}</b> above, not the CBM.</div>`;
@@ -4545,6 +4698,30 @@ function applySkuToMemory(code, fields, weekly, years, newCode) {
    scaled to items. A carton that can't sit on the pallet ⇒ Stillage (manual qty). */
 const PALLET_DEFAULT = { l: 120, w: 100, h: 180, maxKg: 1000 };   // cm + max load weight (kg)
 function palletDims() { const p = SETTINGS.pallet_dims || {}; return { l: +p.l || PALLET_DEFAULT.l, w: +p.w || PALLET_DEFAULT.w, h: +p.h || PALLET_DEFAULT.h, maxKg: +p.maxKg || PALLET_DEFAULT.maxKg }; }
+// Stillage loading space, from the supplied spec. Loading uses the INTERNAL clear space
+// (1780 x 1035 mm), not the 2025 x 1180 mm external — products sit inside the frame, and
+// the 245 mm difference is more than the two Ø60 mm posts, so internal is the real limit.
+// Stack height is the 1680 mm post. No load rating was supplied, so maxKg is a
+// placeholder to confirm; the settings panel says so.
+const STILLAGE_DEFAULT = { l: 178, w: 103.5, h: 168, maxKg: 1000 };
+function stillageDims() { const p = SETTINGS.stillage_dims || {}; return { l: +p.l || STILLAGE_DEFAULT.l, w: +p.w || STILLAGE_DEFAULT.w, h: +p.h || STILLAGE_DEFAULT.h, maxKg: +p.maxKg || STILLAGE_DEFAULT.maxKg }; }
+// How many units of a carton set fit a space of the given dimensions, by volume and by
+// its weight cap. One routine for both pallet and stillage, so the two can never drift.
+function spaceFit(rep, S, pack, N, kgPerItem) {
+  let perUnit = 0, fits = false;
+  if (rep) {
+    const perLayer = Math.max(Math.floor(S.l / rep.l) * Math.floor(S.w / rep.w),
+                              Math.floor(S.l / rep.w) * Math.floor(S.w / rep.l));
+    const layers = Math.floor(S.h / rep.h);
+    if (perLayer > 0 && layers > 0) { fits = true; perUnit = perLayer * layers; }
+  }
+  const volumeQty = fits ? Math.max(1, Math.floor(perUnit * (pack / Math.max(1, N)))) : 0;
+  const volWeight = volumeQty * kgPerItem;
+  const weightQty = (S.maxKg > 0 && kgPerItem > 0) ? Math.floor(S.maxKg / kgPerItem) : null;
+  const effWeightQty = weightQty != null ? Math.max(0, Math.min(volumeQty, weightQty)) : volumeQty;
+  const overweightPct = (S.maxKg > 0 && volWeight > S.maxKg) ? (volWeight / S.maxKg - 1) * 100 : 0;
+  return { fits, volumeQty, volWeight, weightQty, effWeightQty, overweightPct, maxKg: S.maxKg };
+}
 function cartonList(sku) { return Array.isArray(sku.cartons) ? sku.cartons : []; }
 function cartonMetrics(cartons, packSize) {
   const P = palletDims();
@@ -4557,24 +4734,27 @@ function cartonMetrics(cartons, packSize) {
   const kgPerItem = packKg > 0 ? packKg / pack : 0;                    // kg per single item
   let rep = null, area = -1;                                            // largest-footprint carton drives the fit
   for (const c of valid) { const a = (+c.l) * (+c.w); if (a > area) { area = a; rep = c; } }
-  let fits = false, perPallet = 0;
-  if (rep) {
-    const perLayer = Math.max(Math.floor(P.l / rep.l) * Math.floor(P.w / rep.w),
-                              Math.floor(P.l / rep.w) * Math.floor(P.w / rep.l));
-    const layers = Math.floor(P.h / rep.h);
-    if (perLayer > 0 && layers > 0) { fits = true; perPallet = perLayer * layers; }
-  }
-  const volumeQty = fits ? Math.max(1, Math.floor(perPallet * (pack / Math.max(1, N)))) : 0;   // by dimensions
-  const volWeight = volumeQty * kgPerItem;                             // weight of a volume-full pallet
-  const weightQty = (P.maxKg > 0 && kgPerItem > 0) ? Math.floor(P.maxKg / kgPerItem) : null;   // items the weight allows
-  const effWeightQty = weightQty != null ? Math.max(0, Math.min(volumeQty, weightQty)) : volumeQty;
-  const overweightPct = (P.maxKg > 0 && volWeight > P.maxKg) ? (volWeight / P.maxKg - 1) * 100 : 0;
-  return { cbm, fits, palletQty: volumeQty, volumeQty, weightQty, effWeightQty, volWeight, kgPerItem,
-           overweightPct, maxKg: P.maxKg, hasWeight: kgPerItem > 0, needsStillage: N > 0 && !fits, cartons: N, pack };
+  const pal = spaceFit(rep, P, pack, N, kgPerItem);
+  const needsStillage = N > 0 && !pal.fits;
+  // too big for a pallet → try the stillage, with exactly the same rules
+  const st = needsStillage ? spaceFit(rep, stillageDims(), pack, N, kgPerItem) : null;
+  return { cbm, fits: pal.fits, palletQty: pal.volumeQty, volumeQty: pal.volumeQty,
+           weightQty: pal.weightQty, effWeightQty: pal.effWeightQty, volWeight: pal.volWeight, kgPerItem,
+           overweightPct: pal.overweightPct, maxKg: pal.maxKg, hasWeight: kgPerItem > 0,
+           needsStillage, cartons: N, pack,
+           // stillage estimate — only meaningful when needsStillage
+           fitsStillage: !!(st && st.fits), stillQty: st ? st.volumeQty : 0,
+           stillEffQty: st ? st.effWeightQty : 0, stillWeight: st ? st.volWeight : 0,
+           stillOverPct: st ? st.overweightPct : 0, stillMaxKg: st ? st.maxKg : 0,
+           // too big even for a stillage: the only case that still needs a hand-entered qty
+           oversize: needsStillage && !(st && st.fits) };
 }
 // The loading qty to use for warehouse spacing, given the weight-limit toggle.
 function cartonLoadQty(m, weightLimited) {
-  if (m.needsStillage) return null;                                    // stillage → manual qty
+  if (m.needsStillage) {
+    if (!m.fitsStillage) return null;                                  // too big even for a stillage → manual
+    return (weightLimited && m.hasWeight) ? m.stillEffQty : m.stillQty;
+  }
   return (weightLimited && m.hasWeight) ? m.effWeightQty : m.volumeQty;
 }
 // CBM chip — clickable like the cost chips; opens the carton editor. Provenance:
@@ -4646,8 +4826,37 @@ function cartonRecalc() {
   }
   const cbmLine = `<div class="carton-cbm">Item CBM: <b>${m.cbm.toFixed(4)}</b> m³${m.hasWeight ? ` · item weight <b>${m.kgPerItem.toFixed(2)}</b> kg` : ''}</div>`;
   if (m.needsStillage) {
-    out.innerHTML = `<div class="carton-flag stillage">⚠ Too large for a pallet — flagged <b>Stillage</b> storage.</div>` + cbmLine;
-    lbl.textContent = 'Stillage loading qty (units) *'; wrap.hidden = false; qty.placeholder = 'units per stillage'; wlWrap.hidden = true;
+    const SD = stillageDims();
+    if (m.oversize) {
+      out.innerHTML = `<div class="carton-flag stillage">⚠ Too large for a pallet <b>and</b> for the ${SD.l}×${SD.w}×${SD.h} cm stillage — needs a hand-entered loading qty.</div>` + cbmLine;
+      lbl.textContent = 'Stillage loading qty (units) *'; wrap.hidden = false; qty.placeholder = 'units per stillage'; wlWrap.hidden = true;
+      return;
+    }
+    let sl = `<div class="carton-flag stillage">Too large for a pallet → flagged <b>Stillage</b>.</div>` + cbmLine
+      + `<div class="carton-cbm">By volume: <b>${m.stillQty.toLocaleString()}</b> units/stillage`;
+    if (m.hasWeight) {
+      sl += ` — weighs <b>${Math.round(m.stillWeight).toLocaleString()}</b> kg`;
+      sl += m.stillOverPct > 0.5 ? ` <span class="carton-flag">(${m.stillOverPct.toFixed(0)}% over the ${m.stillMaxKg} kg limit)</span>` : ` (within the ${m.stillMaxKg} kg limit)`;
+      sl += `</div><div class="carton-cbm">By weight limit: <b>${m.stillEffQty.toLocaleString()}</b> units/stillage</div>`;
+    } else {
+      sl += `</div><div class="muted-note">Add carton weights to also cap loading by the stillage weight limit.</div>`;
+    }
+    const usedS = cartonLoadQty(m, weightLimited);
+    sl += `<div class="carton-used">Used for spacing: <b>${usedS.toLocaleString()}</b> units/stillage <span class="carton-basis">(${weightLimited && m.hasWeight ? 'weight-limited' : 'by volume'})</span></div>`;
+    const skuS = skuById.get(CARTON_EDIT.id);
+    const liveS = skuS && +skuS.fpq > 0 ? Math.round(skuS.fpq) : null;
+    if (liveS && skuS.fpq_src !== 'calc') {
+      const diff = usedS > 0 ? Math.round((usedS / liveS - 1) * 100) : 0;
+      sl += `<div class="carton-live">In use now: <b>${liveS.toLocaleString()}</b> units/stillage `
+        + `<span class="carton-basis">(from the ${skuS.fpq_src === 'manual' ? 'manual entry' : 'Excel import'})</span>`
+        + (Math.abs(diff) >= 5 ? ` · calculated is <b>${diff > 0 ? '+' : ''}${diff}%</b>` : ` · calculated agrees`)
+        + ` <button type="button" id="carton-keep" class="carton-keeplink" title="Keep ${liveS.toLocaleString()} units/stillage — saves the carton sizes without changing warehouse spacing">keep ${liveS.toLocaleString()}</button></div>`;
+    }
+    out.innerHTML = sl;
+    { const kb = document.getElementById('carton-keep');
+      if (kb) kb.addEventListener('click', () => { document.getElementById('carton-qty').value = liveS; }); }
+    wlWrap.hidden = !m.hasWeight;
+    lbl.textContent = 'Override loading qty (optional)'; wrap.hidden = false; qty.placeholder = String(usedS);
     return;
   }
   // both loading figures: by volume (dimensions) and by the weight cap
@@ -4980,11 +5189,25 @@ function apCartonRecalc() {
   if (m.needsStillage) {
     if (!AP_PALLET_MANUAL) palEl.value = 'Stillage';
     palNote.textContent = 'auto: too big for a pallet';
-    fpqLbl.textContent = 'Units per stillage *';
-    fpqNote.textContent = 'enter this — it can\'t be calculated';
-    fpqEl.placeholder = 'units per stillage';
-    fpqEl.classList.toggle('ap-need', !(parseFloat(fpqEl.value) > 0));
-    out.innerHTML = `<span class="carton-flag">⚠ ${m.cartons > 1 ? 'A carton is' : 'The carton is'} too big for the ${palletDims().l}×${palletDims().w}×${palletDims().h} cm pallet space → <b>Stillage</b>. Enter how many units fit on a stillage.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
+    const PD = palletDims(), SD = stillageDims();
+    if (m.oversize) {                        // too big even for a stillage → a figure has to be typed
+      fpqLbl.textContent = 'Units per stillage *';
+      fpqNote.textContent = 'enter this — too big for the stillage to calculate';
+      fpqEl.placeholder = 'units per stillage';
+      fpqEl.classList.toggle('ap-need', !(parseFloat(fpqEl.value) > 0));
+      out.innerHTML = `<span class="carton-flag">⚠ ${m.cartons > 1 ? 'A carton is' : 'The carton is'} too big for the ${PD.l}×${PD.w}×${PD.h} cm pallet <b>and</b> the ${SD.l}×${SD.w}×${SD.h} cm stillage. Enter how many units fit.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
+      return;
+    }
+    const usedS = cartonLoadQty(m, weightLimited);
+    fpqLbl.textContent = 'Units per stillage';
+    fpqNote.textContent = AP_FPQ_MANUAL ? 'your figure — clear it to go back to auto' : 'auto from cartons — editable';
+    fpqEl.classList.remove('ap-need');
+    fpqEl.placeholder = String(usedS);
+    if (!AP_FPQ_MANUAL) fpqEl.value = usedS;
+    let ss = `Too big for a pallet → <b>Stillage</b> · CBM <b>${m.cbm.toFixed(4)}</b> m³ · volume <b>${m.stillQty}</b>/stillage`;
+    if (m.hasWeight) ss += ` (${Math.round(m.stillWeight)} kg${m.stillOverPct > 0.5 ? `, <span class="carton-flag">${m.stillOverPct.toFixed(0)}% over</span>` : ''}) · weight-limit <b>${m.stillEffQty}</b>/stillage`;
+    ss += ` · using <b>${usedS}</b>/stillage`;
+    out.innerHTML = ss;
     return;
   }
   const used = cartonLoadQty(m, weightLimited);
@@ -5049,12 +5272,12 @@ async function submitAddProduct() {
   const pack = Math.max(1, parseInt(val('ap-pack'), 10) || 1);
   const weightLimited = document.getElementById('ap-weightlimit').checked;
   const cm = cartons.length ? cartonMetrics(cartons, pack) : null;
-  // a stillage line has no derivable loading qty — it must be entered on creation,
-  // exactly like the pallet figure is auto-derived for everything else
-  if (cm && cm.needsStillage && !(numv('ap-fpq') > 0)) {
+  // Only a product too big even for a stillage has no derivable loading qty; anything
+  // that fits one is now estimated from the stillage dimensions like a pallet line is.
+  if (cm && cm.oversize && !(numv('ap-fpq') > 0)) {
     const el = document.getElementById('ap-fpq');
     el.classList.add('ap-need'); el.focus();
-    msg.textContent = 'This product needs a stillage — enter how many units fit on one.';
+    msg.textContent = 'This product is too big for a pallet or a stillage — enter how many units fit.';
     return;
   }
   const cbmField = numv('ap-cbm');
@@ -5248,7 +5471,10 @@ function exportCsv() {
                   projected to be on hand. A line that runs out contributes nothing
                   after that point, exactly as its £ value shows.
    Both use the client-computed forecast, so both reflect the multiplier and the
-   seasonality / target mode. */
+   seasonality / target mode.
+   Not Live lines are discontinued — never rebought — so there is no "demand given
+   supply" to speak of: in BOTH versions their current and future weeks are capped at
+   the stock actually held (a Not Live line with no stock forecasts 0). */
 const FCEXP_MODES = {
   demand: { sheet: 'Sales Unit Forecast', file: 'Sales Unit Forecast' },
   achievable: { sheet: 'Achievable Forecast', file: 'Sales Unit Forecast (achievable)' },
@@ -5257,10 +5483,14 @@ const FCEXP_MODES = {
 function fcExportSeries(sku, mode) {
   const r = RES.get(sku.id) || {};
   const fc = r.forecast || [];
-  if (mode !== 'achievable' || !r.stock) return fc;
+  if (!r.stock) return fc;
   const cur = SETTINGS.current_week;
-  // mirrors computeSku's `value` row exactly, minus the × ASP
-  return fc.map((v, w) => (w + 1) < cur ? (sku.actual[w] || 0) : Math.min(v, r.stock[w]));
+  // the stock cap mirrors computeSku's `value` row exactly, minus the × ASP: the stock
+  // row lags a week, so a line sells down exactly the stock it holds, then nothing
+  const cap = (v, w) => Math.min(v, r.stock[w]);
+  if (mode === 'achievable') return fc.map((v, w) => (w + 1) < cur ? (sku.actual[w] || 0) : cap(v, w));
+  if (sku.status === 'Not Live') return fc.map((v, w) => (w + 1) < cur ? v : cap(v, w));
+  return fc;
 }
 // Weekly stock level per product (SKU + W1..W53), plus two counts of weeks at zero.
 // Uses the same stock series the plan's "Stock Closing" row shows: measured history up
@@ -5291,19 +5521,23 @@ function openForecastExportDialog() {
   // what the two versions actually differ by, split into its two causes, so the
   // choice is informed and the actuals swap isn't a surprise in the numbers
   const cur = SETTINGS.current_week;
-  let demand = 0, ach = 0, capped = 0, banked = 0;
+  let demand = 0, ach = 0, capped = 0, banked = 0, nlUnits = 0, nlLines = 0;
   for (const sku of M.skus) {
     const r = RES.get(sku.id) || {};
     if (!r.forecast || !r.stock) continue;
+    const d = fcExportSeries(sku, 'demand'), a = fcExportSeries(sku, 'achievable');
     for (let w = 0; w < WEEKS; w++) {
-      demand += r.forecast[w];
-      if ((w + 1) < cur) banked += (sku.actual[w] || 0) - r.forecast[w];
-      else capped += r.forecast[w] - Math.min(r.forecast[w], r.stock[w]);
+      demand += d[w];
+      if ((w + 1) < cur) banked += a[w] - d[w];
+      else capped += d[w] - a[w];
+      if (r.forecast[w] - d[w] > 0.5) { nlUnits += r.forecast[w] - d[w]; }
     }
-    ach += fcExportSeries(sku, 'achievable').reduce((a, b) => a + b, 0);
+    if (r.forecast.some((v, w) => v - d[w] > 0.5)) nlLines++;
+    ach += a.reduce((x, y) => x + y, 0);
   }
   document.getElementById('fcexp-note').innerHTML =
-    `${YEAR}: <b>${fmtU(demand)}</b> demand units · <b>${fmtU(ach)}</b> achievable`
+    (nlLines ? `Not Live lines forecast only the stock they hold, in both versions — that takes <b>${fmtU(nlUnits)}</b> units off ${nlLines} line${nlLines !== 1 ? 's' : ''}. ` : '')
+    + `${YEAR}: <b>${fmtU(demand)}</b> demand units · <b>${fmtU(ach)}</b> achievable`
     + (capped > 0.5 ? ` — the stock cap removes <b>${fmtU(capped)}</b> future units (${(100 * capped / (demand || 1)).toFixed(1)}%) that no stock covers`
                     : ` — no future week is currently stock-capped`)
     + (Math.abs(banked) > 0.5
@@ -5551,11 +5785,24 @@ function leadWeeks(sup) {        // order placed -> stock arrives
 // verbatim from the prior year. The seasonality DISPLAY toggle only controls whether
 // the currently-viewed year is re-modelled on screen; it does not turn this off, else
 // a rolled-over year would just clone the year it came from.
+//
+// The exception is rolling forward FROM a generated forecast year (e.g. 2027 → 2028):
+// that year has no sales of its own yet, so re-running the model would just re-derive
+// it from the same prior-year sales — dropping the planning judgement layered on top
+// (its growth %, Target Sales £, hand-entered NPD forecasts). There's no new evidence
+// between the two years, so the new year starts from the forecast year's live forecast,
+// week for week; give the new year its own growth % in Settings → Forecast.
 function nextYearForecast(sku) {
   const mult = SETTINGS.multiplier;
+  if (M && +M.data_week === 1) {
+    const mod = MODELED.get(sku.id);
+    return roundKeepTotal(sku.base_forecast.map((b, w) => Math.max(0, (mod ? mod[w] : b) * mult)));
+  }
   ensureCalib();
   const d = computeSkuModel(sku);
-  const raw = d.prof.map(p => Math.max(0, d.D * p * mult));   // fractional weekly demand
+  return roundKeepTotal(d.prof.map(p => Math.max(0, d.D * p * mult)));   // fractional weekly demand
+}
+function roundKeepTotal(raw) {
   // Round to whole weekly units WITHOUT losing the annual total: per-week Math.round
   // would zero out a low-volume line (e.g. 12 units/yr spread so thin no single week
   // reaches 0.5 → every week rounds to 0). Largest-remainder keeps the year's total.
@@ -6001,24 +6248,26 @@ function commitRebuy(supName) {
   document.getElementById('save-status').textContent = `Committed rebuys: ${who}`;
 }
 
-/* ---------------- generate a forecast-only year (e.g. 2027) ---------------- */
+/* ---------------- add a forecast-only year (e.g. 2028) ---------------- */
 // Builds a master for `newYear` from the currently-loaded year: forecasted sales
-// = the rollover forecast (model baseline × seasonal shape), starting stock = this
-// year's projected closing stock, so projected stock then depletes by forecast.
+// = the rollover forecast (see nextYearForecast), starting stock = this year's
+// projected closing stock, so projected stock then depletes by forecast. Every
+// product attribute carries over (cartons, duty, pack size, cost sources…) except the
+// fields that belong to one year's trading; those start empty.
+const YEAR_ONLY_FIELDS = ['actual', 'running_stock', 'stock_snap', 'ly', 'base_forecast', 'base_forecast_src',
+  'stock_now', 'asp_wk', 'asp_wk_week', 'code_prev'];
 function buildForecastYear(newYear) {
   const bnd = (+M.data_week || SETTINGS.current_week || WEEKS) - 1;   // actuals run weeks 1..bnd
   const skus = M.skus.map(sku => {
     const r = RES.get(sku.id);
     const ny = nextYearForecast(sku);
     const ly = sku.actual.map((a, w) => (w < bnd ? a : (r ? r.forecast[w] : 0)));   // this year's realised+forecast sales
-    const endStock = r ? Math.max(0, Math.round(r.stock[WEEKS - 1])) : (sku.stock_now || 0);
-    return {
-      id: sku.id, code: sku.code, supplier: sku.supplier, name: sku.name,
-      category: sku.category, status: sku.status, season: sku.season,
-      fob: sku.fob, landed: sku.landed, asp: sku.asp, cbm: sku.cbm,
-      fpq: sku.fpq, pallet_type: sku.pallet_type, image: sku.image,
-      stock_now: endStock, ly, actual: zeros(), base_forecast: ny.slice(), running_stock: zeros(),
-    };
+    // closing stock after committed + proposed orders — the same basis loadYear chains from
+    const rs = r ? computeSku(sku, combinedOrder(sku.id)) : null;
+    const endStock = rs ? Math.max(0, Math.round(rs.stock[WEEKS - 1])) : (sku.stock_now || 0);
+    const out = JSON.parse(JSON.stringify(sku));
+    for (const k of YEAR_ONLY_FIELDS) delete out[k];
+    return Object.assign(out, { stock_now: endStock, ly, actual: zeros(), base_forecast: ny.slice(), running_stock: zeros() });
   });
   const orders = {}; for (const s of skus) orders[s.id] = zeros();
   const w1 = new Date(M.week1_start); w1.setDate(w1.getDate() + 364);
@@ -6031,27 +6280,20 @@ function buildForecastYear(newYear) {
   return { master, orders };
 }
 
+// The button only ever ADDS the year after the latest one — it never rebuilds a year
+// that already exists. An existing forecast year doesn't need rebuilding: its starting
+// stock and LY Sales re-chain to the year before every time it's opened, and its
+// forecast can be re-modelled in Settings → Forecast. Rebuilding would have wiped its
+// committed orders and any products added to it since. (The server refuses too.)
+function nextBuildYear() { return Math.max(...YEARS.map(Number)) + 1; }
 async function buildForecastYearAction() {
-  const baseYear = +YEAR;                 // build/rebuild the year AFTER the one being viewed
-  const newYear = baseYear + 1;
-  const exists = YEARS.includes(String(newYear));
-  // Never overwrite an imported (real) year — only build new years or rebuild years
-  // that were themselves generated as forecasts. (Rebuilding lets a corrected base
-  // year flow forward into an existing forecast year.)
-  if (exists) {
-    try {
-      const mj = await (await fetch('/api/data?year=' + newYear)).json();
-      const src = (mj.master && mj.master.source) || '';
-      if (!/^forecast generated/i.test(src)) {
-        alert(`${newYear} holds imported actuals, not a generated forecast — it won't be rebuilt. Switch to your latest real year to build the next forecast year from it.`);
-        return;
-      }
-    } catch (e) { /* couldn't verify — fall through to the explicit confirm below */ }
-  }
-  if (!confirm(`${exists ? 'Rebuild' : 'Build'} a ${newYear} forecast year from ${baseYear}?\n\nIt pulls in the forecasted weekly sales (the ${SEASON().enabled ? 'seasonality model’s' : 'current'} rollover forecast) and projected stock for every product, starting from ${baseYear}’s projected year-end stock. ${exists ? `This REBUILDS the existing ${newYear} year — its proposed rebuys and any committed ${newYear} orders are regenerated from scratch.` : ''} You can then browse it per supplier and run its own rebuy plan.`)) return;
+  const newYear = nextBuildYear(), baseYear = newYear - 1;
+  if (YEARS.includes(String(newYear))) return;   // can't happen — the button is always the next new year
+  if (!confirm(`Add ${newYear} as a new forecast year?\n\nIt is built from ${baseYear}: every ${baseYear} product, its forecasted weekly sales carried into ${newYear}, and its projected ${baseYear} closing stock (committed + proposed orders) as the starting stock.\n\n${baseYear} and every other existing year are left exactly as they are. ${newYear} starts with no orders — run its own rebuy plan once it's open.`)) return;
   const status = document.getElementById('save-status');
   status.textContent = `Building ${newYear}…`;
   try {
+    if (saveTimer) await saveNow();
     if (String(YEAR) !== String(baseYear)) await loadYear(String(baseYear));
     buildModeledForecasts(); computeAll();
     const payload = buildForecastYear(newYear);
@@ -6069,10 +6311,9 @@ async function buildForecastYearAction() {
 function refreshBuildYearBtn() {
   const btn = document.getElementById('btn-build-year');
   if (!btn) return;
-  const next = (+YEAR || Math.max(...YEARS.map(Number))) + 1;   // year after the one being viewed
-  const exists = YEARS.includes(String(next));
-  btn.textContent = (exists ? '↻ ' : '+ ') + next;
-  btn.title = `${exists ? 'Rebuild' : 'Build'} a ${next} forecast year (forecasted sales + projected stock) from ${next - 1}`;
+  const next = nextBuildYear();
+  btn.textContent = '+ ' + next;
+  btn.title = `Add ${next} as a new forecast year, built from ${next - 1} (existing years are never rebuilt)`;
 }
 
 /* ---------------- view switching / init ---------------- */
@@ -6734,11 +6975,12 @@ function setView(v) {
 // year. Chains a forecast year's starting stock + LY reference to the prior year's
 // CURRENT data, so re-imported actuals and Order Forecast / Proposed Rebuy edits carry
 // forward live (no rebuild needed). Returns Map id -> { stock, ly:[53] }.
-async function computeYearEndStocks(year) {
+async function computeYearEndStocks(year, depth = 0) {
   let data;
   try { data = await (await fetch('/api/data?year=' + encodeURIComponent(year))).json(); }
   catch { return null; }
   if (!data || data.error || !data.master) return null;
+  await chainFromPriorYear(data, year, depth);
   const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, RESC, AGG, PROPOSED, skuById, supByName };
   const profSnap = new Map(PROFILE_CACHE);
   try {
@@ -6775,6 +7017,21 @@ async function computeYearEndStocks(year) {
   }
 }
 
+// A forecast year's saved starting stock + LY Sales are only what they were when it was
+// built; loadYear re-chains them live, but a sandboxed read of that year (as the year
+// before 2028, say) gets the saved copy. Apply the same chain here — recursively, so
+// 2028 → 2027 → 2026 — so the sandbox sees the year exactly as it shows on screen.
+async function chainFromPriorYear(data, year, depth) {
+  if (+data.master.data_week !== 1 || !YEARS.includes(String(+year - 1)) || depth >= 5) return;
+  const ends = await computeYearEndStocks(String(+year - 1), depth + 1);
+  if (!ends) return;
+  data.master.lyActualWeeks = ends.lyActualWeeks;
+  for (const sku of data.master.skus) {
+    const e = ends.get(sku.id);
+    if (e) { sku.stock_now = e.stock; if (e.ly) sku.ly = e.ly; }
+  }
+}
+
 /* ---- last-year comparison for the supplier cards (vs-LY deltas + stock ghost) ----
    Swaps the prior year's data into the globals, runs the same calc engine, and
    returns per-product-code weekly aggregates. Snapshot/restore mirrors
@@ -6785,6 +7042,7 @@ async function computeLyAgg(lyYear) {
   try { data = await (await fetch('/api/data?year=' + encodeURIComponent(lyYear))).json(); }
   catch { return null; }
   if (!data || data.error || !data.master) return null;
+  await chainFromPriorYear(data, lyYear, 1);
   const snap = { YEAR, M, ORDERS, SETTINGS, MODELED, CALIB, RES, RESC, AGG, PROPOSED, skuById, supByName };
   const profSnap = new Map(PROFILE_CACHE);
   try {
