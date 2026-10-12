@@ -3947,13 +3947,16 @@ function openBuyingDialog() {
   }
   document.getElementById('buying-years').innerHTML = YEARS.slice().sort().map(y =>
     `<label class="asp-yr"><input type="checkbox" value="${y}"${y >= String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
-  // the reading is a Monday snapshot — stamp it against the week it was taken in, so a
-  // late import doesn't silently land on the wrong week
+  // the reading is a Monday snapshot — stamp it against the week it was TAKEN in (from
+  // today's date), not the plan's current week: on a Monday the Buying Report usually goes
+  // in before that week's sales import, when the current week still reads as last week,
+  // and defaulting to it filed every reading a week early
+  const bw0 = defaultSnapWeek();
   document.getElementById('buying-week').innerHTML =
-    `<label class="bw-lbl">Stock reading is for week
-       <input type="number" id="buying-week-n" min="1" max="53" step="1" value="${SETTINGS.current_week}"></label>`
-    + `<span class="bw-note">w/c <b id="buying-week-d">${weekDate(SETTINGS.current_week)}</b> — the report's free stock is`
-    + ` recorded against this week, building the stock history the plan reads back.</span>`;
+    `<label class="bw-lbl">Stock reading taken in week
+       <input type="number" id="buying-week-n" min="1" max="53" step="1" value="${bw0}"></label>`
+    + `<span class="bw-note">w/c <b id="buying-week-d">${weekDate(bw0)}</b> — the report's free stock is that week's`
+    + ` opening position (so last week's closing), building the stock history the plan reads back.</span>`;
   document.getElementById('buying-week-n').addEventListener('input', e => {
     const w = Math.max(1, Math.min(WEEKS, parseInt(e.target.value, 10) || 1));
     document.getElementById('buying-week-d').textContent = weekDate(w);
@@ -3976,8 +3979,10 @@ function openBuyingDialog() {
 function buyingSnapWeek() {
   const el = document.getElementById('buying-week-n');
   const w = parseInt(el && el.value, 10);
-  return (w >= 1 && w <= WEEKS) ? w : SETTINGS.current_week;
+  return (w >= 1 && w <= WEEKS) ? w : defaultSnapWeek();
 }
+// The week containing today, when the loaded year is the one being traded.
+function defaultSnapWeek() { return highlightWeek() || SETTINGS.current_week; }
 async function applyBuyingUpdates() {
   const p = BUYING_PARSED; if (!p) return;
   const years = [...document.querySelectorAll('#buying-years input:checked')].map(i => i.value);
@@ -3999,6 +4004,7 @@ async function applyBuyingUpdates() {
 }
 function applyBuyingToMemory(map, years, snapWeek) {
   if (!years.includes(String(YEAR))) return 0;
+  if (!(+M.data_week > 1)) snapWeek = 0;   // forecast year: live figure only, no history (as the server)
   let n = 0;
   for (const s of M.skus) {
     const rec = map[s.code]; if (!rec) continue;
@@ -4016,7 +4022,7 @@ function applyBuyingToMemory(map, years, snapWeek) {
     }
     if (touched) n++;
   }
-  if (snapWeek >= 1 && snapWeek <= WEEKS) rechainRunningStock(snapWeek);
+  if (snapWeek >= 1 && snapWeek <= WEEKS) rechainRunningStock(Math.min(snapWeek, +M.data_week));
   computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
@@ -4024,22 +4030,19 @@ function applyBuyingToMemory(map, years, snapWeek) {
    Mirrors the server's rechain_running_stock so the grid matches what was just written
    without a reload. A snapshot is the OPENING position of its week, so it also fixes the
    previous week's closing exactly, and the chain re-anchors on it rather than carrying
-   drift forward from week 1. */
+   drift forward from week 1. The walk runs one week past the last closed week, so the
+   current week's Monday reading anchors last week's closing. */
 function rechainRunningStock(start) {
-  const closed = Math.max(start, (+M.data_week || SETTINGS.current_week) - 1);
+  const closed = (+M.data_week || SETTINGS.current_week) - 1;
   for (const s of M.skus) {
     if (!Array.isArray(s.running_stock)) s.running_stock = new Array(WEEKS).fill(0);
     const rs = s.running_stock, snap = s.stock_snap || [], act = s.actual || [];
     const ordv = ORDERS[s.id] || EMPTY53;
-    for (let w = Math.max(1, start); w <= Math.min(closed, WEEKS); w++) {
+    for (let w = Math.max(1, start); w <= Math.min(closed + 1, WEEKS); w++) {
       const sn = snap[w - 1];
-      let opening;
-      if (sn != null) {
-        opening = +sn;
-        if (w >= 2) rs[w - 2] = opening;      // last week closed on exactly this figure
-      } else {
-        opening = w >= 2 ? (+rs[w - 2] || 0) : (+s.stock_now || 0);
-      }
+      if (sn != null && w >= 2) rs[w - 2] = +sn;   // last week closed on exactly this figure
+      if (w > closed) break;                       // current week: anchor only
+      const opening = sn != null ? +sn : (w >= 2 ? (+rs[w - 2] || 0) : (+s.stock_now || 0));
       rs[w - 1] = Math.max(0, opening + (+ordv[w - 1] || 0) - (+act[w - 1] || 0));
     }
   }
@@ -4297,16 +4300,11 @@ function applyWksalesToMemory(units, wkasp, week, dataWeek, closedThrough) {
     if (!s.actual) s.actual = zeros();
     if (u != null) s.actual[week - 1] = u;
     if (wkasp[s.code] != null) { s.asp_wk = wkasp[s.code]; s.asp_wk_week = week; }
-    // chain the closing stock (every sku; unsold = 0 sales) from the uploaded week
-    // through the last actualised week — mirrors the server's apply_wksales
-    if (!s.running_stock) s.running_stock = zeros();
-    const ord = ORDERS[s.id] || EMPTY53;
-    for (let w = week; w <= (closedThrough || week); w++) {
-      const prev = w >= 2 ? (+s.running_stock[w - 2] || 0) : (+s.stock_now || 0);
-      s.running_stock[w - 1] = Math.max(0, prev + (ord[w - 1] || 0) - (s.actual[w - 1] || 0));
-    }
   }
   M.data_week = dataWeek;
+  // chain the closing stock (every sku; unsold = 0 sales) from the uploaded week through
+  // the last actualised week, anchored on Buying Report readings — mirrors apply_wksales
+  rechainRunningStock(week);
   // live year: let the date-derived current week advance now the boundary allows it
   const dateWk = highlightWeek();
   if (dateWk) SETTINGS.current_week = Math.min(dateWk, M.data_week || dateWk);

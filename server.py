@@ -48,6 +48,8 @@ def rechain_running_stock(master, orders, start, closed_through):
     now only build up inside one week before a real reading corrects it.
 
     Weeks with no snapshot still chain, so nothing is lost where we have no reading.
+    The walk runs one week past `closed_through`: the reading taken on the Monday of the
+    current week is what the last closed week ended on, so it anchors that week too.
     """
     WEEKS = 53
     for s in master["skus"]:
@@ -59,12 +61,14 @@ def rechain_running_stock(master, orders, start, closed_through):
             snap.append(None)
         act = s.get("actual") or [0] * WEEKS
         ordv = orders.get(s.get("id")) or [0] * WEEKS
-        for w in range(max(1, start), min(closed_through, WEEKS) + 1):
+        for w in range(max(1, start), min(closed_through + 1, WEEKS) + 1):
             sn = snap[w - 1]
+            if sn is not None and w >= 2:
+                rs[w - 2] = float(sn)        # last week closed on exactly this figure
+            if w > closed_through:
+                break                        # current week: anchor only, nothing to close
             if sn is not None:
                 opening = float(sn)
-                if w >= 2:
-                    rs[w - 2] = opening      # last week closed on exactly this figure
             else:
                 opening = float(rs[w - 2] or 0) if w >= 2 else float(s.get("stock_now") or 0)
             arrivals = float(ordv[w - 1] or 0) if w - 1 < len(ordv) else 0.0
@@ -1114,7 +1118,18 @@ class Handler(SimpleHTTPRequestHandler):
                 sku["ly"] = [0.0] * WEEKS
                 sku["actual"] = [0.0] * WEEKS
                 sku["base_forecast"] = list(weekly) if weekly else [per] * WEEKS
-                sku["running_stock"] = [float(stock_now)] * WEEKS
+                # stock entered now is what's on hand at the START of the current week, so
+                # it is last week's closing — the product held nothing in the plan before
+                # that (it wasn't in it). Copying it into every past week made a product
+                # added in October look like it had been in stock since January.
+                dw = int(m.get("data_week") or 1)
+                sku["running_stock"] = [float(stock_now) if w >= dw - 2 else 0.0 for w in range(WEEKS)]
+                if 1 < dw <= WEEKS:
+                    # ...and record it as this week's stock reading, so a later re-chain
+                    # (weekly sales upload) anchors on it instead of chaining up from 0
+                    snap = [None] * WEEKS
+                    snap[dw - 1] = float(stock_now)
+                    sku["stock_snap"] = snap
                 m.setdefault("skus", []).append(sku)
                 if not any(str(s.get("name", "")).strip() == supplier for s in m.get("suppliers", [])):
                     m.setdefault("suppliers", []).append(dict(supplier_rec))
@@ -1514,6 +1529,11 @@ class Handler(SimpleHTTPRequestHandler):
                 master = read_json(mpath, None)
                 if not master:
                     continue
+                # the reading is a stock position in the year being TRADED; a forecast
+                # year (no actuals yet) takes the live figure but keeps no history, else
+                # e.g. a 2026 W42 reading would land in October 2027
+                trading = int(master.get("data_week") or 1) > 1
+                year_snap = snap_week if trading else 0
                 n = 0
                 for s in master["skus"]:
                     rec = buying.get(s.get("code"))
@@ -1528,24 +1548,25 @@ class Handler(SimpleHTTPRequestHandler):
                         touched = True
                     if rec.get("stock") is not None:
                         s["stock_now"] = rec["stock"]
-                        if 1 <= snap_week <= 53:
+                        if 1 <= year_snap <= 53:
                             snap = s.get("stock_snap") or [None] * 53
                             while len(snap) < 53:
                                 snap.append(None)
-                            snap[snap_week - 1] = rec["stock"]
+                            snap[year_snap - 1] = rec["stock"]
                             s["stock_snap"] = snap
                         touched = True
                     if touched:
                         n += 1
-                if 1 <= snap_week <= 53:
+                if 1 <= year_snap <= 53:
                     weeks_meta = master.get("stock_snap_weeks") or {}
-                    weeks_meta[str(snap_week)] = _today_iso()
+                    weeks_meta[str(year_snap)] = _today_iso()
                     master["stock_snap_weeks"] = weeks_meta
                     # re-chain from this reading up to the last actualised week, so the
-                    # snapshot corrects the weeks around it straight away
+                    # snapshot corrects the weeks around it straight away (a Monday
+                    # reading of the current week anchors last week's closing)
                     ords = read_json(DATA / y / "orders.json", {}) or {}
-                    closed = max(snap_week, int(master.get("data_week") or 1) - 1)
-                    rechain_running_stock(master, ords, snap_week, closed)
+                    closed = int(master.get("data_week") or 1) - 1
+                    rechain_running_stock(master, ords, min(year_snap, closed + 1), closed)
                 mpath.write_text(json.dumps(master), encoding="utf-8")
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week})
