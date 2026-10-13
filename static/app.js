@@ -24,7 +24,7 @@ let PO_SCHED_CUR = null;  // on-screen supplier: week -> PO arrival entries (raw
 let PO_POS_CUR = null;    // on-screen supplier: Map PO# -> { lines, qty } (raw, for per-product cell tooltips)
 let SETTINGS = {};
 let RES = new Map();     // sku id -> computed results
-let RESC = new Map();    // sku id -> sales value incl. proposed rebuys (only where any exist)
+let RESC = new Map();    // sku id -> computeSku result incl. proposed rebuys (only where any exist)
 let AGG = null;          // aggregates
 let skuById = new Map();
 let supByName = new Map();
@@ -204,7 +204,7 @@ function computeSku(sku, orderOverride) {
   const ord = orderOverride || ORDERS[sku.id] || new Array(WEEKS).fill(0);
   const fc = new Array(WEEKS), stock = new Array(WEEKS), value = new Array(WEEKS),
         cover = new Array(WEEKS), fobRow = new Array(WEEKS), cbmRow = new Array(WEEKS),
-        shv = new Array(WEEKS);
+        shv = new Array(WEEKS), sold = new Array(WEEKS);
   const mod = MODELED.get(sku.id);   // seasonality model (future weeks only), if enabled
   for (let w = 0; w < WEEKS; w++) {
     const bf = (mod && (w + 1) >= cur) ? mod[w] : sku.base_forecast[w];
@@ -218,7 +218,10 @@ function computeSku(sku, orderOverride) {
     else stock[w] = Math.max(0, stock[w - 1] + ord[w] - fc[w]);
   }
   for (let w = 0; w < WEEKS; w++) {
-    value[w] = (w + 1) < cur ? sku.actual[w] * sku.asp : Math.min(fc[w], stock[w]) * sku.asp;
+    // selling units = the units behind the sales £: actuals for traded weeks, then the
+    // forecast capped at the stock on hand
+    sold[w] = (w + 1) < cur ? (sku.actual[w] || 0) : Math.min(fc[w], stock[w]);
+    value[w] = sold[w] * sku.asp;
     fobRow[w] = ord[w] * sku.fob;
     cbmRow[w] = ord[w] * sku.cbm;
     shv[w] = stock[w] * sku.landed;
@@ -233,7 +236,7 @@ function computeSku(sku, orderOverride) {
   // calculation (stock projection, cover, stock-out flags, rebuy demand, coverage %).
   const dataBnd = ((M && +M.data_week) || cur) - 1;
   const forecastDisp = fc.map((v, w) => (w < dataBnd ? (sku.actual[w] || 0) : v));
-  return { ly: sku.ly, actual: sku.actual, forecast: fc, forecastDisp, orders: ord, stock, cover, value, fobRow, cbmRow, shv };
+  return { ly: sku.ly, actual: sku.actual, forecast: fc, forecastDisp, orders: ord, stock, cover, value, sold, fobRow, cbmRow, shv };
 }
 
 function zeros() { return new Array(WEEKS).fill(0); }
@@ -547,12 +550,12 @@ function forecastDemandTotal() {
 
 function computeAll() {
   RES = new Map();
-  RESC = new Map();      // sales value WITH proposed rebuys, only for SKUs that have any
+  RESC = new Map();      // results WITH proposed rebuys, only for SKUs that have any
   for (const sku of M.skus) {
     RES.set(sku.id, computeSku(sku));
     const prop = PROPOSED && PROPOSED.get(sku.id);
     // combined (committed + proposed) sales is stock-dependent, so re-simulate those SKUs
-    if (prop && prop.some(v => v)) RESC.set(sku.id, computeSku(sku, combinedOrder(sku.id)).value);
+    if (prop && prop.some(v => v)) RESC.set(sku.id, computeSku(sku, combinedOrder(sku.id)));
   }
   AGG = aggregateOver(M.skus);
   tagsInvalidate();      // condition tags are derived from these results
@@ -563,14 +566,14 @@ function computeAll() {
 function aggregateOver(skus) {
   const bySup = new Map();
   const g = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(),
-              fcUnits: zeros(), fcSales: zeros(), pallet: zeros(), stillage: zeros(), racking: zeros() };
-  const cSales = zeros();                          // sales value with committed + proposed orders
+              fcUnits: zeros(), fcSales: zeros(), sold: zeros(), pallet: zeros(), stillage: zeros(), racking: zeros() };
+  const cSales = zeros(), cSold = zeros();         // sales value / selling units with committed + proposed orders
   let propUnits = 0, propFob = 0, propCbm = 0;     // proposed-rebuy additions (purely additive)
   for (const sku of skus) {
     const r = RES.get(sku.id);
     if (!r) continue;
     let s = bySup.get(sku.supplier);
-    if (!s) { s = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(), fcUnits: zeros(), fcSales: zeros(), fcValue: 0, covNum: 0, covDen: 0 }; bySup.set(sku.supplier, s); }
+    if (!s) { s = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(), fcUnits: zeros(), fcSales: zeros(), sold: zeros(), fcValue: 0, covNum: 0, covDen: 0 }; bySup.set(sku.supplier, s); }
     // forecast value (uncapped) + stocked-in coverage (committed supply vs forecast demand)
     const fcUnitsSku = r.forecast.reduce((a, b) => a + b, 0);
     const supplySku = (sku.stock_now || 0) + (ORDERS[sku.id] || EMPTY53).reduce((a, b) => a + b, 0);
@@ -582,6 +585,7 @@ function aggregateOver(skus) {
       const fcv = r.forecast[w] * asp;             // uncapped forecast sales £ (the plan)
       s.sales[w] += r.value[w];  s.units[w] += r.orders[w]; s.fob[w] += r.fobRow[w];
       s.cbm[w] += r.cbmRow[w];   s.shv[w] += r.shv[w];      s.fcUnits[w] += r.forecast[w]; s.fcSales[w] += fcv;
+      s.sold[w] += r.sold[w];    g.sold[w] += r.sold[w];
       g.sales[w] += r.value[w];  g.units[w] += r.orders[w]; g.fob[w] += r.fobRow[w];
       g.cbm[w] += r.cbmRow[w];   g.shv[w] += r.shv[w];      g.fcUnits[w] += r.forecast[w]; g.fcSales[w] += fcv;
       if (sku.fpq > 0 && sku.pallet_type) {
@@ -594,10 +598,10 @@ function aggregateOver(skus) {
     // proposed-rebuy uplift: sales come from the pre-simulated combined run (RESC),
     // FOB/units/CBM are additive so they sum straight from the proposal row
     const prop = PROPOSED && PROPOSED.get(sku.id);
-    const cVal = RESC && RESC.get(sku.id);
-    const src = cVal || r.value;
-    for (let w = 0; w < WEEKS; w++) cSales[w] += src[w];
-    if (cVal && prop) for (let w = 0; w < WEEKS; w++) {
+    const cRes = RESC && RESC.get(sku.id);
+    const src = cRes || r;
+    for (let w = 0; w < WEEKS; w++) { cSales[w] += src.value[w]; cSold[w] += src.sold[w]; }
+    if (cRes && prop) for (let w = 0; w < WEEKS; w++) {
       const q = prop[w] || 0;
       if (q) { propUnits += q; propFob += q * (sku.fob || 0); propCbm += q * (sku.cbm || 0); }
     }
@@ -616,6 +620,7 @@ function aggregateOver(skus) {
   g.totCbm = sum(g.cbm); g.totContainers = g.totCbm / SETTINGS.container_cbm;
   // committed / proposed split for the whole-plan totals band
   g.totSalesProposed = sum(cSales) - g.totSales;          // stock-dependent sales uplift
+  g.totSold = sum(g.sold); g.totSoldProposed = sum(cSold) - g.totSold;   // selling units, same basis
   g.totFobProposed = propFob;
   g.totUnitsProposed = propUnits;
   g.totCbmProposed = propCbm;
@@ -672,6 +677,7 @@ function totalsHtml() {
     + `<span class="c-prop">${prop > 0 ? '+' : ''}${fmt(prop)} proposed</span></div></div>`;
   return '<div class="tb-title">Whole&#8209;plan totals</div>'
     + broken(g.totSales, g.totSalesProposed, fmtGBPk, 'Forecast sales ' + YEAR)
+    + broken(g.totSold, g.totSoldProposed, num, 'Selling units ' + YEAR)
     + broken(g.totFob, g.totFobProposed, fmtGBPk, 'Order FOB spend')
     + broken(g.totUnits, g.totUnitsProposed, num, 'Order units')
     + broken(g.totCbm, g.totCbmProposed, v => num(v) + ' cbm', 'Order volume')
@@ -794,7 +800,7 @@ function searchEmptyNote(term) {
 function weekSalesFor(skus) {
   const out = zeros();
   for (const sku of skus) {
-    const v = (RESC && RESC.get(sku.id)) || (RES.get(sku.id) || {}).value;
+    const v = ((RESC && RESC.get(sku.id)) || RES.get(sku.id) || {}).value;
     if (!v) continue;
     for (let w = 0; w < WEEKS; w++) out[w] += v[w];
   }
@@ -2478,6 +2484,7 @@ function renderSummaryBody() {
 
   const cards = [
     [fmtGBPk(g.totSales), 'Forecast sales ' + YEAR, gSub],
+    [Math.round(g.totSold).toLocaleString(), 'Selling units ' + YEAR],
     [fmtGBPk(g.totFob), 'Order FOB spend'],
     [Math.round(g.totUnits).toLocaleString(), 'Order units'],
     [Math.round(g.totCbm).toLocaleString() + ' cbm', 'Order volume'],
@@ -2548,6 +2555,7 @@ function renderSummaryBody() {
     <h2 class="sect">Weekly totals — ${YEAR}${filtered ? ' · selection' : ''}</h2>
     ${weeklyTable([
       ['Sales £', g.sales, fmtGBP],
+      ['Selling units', g.sold, fmtU],
       ['Forecast units', g.fcUnits, fmtU],
       ['Order units', g.units, fmtU],
       ['Order FOB £', g.fob, fmtGBP],
@@ -4023,6 +4031,7 @@ function applyBuyingToMemory(map, years, snapWeek) {
     if (touched) n++;
   }
   if (snapWeek >= 1 && snapWeek <= WEEKS) rechainRunningStock(Math.min(snapWeek, +M.data_week));
+  dropNotLiveProposals();                 // lines the report turned Not Live (the server did the same)
   computeAll(); rerenderKeepingPlace();   // stay where the reader was in the grid
   return n;
 }
@@ -4683,6 +4692,7 @@ function applySkuToMemory(code, fields, weekly, years, newCode) {
     if (newCode) { s.code_prev = s.code; s.code = newCode; }   // last: it's the loop's match key
   }
   if (moved && !M.suppliers.some(s => s.name === moved)) M.suppliers.push({ name: moved });
+  if (fields.status === 'Not Live') dropNotLiveProposals();   // as the server did
   supByName = new Map(M.suppliers.map(s => [s.name, s]));
   SKU_PROFILE_CACHE.clear(); PROFILE_CACHE.clear();
   buildModeledForecasts();      // season / category / baseline changes re-shape the model
@@ -6049,6 +6059,19 @@ function clearProposed(supName) {
 function restoreProposed(obj) {       // rebuild the proposal layer from a saved {id:[53]} map
   PROPOSED = new Map();
   for (const id in obj) if (skuById.has(id) && Array.isArray(obj[id])) PROPOSED.set(id, obj[id].slice());
+  return dropNotLiveProposals();
+}
+// Not Live lines are run down, never rebought: a proposed rebuy on one can only be left
+// over from when it was Live, so it's dropped wherever the layer is (re)built or a line
+// turns Not Live. Committed orders are real POs and are left alone. Returns what went.
+function dropNotLiveProposals() {
+  let n = 0, units = 0;
+  if (!PROPOSED) return { n, units };
+  for (const [id, arr] of [...PROPOSED]) {
+    const s = skuById.get(id);
+    if (s && s.status === 'Not Live') { units += arr.reduce((a, b) => a + b, 0); PROPOSED.delete(id); n++; }
+  }
+  return { n, units };
 }
 function serializeProposed() {        // non-empty proposed arrays, for server export merge
   const o = {};
@@ -7181,7 +7204,11 @@ async function loadYear(year) {
   // the app / restarting the server never re-fills suggestions already cleared or
   // committed. If a forecast year's starting stock moved because the prior year was
   // edited, we only FLAG that the suggestions are stale (see the toolbar hint).
-  restoreProposed(data.proposed || {});
+  const dropped = restoreProposed(data.proposed || {});
+  if (dropped.n) {                 // persist the clean-up so exports read the same layer
+    labelNextSave(`Cleared proposed rebuys on ${dropped.n} Not Live line${dropped.n > 1 ? 's' : ''}`);
+    markDirty();
+  }
   REBUY_STALE = stockChainChanged && PROPOSED.size > 0;
   computeAll();                    // band reflects the proposed layer
   await refreshLyCache();          // prior-year aggregates for the supplier cards' vs-LY deltas

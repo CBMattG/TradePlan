@@ -78,6 +78,26 @@ def rechain_running_stock(master, orders, start, closed_through):
         s["stock_snap"] = snap
 
 
+def drop_not_live_proposals(ydir, master):
+    """Remove proposed rebuys for Not Live products from a year's proposed.json.
+
+    A Not Live line is being run down, never rebought, so a proposal on it can only be
+    left over from when it was Live. Left in place it would still feed the arrivals
+    outlook, the supplier forms and the plan's selling units. Committed orders are real
+    POs and are never touched. Returns the number of products cleared."""
+    pp = ydir / "proposed.json"
+    prop = read_json(pp, None)
+    if not isinstance(prop, dict) or not prop:
+        return 0
+    nl = {s.get("id") for s in master.get("skus", []) if s.get("status") == "Not Live"}
+    gone = [k for k in prop if k in nl]
+    for k in gone:
+        del prop[k]
+    if gone:
+        pp.write_text(json.dumps(prop), encoding="utf-8")
+    return len(gone)
+
+
 def safe_filename(name):
     return re.sub(r'[\\/:*?"<>|]+', " ", str(name)).strip() or "supplier"
 
@@ -1330,6 +1350,8 @@ class Handler(SimpleHTTPRequestHandler):
                 if not n:
                     missing.append(y)
                 mpath.write_text(json.dumps(master), encoding="utf-8")
+                if fields.get("status") == "Not Live":
+                    drop_not_live_proposals(DATA / y, master)
                 applied[y] = n
             self.send_json({"ok": True, "code": new_code or code, "oldCode": code,
                             "renamed": bool(new_code), "years": targets, "applied": applied,
@@ -1568,6 +1590,7 @@ class Handler(SimpleHTTPRequestHandler):
                     closed = int(master.get("data_week") or 1) - 1
                     rechain_running_stock(master, ords, min(year_snap, closed + 1), closed)
                 mpath.write_text(json.dumps(master), encoding="utf-8")
+                drop_not_live_proposals(DATA / y, master)
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week})
         except Exception as exc:
