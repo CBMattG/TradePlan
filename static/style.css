@@ -1831,3 +1831,11 @@ details.dd.dd-right.dd-flip .dd-pop { left: 0; right: auto; }   /* right-aligned
 .fcq-exact input { width: 130px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 7px; font: inherit;
   background: var(--panel); color: var(--text); }
 .fc-pop .fc-links { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line); }
+
+/* typeable % readouts in the forecast pill: look like the figure, edit on click */
+.fcq-num { display: inline-flex; align-items: baseline; gap: 1px; font-weight: 700; color: var(--text); }
+.fcq-num input { width: 52px; padding: 1px 4px; text-align: right; font: inherit; font-variant-numeric: tabular-nums;
+  color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px; -moz-appearance: textfield; }
+.fcq-num input::-webkit-outer-spin-button, .fcq-num input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.fcq-num input:hover { border-color: var(--line); cursor: text; }
+.fcq-num input:focus { outline: none; border-color: var(--sel-brd); background: var(--panel); box-shadow: var(--sel-glow); }

@@ -364,6 +364,14 @@ in Settings → Forecast.
     (`min(forecast, stock)`), so it sits a little below the demand target — that's what
     you'd actually sell given stock timing; compare the target against the uncapped
     forecast (the "plan N" sub-value on the Sales Forecast total).
+    *Known quirk — target vs "modelled demand":* the target is hit as **actual sales for
+    the weeks already traded + the modelled forecast for the rest of the year**, but the
+    **modelled demand** figure shown beside it (in the forecast pill and Settings →
+    Forecast) sums the **forecast for every week, including the traded ones**. So once
+    actuals differ from forecast the two drift apart — e.g. a £15.00m target showing
+    ~£17.15m modelled demand means the traded weeks sold about £2.15m less than they were
+    forecast to. Neither number is wrong; they just measure different things. (Left as is
+    for now — a like-for-like "actuals + future forecast" comparison would close the gap.)
   - A **forecast pill** beside the supplier name on the Plan page shows the year's active
     mode (e.g. *🌦️ Seasonality 100%*, *🎯 Target £15m*, *📈 Original forecast*). Click it
     for **quick controls** that change that year straight from the plan: switch between

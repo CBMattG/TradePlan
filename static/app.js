@@ -476,10 +476,10 @@ function fcQuickHtml(mode, se) {
     + `<div class="fcq-modes">${radio('off', '📈 Original')}${radio('seasonality', '🌦️ Seasonality')}${radio('target', '🎯 Target')}</div>`;
   if (mode === 'seasonality') {
     const pct = Math.round(seasonStrengthFor(YEAR) * 100), gp = growthPctFor(YEAR);
-    h += `<label class="fcq-row">Model strength <b id="fcq-strength-val">${pct}%</b>`
+    h += `<label class="fcq-row">Model strength <span class="fcq-num"><input type="number" id="fcq-strength-num" min="0" max="100" step="1" value="${pct}" title="Type a strength (0–100) and press Enter">%</span>`
       + `<input type="range" id="fcq-strength" min="0" max="100" step="5" value="${pct}"></label>`
       + `<small>0% = original forecast · 100% = fully model-driven</small>`
-      + `<label class="fcq-row">Year-on-year growth <b id="fcq-growth-val">${gp > 0 ? '+' : ''}${gp}%</b>`
+      + `<label class="fcq-row">Year-on-year growth <span class="fcq-num"><input type="number" id="fcq-growth-num" min="-90" max="500" step="0.5" value="${gp}" title="Type a growth % (−90 to +500) and press Enter — beyond the slider's range is fine">%</span>`
       + `<input type="range" id="fcq-growth" min="${FC_GROWTH_MIN}" max="${FC_GROWTH_MAX}" step="1" value="${Math.max(FC_GROWTH_MIN, Math.min(FC_GROWTH_MAX, gp))}"></label>`
       + `<small>Scales the whole ${YEAR} forecast for expected growth beyond history (0 = pure history)</small>`
       + (se.useWeather ? `<small>${esc(weatherSummary())}</small>` : '');
@@ -495,7 +495,7 @@ function fcQuickHtml(mode, se) {
   h += `<div class="fc-links"><a id="season-edit-link">All forecast settings…</a></div>`;
   return h;
 }
-function fcQuickSet(patch, label) {
+function fcQuickSet(patch, label, keepOpen = true) {
   const by = seasonYears(), y = String(YEAR);
   const next = Object.assign({ mode: 'off' }, by[y] || {}, patch);
   if (next.mode === 'off') delete by[y];
@@ -508,7 +508,7 @@ function fcQuickSet(patch, label) {
   labelNextSave(label || `Forecast mode · ${y}`);
   markDirty();
   if (PROPOSED && PROPOSED.size) REBUY_STALE = true;   // rebuys are never rebuilt for you
-  reopenDD = 'dd-forecast';                            // keep the pill open across the re-render
+  if (keepOpen) reopenDD = 'dd-forecast';              // keep the pill open across the re-render
   applySeasonality();
 }
 function wireFcQuick() {
@@ -524,13 +524,29 @@ function wireFcQuick() {
     el.addEventListener('input', () => { if (out) out.textContent = fmt(+el.value); });
     el.addEventListener('change', () => commit(+el.value));
   };
-  slider('fcq-strength', v => v + '%', v => fcQuickSet({ strength: v / 100 }, `Forecast strength ${v}% · ${YEAR}`));
-  slider('fcq-growth', v => (v > 0 ? '+' : '') + v + '%', v => fcQuickSet({ growth: v }, `Forecast growth ${v > 0 ? '+' : ''}${v}% · ${YEAR}`));
+  // a slider paired with a typeable % box: dragging updates the box, typing a value and
+  // pressing Enter (or leaving the box) clamps it, moves the slider and commits
+  const paired = (id, lo, hi, commit) => {
+    const sl = document.getElementById(id), box = document.getElementById(id + '-num');
+    if (!sl || !box) return;
+    sl.addEventListener('input', () => { box.value = sl.value; });
+    sl.addEventListener('change', () => commit(+sl.value));
+    box.addEventListener('focus', () => box.select());
+    box.addEventListener('change', () => {
+      const v = parseFloat(box.value);
+      if (!isFinite(v)) { box.value = sl.value; return; }
+      const c = Math.min(hi, Math.max(lo, v));
+      box.value = c; sl.value = c;
+      commit(c, document.activeElement === box);   // Enter keeps the pill open; clicking away lets it close
+    });
+  };
+  paired('fcq-strength', 0, 100, (v, keep) => fcQuickSet({ strength: v / 100 }, `Forecast strength ${v}% · ${YEAR}`, keep));
+  paired('fcq-growth', -90, 500, (v, keep) => fcQuickSet({ growth: v }, `Forecast growth ${v > 0 ? '+' : ''}${v}% · ${YEAR}`, keep));
   slider('fcq-target', v => fmtGBPk(v), v => fcQuickSet({ target: v }, `Sales target ${fmtGBPk(v)} · ${YEAR}`));
   const num = document.getElementById('fcq-target-num');
   if (num) num.addEventListener('change', () => {
     const v = Math.round(parseFloat(num.value));
-    if (v > 0) fcQuickSet({ target: v }, `Sales target ${fmtGBPk(v)} · ${YEAR}`);
+    if (v > 0) fcQuickSet({ target: v }, `Sales target ${fmtGBPk(v)} · ${YEAR}`, document.activeElement === num);
   });
 }
 function seasonYears() {           // forecast byYear map, creating it on first use
