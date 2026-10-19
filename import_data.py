@@ -1,17 +1,20 @@
-"""Import the 2026 Tradeplan Excel workbook into JSON for the tradeplan app.
+"""Import a Tradeplan Excel workbook (2025 or 2026 layout) into data/<year>/.
 
 Usage:
-    python import_data.py                 (uses the default S: drive path)
-    python import_data.py "path\to\file.xlsx"
-    python import_data.py --reset-orders  (also overwrite data/orders.json with Excel's orders)
+    python import_data.py [--year YYYY] ["path\to\file.xlsx"] [--reset-orders]
+
+--year defaults to 2026; the workbook path defaults per year (DEFAULT_EXCEL_BY_YEAR).
+--reset-orders also overwrites data/<year>/orders.json with Excel's orders.
 
 Reads cached (calculated) values from the workbook, so the file must have been
-saved by Excel at least once. Re-run this whenever the weekly data imports in
-the workbook are refreshed; your saved order edits in data/orders.json are kept
-unless --reset-orders is passed.
+saved by Excel at least once. WARNING: this OVERWRITES data/<year>/master.json
+wholesale, discarding everything the app has since written into it (imported
+ASP/FOB/landed/status, Buying Report stock, weekly actuals, cartons, added or
+renamed products). It is for seeding a year from its workbook, not routine
+refreshes -- use the app's File Imports for those. Forecast years created in the
+app (2027+) have no workbook and must not be re-imported.
 """
 import json
-import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +30,6 @@ OUT_DIR = Path(__file__).resolve().parent / "data"
 WEEKS = 53
 WCOL0 = 10          # Suppliers sheet: week 1 = column K (0-based index 10)
 SHEET_W = 96        # Suppliers sheet width (col CR)
-
-METRIC_ROWS = ["LY Sales", "Actual Sales", "Sales Forecast", "Sales Value",
-               "Order Forecast", "Order FOB", "CBM", "Stock Closing",
-               "Stock Holding Value", "Weeks Cover"]
-
 
 def norm_status(*vals):
     """Normalise catalog status to Live / Not Live / Unknown (authoritative

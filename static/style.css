@@ -111,24 +111,8 @@ body {
 #main.plan { display: flex; flex-direction: column; overflow: hidden; }
 #main.plan > #season-banner,
 #main.plan > #totals-band,
-#main.plan > .sup-head,
-#main.plan > #rebuy-bar,
-#main.plan > #control-bar,
 #main.plan > #sup-panel { flex: 0 0 auto; }
 
-#rebuy-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #f2faf7; border: 1px solid #c6e8da; border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; font-size: 12.5px; }
-#rebuy-bar .spacer { flex: 1; }
-#rebuy-bar .rb-bar-sum { color: var(--dim); }
-#rebuy-bar .rb-mode { font: inherit; font-size: 12px; padding: 3px 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 12px; cursor: pointer; color: var(--dim); }
-#rebuy-bar .rb-mode.on { background: #e3f4ee; border-color: #16a085; color: #0e6b54; font-weight: 600; }
-#rebuy-bar .rb-scope-lbl { color: var(--dim); margin-left: 4px; }
-#rebuy-bar .rb-scope { font: inherit; font-size: 12px; padding: 3px 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 12px; cursor: pointer; color: var(--dim); }
-#rebuy-bar .rb-scope.on { background: #e7eefb; border-color: #2f6fed; color: #1b4fc0; font-weight: 600; }
-#rebuy-bar #btn-reset-prop { font: inherit; font-size: 12px; padding: 5px 11px; border: 1px solid var(--line); background: #fff; border-radius: 6px; cursor: pointer; color: var(--dim); }
-#rebuy-bar #btn-commit-all { font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 6px; border: 1px solid #16a085; background: #16a085; color: #fff; cursor: pointer; }
-#rebuy-bar #btn-commit-all[disabled] { background: #c7d0db; border-color: #c7d0db; cursor: default; }
-#btn-commit-sup { border-color: #16a085 !important; background: #16a085 !important; color: #fff !important; }
-#btn-commit-sup[disabled] { background: #c7d0db !important; border-color: #c7d0db !important; cursor: default; }
 .grid td.rb-propcell { background: #e3f4ee; padding: 0; }
 .grid td.rb-propcell input { width: 100%; min-width: 52px; border: 0; background: transparent; text-align: right; font: inherit; font-size: 12.5px; font-weight: 700; color: #0e6b54; padding: 2px 6px; outline: none; }
 .grid td.rb-propcell input:focus { background: #fff; box-shadow: inset 0 0 0 2px #16a085; }
@@ -223,35 +207,14 @@ body {
 .tb-item.tb-bd .tb-split .c-com { color: #5f7387; }
 .tb-item.tb-bd .tb-split .c-prop { color: #0e6b54; font-weight: 700; margin-left: 7px; }
 
-/* ---------- supplier header ---------- */
-.sup-head {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-  padding: 10px 14px; margin-bottom: 10px;
-  display: flex; gap: 16px; align-items: flex-start; justify-content: space-between;
-}
-.sup-head-main { display: flex; gap: 24px; flex-wrap: wrap; align-items: baseline; min-width: 0; }
-.sup-head h1 { font-size: 17px; margin: 0; }
-.sup-actions { display: flex; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; }
-.sup-actions button {
-  font: inherit; font-size: 12.5px; padding: 6px 11px; border: 1px solid var(--line);
-  background: var(--panel); border-radius: 6px; cursor: pointer; color: var(--text); white-space: nowrap;
-}
-.sup-actions button:hover { background: #f0f4fa; border-color: var(--accent); color: var(--accent); }
 #btn-export-sup { border-color: #b6e0c2; color: #1e7e34; }
 #btn-export-sup:hover { background: #e3f4e7; border-color: #1e7e34; color: #1e7e34; }
-.sup-head .meta { color: var(--dim); font-size: 12.5px; }
-.sup-head .meta b { color: var(--text); font-weight: 600; }
 
-/* ---------- control bar: status filter + metric toggles ---------- */
-#control-bar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
-#status-filter { display: flex; align-items: center; gap: 6px; }
-.sf-lbl, .tg-lbl { font-size: 12px; color: var(--dim); margin-right: 2px; }
 .sfbtn {
   font: inherit; font-size: 12.5px; padding: 3px 12px; border: 1px solid var(--line);
   background: var(--panel); border-radius: 14px; cursor: pointer; color: var(--dim);
 }
 .sfbtn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
-#row-toggles { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .chip {
   border: 1px solid var(--line); background: var(--panel); border-radius: 14px;
   padding: 3px 11px; font-size: 12.5px; cursor: pointer; color: var(--dim);
@@ -384,8 +347,6 @@ table.grid { border-collapse: separate; border-spacing: 0; font-variant-numeric:
 [data-theme="dark"] .pum-flag { color: #ff8b7d; background: #3a2220; }
 /* Phase 2: re-time apply dialog + undo toast */
 #po-apply-dialog { width: 620px; }
-.rt-scope { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 4px 0 10px; font-size: 13px; }
-.rt-scope label { display: inline-flex; align-items: center; gap: 5px; }
 .rt-summary { font-size: 13px; margin: 2px 0 4px; }
 .rt-summary b { font-variant-numeric: tabular-nums; }
 .rt-short { font-size: 11.5px; color: #8a5a00; background: var(--warn-bg); border-radius: 6px; padding: 5px 9px; margin: 6px 0; }
@@ -414,15 +375,6 @@ table.grid { border-collapse: separate; border-spacing: 0; font-variant-numeric:
 .rt-table .rt-sup { color: var(--dim); }
 .rt-table .rt-demote { color: #b3402f; font-weight: 600; white-space: nowrap; }
 [data-theme="dark"] .rt-table .rt-demote { color: #ff8b7d; }
-.rt-table .rt-inject { color: #0e6b54; font-weight: 600; white-space: nowrap; }
-[data-theme="dark"] .rt-table .rt-inject { color: #6fe0b8; }
-/* per-supplier container buttons on the Plan supplier header */
-.sup-actions .rt-btn { border-color: #16a085; color: #0e6b54; font-weight: 600; }
-.sup-actions .rt-btn:hover { background: #e3f4ee; border-color: #16a085; color: #0e6b54; }
-.sup-actions .rt-undo { border-color: var(--accent); color: var(--accent); }
-.sup-actions .rt-undo:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-[data-theme="dark"] .sup-actions .rt-btn { border-color: #2a5f43; color: #6fd49a; }
-[data-theme="dark"] .sup-actions .rt-btn:hover { background: #16352b; color: #6fd49a; }
 
 /* weekly container-fill footer (committed + proposed order CBM per week) */
 .grid tfoot .cbm-foot td { position: sticky; bottom: 0; z-index: 3; background: #f4f7fb;
@@ -514,7 +466,6 @@ th.curwk { color: var(--good); font-weight: 700; }
 .grid thead th.has-prop.curwk { box-shadow: inset 0 -3px 0 var(--good); }
 .zero { color: #b6c0cd; }
 .stockout { background: var(--bad-bg); color: var(--bad); }
-.lowcover { background: var(--warn-bg); }
 
 td.ocell { padding: 0; background: var(--edit-bg); }
 td.ocell input {
@@ -690,7 +641,6 @@ table.flat { border-collapse: collapse; background: var(--panel); font-variant-n
 .flat th { background: #f7f9fc; color: var(--dim); font-size: 11.5px; }
 .flat td:first-child, .flat th:first-child { text-align: left; }
 .flat tr.tot td { font-weight: 700; background: #fafbfd; }
-.flat td.pct-bad { color: var(--bad); font-weight: 700; }
 .flat tbody tr:hover td { background: #f4f8ff; }
 .flat a { color: var(--accent); cursor: pointer; text-decoration: none; }
 
@@ -899,7 +849,6 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
   width: 30px; height: 24px; padding: 0; border: 1px solid var(--line);
   border-radius: 4px; cursor: pointer; background: none;
 }
-.band-swatch { display: none; }
 .band-lbl { font-size: 12.5px; color: var(--text); display: flex; align-items: center; gap: 5px; }
 .band-max { width: 56px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; font: inherit; }
 .band-del {
@@ -942,42 +891,12 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 .fc-params { border-left: 2px solid #d7e2f5; padding-left: 12px; margin: 4px 0 6px 6px; }
 .fc-params.hidden { display: none; }
 
-/* ---------- rebuy plan controls ---------- */
-#rebuy-controls { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
-#rebuy-controls .spacer { flex: 1; }
 #btn-commit-all { font: inherit; font-size: 13px; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
 #btn-commit-all:hover { background: #0a52e0; }
-#btn-rebuy-reset { font: inherit; font-size: 12.5px; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--line); background: #fff; color: var(--dim); cursor: pointer; }
-#btn-commit-sup { font: inherit; font-size: 12.5px; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap; }
-#btn-commit-sup[disabled] { background: #c7d0db; border-color: #c7d0db; cursor: default; }
-.grid td.rb-prop { padding: 0; background: var(--accent-soft); }
-.grid td.rb-prop input { width: 100%; min-width: 52px; border: 0; background: transparent; text-align: right; font: inherit; font-size: 12.5px; font-weight: 700; color: var(--accent); padding: 2px 6px; outline: none; }
-.grid td.rb-prop input:focus { background: #fff; box-shadow: inset 0 0 0 2px var(--accent); }
 #btn-revert-orders { border-color: #e8b4ae; color: var(--bad); }
 #btn-revert-orders:hover { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
-.rb-ctl { display: flex; align-items: center; gap: 6px; }
-.rb-ctl-lbl { font-size: 12.5px; color: var(--dim); }
 .rb-mode { font: inherit; font-size: 12.5px; padding: 5px 11px; border: 1px solid var(--line); background: var(--panel); border-radius: 14px; cursor: pointer; color: var(--dim); }
 .rb-mode.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
-#rb-sup { font-size: 12.5px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; background: var(--panel); }
-#rb-sup summary { cursor: pointer; color: var(--dim); }
-#rb-sup summary b { color: var(--text); }
-.rb-sup-actions { display: flex; gap: 6px; margin: 6px 0; }
-.rb-sup-actions button { font: inherit; font-size: 11.5px; padding: 3px 9px; border: 1px solid var(--line); background: #fff; border-radius: 5px; cursor: pointer; }
-.rb-sup-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 2px 10px; max-height: 220px; overflow-y: auto; padding-top: 4px; border-top: 1px solid var(--line); }
-.rb-sup-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.rb-sup-item input { width: auto; }
-.rb-part { font-size: 9.5px; color: #b8860b; background: var(--warn-bg); border-radius: 4px; padding: 0 4px; }
-
-/* ---------- rebuy plan view ---------- */
-#rebuy-note { background: #f3f8ff; border: 1px solid #cfe0f7; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; color: #1c3d5a; margin-bottom: 10px; line-height: 1.5; }
-.rebuy-actions { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
-.rebuy-actions button { font: inherit; font-size: 13px; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
-.rebuy-actions button:hover { background: #0a52e0; }
-.rb-hint { font-size: 11.5px; color: var(--dim); }
-#rebuy-table td { vertical-align: top; }
-#rebuy-table .rb-date { font-size: 10px; color: var(--dim); }
-#rebuy-table .rb-lines { font-size: 11px; color: var(--dim); max-width: 320px; white-space: normal; }
 
 .empty { color: var(--dim); padding: 40px; text-align: center; }
 
@@ -1013,7 +932,6 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 /* hover / subtle fills */
 [data-theme="dark"] .sortbtn:hover,
 [data-theme="dark"] .sup-item:hover,
-[data-theme="dark"] .sup-actions button:hover,
 [data-theme="dark"] .ex-item:hover,
 [data-theme="dark"] .flat tbody tr:hover td,
 [data-theme="dark"] .asp-cmp-row:hover,
@@ -1050,19 +968,12 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 /* totals band */
 [data-theme="dark"] #totals-band { background: linear-gradient(180deg, #1b2638, #182234); border-color: #2b3d57; }
 
-/* rebuy bar + proposed cells */
-[data-theme="dark"] #rebuy-bar { background: #15271f; border-color: #224a39; }
-[data-theme="dark"] #rebuy-bar .rb-mode.on { background: #16352b; border-color: #16a085; color: #6fe0b8; }
-[data-theme="dark"] #rebuy-bar .rb-scope.on { background: #1b2c46; border-color: #2f6fed; color: #9fc0ff; }
-[data-theme="dark"] #rebuy-bar #btn-reset-prop { background: #1b2532; }
-[data-theme="dark"] #rebuy-bar #btn-commit-all[disabled],
-[data-theme="dark"] #btn-commit-sup[disabled] { background: #3a4654 !important; border-color: #3a4654 !important; }
+/* proposed-rebuy cells */
 [data-theme="dark"] .grid td.rb-propcell { background: #16352b; }
 [data-theme="dark"] .grid td.rb-propcell input { color: #6fe0b8; }
 
 /* info banners */
-[data-theme="dark"] #season-banner,
-[data-theme="dark"] #rebuy-note { background: #16243a; border-color: #2b456b; color: #b9cbe4; }
+[data-theme="dark"] #season-banner { background: #16243a; border-color: #2b456b; color: #b9cbe4; }
 
 /* status badges + sidebar stock chips */
 [data-theme="dark"] .badge.live { background: #16352b; color: #6fd49a; border-color: #225a43; }
@@ -1096,8 +1007,6 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 [data-theme="dark"] .revert-opt,
 [data-theme="dark"] .band-del,
 [data-theme="dark"] #btn-restore-bands,
-[data-theme="dark"] #btn-rebuy-reset,
-[data-theme="dark"] .rb-sup-actions button,
 [data-theme="dark"] .sku-explain,
 [data-theme="dark"] .ex-toolbar button { background: #1b2532; }
 [data-theme="dark"] .revert-opt:disabled:hover { background: #1b2532; }
@@ -1263,7 +1172,7 @@ body { background: var(--page-grad); }
 .sortbtn.active { background: var(--sel-bg); border-color: var(--sel-brd); color: var(--sel-ink); box-shadow: var(--sel-glow); }
 
 /* ---- floating frosted cards: KPI band, supplier header, mini cards ---- */
-#totals-band, .sup-head, .sup-card {
+#totals-band, .sup-card {
   background: var(--card-bg); backdrop-filter: var(--card-blur); -webkit-backdrop-filter: var(--card-blur);
   border: 1px solid var(--glass-brd); border-radius: var(--r-card); box-shadow: var(--shadow-card);
 }
@@ -1279,12 +1188,6 @@ body { background: var(--page-grad); }
   background: var(--sel-bg); border-color: var(--sel-brd); color: var(--sel-ink);
   box-shadow: var(--sel-glow); font-weight: 600;
 }
-
-/* ---- supplier action + rebuy buttons: pill shape ---- */
-.sup-actions button, #rebuy-bar .rb-mode, #rebuy-bar .rb-scope,
-#rebuy-bar #btn-reset-prop, #rebuy-bar #btn-commit-all, #btn-commit-sup { border-radius: var(--r-pill); }
-.sup-actions button { box-shadow: 0 1px 2px rgba(20,30,50,.06); }
-[data-theme="dark"] .sup-actions button { box-shadow: 0 1px 2px rgba(0,0,0,.3); }
 
 /* ---- the week grid: rounded glass frame, but solid + crisp inside (no blur) ---- */
 .gridwrap {
@@ -1361,22 +1264,8 @@ dialog fieldset { min-width: 0; }
 #settings-dialog button.primary { background: var(--accent); color: #fff; border-color: var(--accent); box-shadow: var(--sel-glow); }
 #settings-dialog button.danger { background: transparent; color: var(--bad); border-color: #e8b4ae; }
 
-/* ---- upload freshness: last-updated line + weekly staleness badge (Data tab) ---- */
+/* ---- PO upload rows (Data tab) ---- */
 .po-up-row { align-items: flex-start; }
-.up-cell { display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
-.up-age { font-size: 11px; color: var(--dim); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin: 1px 0 2px; }
-.up-when { color: var(--dim); }
-.up-badge { font-size: 10.5px; font-weight: 700; padding: 2px 10px; border-radius: 20px; letter-spacing: .2px; white-space: nowrap; border: 1px solid transparent; }
-.up-current .up-badge { background: #e3f4e7; color: #1e7e34; border-color: #b6e0c2; }
-.up-aged .up-badge { background: #fff3e0; color: #b8860b; border-color: #ead9a6; }
-.up-outdated .up-badge { background: #fdecea; color: #c0392b; border-color: #f0b8b0; }
-.up-age.up-outdated { color: #c0392b; }
-.up-age.up-aged { color: #b8860b; }
-[data-theme="dark"] .up-current .up-badge { background: #16352b; color: #6fd49a; border-color: #225a43; }
-[data-theme="dark"] .up-aged .up-badge { background: #3a2e1a; color: #e0b65a; border-color: #5c4a22; }
-[data-theme="dark"] .up-outdated .up-badge { background: #3a2220; color: #ff8b7d; border-color: #5a2c28; }
-[data-theme="dark"] .up-age.up-outdated { color: #ff8b7d; }
-[data-theme="dark"] .up-age.up-aged { color: #e0b65a; }
 
 /* ---- File Imports tab: cadence groups of freshness-coloured, drag-reorderable tiles ---- */
 .if-live { color: #1e7e34; } .if-aged { color: #b8860b; } .if-old { color: #c0392b; }

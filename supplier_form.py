@@ -41,7 +41,7 @@ C_INPUT_HDR = "FFFFC000"  # orange – the key input column (proposed order qty)
 C_ARRIVAL = "FF00B0F0"   # blue   – estimated arrival week band
 C_SHIP = "FF92D050"      # green  – shipment / week band
 C_SUBHDR = "FFD9E1F2"    # light blue-grey – sub headers
-C_STATUS = "FFFFFF00"    # yellow – status + 2026 FOB (editable)
+C_STATUS = "FFFFFF00"    # yellow – status + current-year FOB (editable)
 C_INPUT = "FFFFF2CC"     # light yellow – New Order input cells
 C_SKU = "FFF2F2F2"       # very light grey – SKU column
 C_TOTAL = "FFFCE4D6"     # light orange – totals row
@@ -59,19 +59,6 @@ FMT_QTY = '0'
 FMT_QTY_T = '#,##0'
 DATE_FMT = 'mm-dd-yy'   # footer dates — matches the hand-built form (Excel's default date style)
 
-REF_COLS = [  # (header, width, number_format, fill)
-    ("SKU", 22, None, C_REF_HDR),
-    ("Status", 9.5, None, C_REF_HDR),
-    ("2025 FOB", 11, FMT_USD, C_REF_HDR),
-    ("2026 FOB", 10, FMT_USD, C_REF_HDR),
-    ("% Variance", 9, FMT_PCT, C_REF_HDR),
-    ("CBM", 8, FMT_CBM, C_REF_HDR),
-    ("2025 Volume", 11, FMT_QTY_T, C_REF_HDR),
-    ("Total FOB Value\n(2025 FOB Cost)", 11, FMT_USD, C_REF_HDR),
-    ("2026 Proposed Total Order QTY", 13, FMT_QTY_T, C_INPUT_HDR),
-    ("Total FOB Value\n(2026 FOB Cost)", 12, FMT_USD, C_REF_HDR),
-    ("Total CBM", 8.5, '#,##0.00', C_REF_HDR),
-]
 GROUP_SUBHDRS = ["New Order", "Value", "CBM", "Remaining QTY in FTY after shipment"]
 GROUP_WIDTHS = [9.5, 13, 7.5, 17]
 HDR_ROW1, HDR_SHIP, HDR_SUB, DATA0 = 1, 2, 3, 4   # compact: no blank spacer rows
@@ -89,10 +76,6 @@ def box(ws, r1, c1, r2, c2, side):
                 top=side if r == r1 else b.top,
                 bottom=side if r == r2 else b.bottom,
             )
-
-
-def week_start(w):
-    return WEEK1_START + timedelta(days=(w - 1) * 7)
 
 
 def _fill(c):
@@ -260,7 +243,7 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
             cell.fill = _fill(fill)
         return cell
 
-    # ---- reference headers (merged vertically rows 1..5) ----
+    # ---- reference headers (merged vertically, header rows 1..3) ----
     for i, (hdr, width, _fmt, fill) in enumerate(ref_cols, start=1):
         put(HDR_ROW1, i, hdr, fill=fill, bold=True)
         ws.merge_cells(start_row=HDR_ROW1, start_column=i, end_row=DATA0 - 1, end_column=i)
@@ -270,7 +253,6 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
 
     # ---- shipment group headers ----
     base = len(ref_cols) + 1  # first shipment column (L = 12)
-    col_week = {}             # New Order column -> week
     for gi, wk in enumerate(weeks):
         b = base + gi * 4
         cl = get_column_letter(b)
@@ -289,7 +271,6 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
         for j, sub in enumerate(GROUP_SUBHDRS):
             put(HDR_SUB, b + j, sub, fill=C_SUBHDR, bold=False)
             ws.column_dimensions[get_column_letter(b + j)].width = GROUP_WIDTHS[j]
-        col_week[b] = wk
 
     # ---- data rows ----
     r = DATA0
@@ -391,9 +372,9 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
             top = MED if (j == 0 or j == len(footer) - 1) else None
             bot = MED if j == len(footer) - 1 else None
             for k in range(4):
-                left = MED if k == 0 else None
+                lb = MED if k == 0 else None   # not `left`: that name is the Alignment used below
                 right = MED if k == 3 else (thin if k in (0, 2) else None)
-                ws.cell(row=r, column=b + k).border = Border(left=left, right=right, top=top, bottom=bot)
+                ws.cell(row=r, column=b + k).border = Border(left=lb, right=right, top=top, bottom=bot)
 
     # ---- summary block ----
     kcol = get_column_letter(11)
@@ -405,7 +386,7 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     # One column per plan year held in the app, matched to THIS supplier's SKU
     # codes across years. The exported year's column is a LIVE formula tied to
     # the form totals (so it updates as the factory edits the New Order cells);
-    # the other years are static committed actuals computed at export time. The
+    # the other years are static committed + proposed totals computed at export time. The
     # table grows automatically as new years are added.
     root_data = ddir.parent
     all_years = sorted(p.name for p in root_data.iterdir() if p.is_dir() and p.name.isdigit())
@@ -501,7 +482,6 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     ws.freeze_panes = ws.cell(row=DATA0, column=base)
     ws.sheet_properties.pageSetUpPr.fitToPage = False
 
-    # banner with supplier name + a note (row above everything via a title in A is awkward; use sheet title + header comment)
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -1202,8 +1182,8 @@ def export_arrivals(payload):
 
 # ---------------------------------------------------------------------------
 def parse_supplier_form(path_or_bytes):
-    """Read a scheduling form and return {sku_code: {week: qty}} from the
-    New Order columns, mapping each column to its arrival week."""
+    """Read a scheduling form's New Order columns, mapping each column to its
+    arrival week. Returns {"orders": {sku_code: {week: qty}}, "weeks": [week, ...]}."""
     wb = load_workbook(path_or_bytes, data_only=True)
     ws = wb["Scheduling"] if "Scheduling" in wb.sheetnames else wb.worksheets[0]
 
@@ -1275,30 +1255,3 @@ def parse_supplier_form(path_or_bytes):
                     updates[cl] = row_upd
         r += 1
     return {"orders": updates, "weeks": sorted(weeks_seen)}
-
-
-if __name__ == "__main__":
-    import sys
-    sup = sys.argv[1] if len(sys.argv) > 1 else "Midan Global Ltd"
-    bio = export_supplier(sup)
-    out = Path(f"_test_{sup.split()[0]}.xlsx")
-    out.write_bytes(bio.getvalue())
-    print("wrote", out, out.stat().st_size, "bytes")
-    res = parse_supplier_form(str(out))
-    print("parsed", len(res["orders"]), "SKUs, weeks", res["weeks"][:8], "...")
-    # round-trip check vs orders.json
-    master = json.loads((DATA / "master.json").read_text())
-    orders = json.loads((DATA / "orders.json").read_text())
-    skus = {s["code"]: s for s in master["skus"] if s["supplier"] == sup}
-    mism = 0
-    for code, wkmap in res["orders"].items():
-        s = skus.get(code)
-        if not s:
-            continue
-        ov = orders.get(s["id"], [0] * WEEKS)
-        for wk, qty in wkmap.items():
-            if ov[wk - 1] != qty:
-                mism += 1
-                if mism <= 5:
-                    print(f"  mismatch {code} wk{wk}: form={qty} app={ov[wk-1]}")
-    print("round-trip mismatches:", mism)

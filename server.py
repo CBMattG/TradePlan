@@ -1,4 +1,4 @@
-"""Local server for the 2026 Tradeplan app. No external dependencies.
+"""Local server for the Tradeplan app. Python stdlib only, plus openpyxl for Excel files.
 
 Run:  python server.py        (or double-click run.bat)
 Then open http://localhost:8765 (opens automatically).
@@ -25,8 +25,7 @@ _weather_cache = {}   # (lat,lon) -> (timestamp, payload)
 
 
 def _today_iso():
-    from datetime import date as _d
-    return _d.today().isoformat()
+    return date.today().isoformat()
 
 
 def rechain_running_stock(master, orders, start, closed_through):
@@ -724,7 +723,7 @@ class Handler(SimpleHTTPRequestHandler):
     def revert_original(self, qs):
         """Reset orders to the originally-imported figures and clear rebuys. scope=all
         does every year; scope=<year> does just that year."""
-        ydir, year = year_dir(qs)
+        _, year = year_dir(qs)
         scope = (qs.get("scope") or [year])[0]
         years = [p.name for p in DATA.iterdir() if p.is_dir() and p.name.isdigit()]
         targets = years if scope == "all" else [scope if scope in years else year]
@@ -1914,10 +1913,9 @@ class Handler(SimpleHTTPRequestHandler):
         and advance the actuals/forecast boundary: data_week = max(data_week, week+1).
         Closing stock is CHAINED for every SKU (sold or not) from the uploaded week
         through the last actualised week: running_stock[w] = previous week's closing
-        + committed arrivals − actual units sold. Chaining from the prior week's
-        closing (not the live stock_now snapshot) keeps the figure consistent with
-        the grid's own history and safe to re-derive — re-applying a past week
-        simply re-chains it and every later actualised week."""
+        + committed arrivals − actual units sold, re-anchored on any Buying Report
+        stock reading held for a week (see rechain_running_stock). Re-applying a past
+        week simply re-chains it and every later actualised week."""
         try:
             ydir, year = year_dir(qs)
             length = int(self.headers.get("Content-Length", 0))
@@ -2162,7 +2160,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://localhost:{PORT}"
-    print(f"2026 Tradeplan running at {url}  (Ctrl+C to stop)")
+    print(f"Tradeplan running at {url}  (Ctrl+C to stop)")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()

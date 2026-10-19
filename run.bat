@@ -1,5 +1,5 @@
 @echo off
 cd /d "%~dp0"
-echo Starting 2026 Tradeplan ...
+echo Starting Tradeplan ...
 python server.py
 pause

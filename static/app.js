@@ -161,12 +161,6 @@ function coverBand(v) {
   }
   return bands[bands.length - 1] || { bg: '#ffffff' };
 }
-function textOn(hex) {  // pick readable text colour for a background
-  const c = String(hex).replace('#', '');
-  if (c.length < 6) return '#1c2733';
-  const r = parseInt(c.substr(0, 2), 16), g = parseInt(c.substr(2, 2), 16), b = parseInt(c.substr(4, 2), 16);
-  return (0.299 * r + 0.587 * g + 0.114 * b) < 140 ? '#fff' : '#1c2733';
-}
 function parseColor(s) {            // '#rgb' / '#rrggbb' / 'rgb(r,g,b)' → [r,g,b]
   s = String(s).trim();
   if (s[0] === '#') { const c = s.slice(1); const f = c.length === 3 ? c.split('').map(x => x + x).join('') : c; return [parseInt(f.substr(0, 2), 16), parseInt(f.substr(2, 2), 16), parseInt(f.substr(4, 2), 16)]; }
@@ -488,11 +482,11 @@ function buildModeledForecasts() {
   if (mode === 'off') return;
   calibrateSeasonalShapes(SETTINGS.current_week);   // calibrate peaks from actual sales history
   if (mode === 'target') { buildTargetForecasts(targetValueFor(YEAR)); return; }
+  // A pinned forecast (sku.fc_pinned, e.g. a sell-through plan for a line with no sales
+  // history) is a deliberate weekly plan: the seasonality / target model leaves it as set
+  // rather than re-modelling it, so its base_forecast is what the plan shows and sells.
   for (const sku of M.skus) if (!sku.fc_pinned) MODELED.set(sku.id, computeSkuModel(sku).modeled);
 }
-// A pinned forecast (sku.fc_pinned, e.g. a sell-through plan for a line with no sales
-// history) is a deliberate weekly plan: the seasonality / target model leaves it as set
-// rather than re-modelling it, so its base_forecast is what the plan shows and sells.
 
 // Target Sales mode: distribute an overall £ sales target across products by their
 // recency-weighted historical sales weight (the model's de-seasonalised demand D,
@@ -709,10 +703,6 @@ function skuMatchesTerm(k, term) {
 function supplierMatches(sup, term) {
   if (!tagTermId(term) && sup.name.toLowerCase().includes(term)) return true;
   return M.skus.some(k => k.supplier === sup.name && skuMatchesTerm(k, term));
-}
-function supTotalSales(name) {
-  const t = AGG.bySup.get(name);
-  return t ? t.sales.reduce((a, b) => a + b, 0) : 0;
 }
 function supForecastValue(name) { const t = AGG.bySup.get(name); return t ? (t.forecastValue || 0) : 0; }
 function stockedClass(pct) {
@@ -2897,7 +2887,6 @@ async function applySeasonality(opts = {}) {
 }
 
 /* ---------------- settings tabs + seasonal-curve diagnostic ---------------- */
-const SETTINGS_TABS = ['forecast', 'capacity', 'tags', 'cover', 'rebuy', 'supplier', 'imports', 'data', 'changelog'];
 // Defaults mirror supplier_form.FORM_DEFAULTS (server-side). Percentages are stored
 // as fractions of order value (0.01 = 1%); the Settings inputs show them as whole %.
 const SUPPLIER_FORM_DEFAULTS = { sailing_days: 50, grace_days: 7, inland_days: 7, marketing_pct: 0.01, deposit_pct: 0.15 };
@@ -6031,11 +6020,6 @@ function buildRebuyPlan() {
   return PLAN;
 }
 
-function supplierFilterSummary() {
-  const sel = SETTINGS.rebuy.suppliers;
-  if (!sel || !sel.length) return 'All suppliers';
-  return `${sel.length} of ${M.suppliers.length} suppliers`;
-}
 // (re)build the editable proposal layer by running the algorithm. supName: rebuild only
 // that supplier's suggestions, leaving every other supplier's proposals untouched;
 // null/omitted = rebuild the whole year. (buildRebuyPlan derives proposals purely from
@@ -6102,159 +6086,9 @@ function proposedSupTotals(name) {    // proposed units/cbm/fob for one supplier
   }
   return { units, cbm, fob };
 }
-function rebuySuppliersWithProposals() {
-  const set = new Set();
-  for (const id of PROPOSED.keys()) { const s = skuById.get(id); if (s) set.add(s.supplier); }
-  return M.suppliers.filter(s => set.has(s.name)).map(s => s.name);
-}
-
-function renderRebuy() {
-  if (!PROPOSED) PROPOSED = new Map();   // never auto-build: only "Run rebuy" may do that
-  if (!PLAN) buildRebuyPlan();           // container roll-over stats only; leaves PROPOSED alone
-  const cur = SETTINGS.current_week, CC = SETTINGS.container_cbm || 68;
-  const mode = SETTINGS.rebuy.mode || 'full';
-  const supChecks = M.suppliers.map(s => {
-    const on = !SETTINGS.rebuy.suppliers || SETTINGS.rebuy.suppliers.includes(s.name);
-    return `<label class="rb-sup-item"><input type="checkbox" class="rb-sup-cb" value="${esc(s.name)}" ${on ? 'checked' : ''}> ${esc(titleCase(s.name))}</label>`;
-  }).join('');
-  const gt = proposedGrandTotals();
-  const rollover = PLAN.containers.filter(c => c.arrYear > +YEAR).length;
-  const cards = [
-    [(gt.cbm / CC).toFixed(1), `Containers to commit (${YEAR})`],
-    [fmtGBPk(gt.fob), 'FOB to commit'],
-    [Math.round(gt.units).toLocaleString(), 'Units to add'],
-    [gt.skuCount.toLocaleString(), 'Products'],
-    [gt.supCount.toLocaleString(), 'Suppliers'],
-    [rollover.toLocaleString(), `Containers rolling to ${+YEAR + 1}`],
-  ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
-  const rolloverNote = rollover ? ` <b>${rollover}</b> further container${rollover !== 1 ? 's' : ''} of need roll into <b>${+YEAR + 1}</b> (beyond this year's weeks) — switch to the ${+YEAR + 1} year to plan those.` : '';
-  document.getElementById('main').innerHTML = `
-    <div class="cards">${cards}</div>
-    <div id="rebuy-controls">
-      <div class="rb-ctl"><span class="rb-ctl-lbl">Containers:</span>
-        <button class="rb-mode${mode === 'full' ? ' on' : ''}" data-mode="full">Full ${CC} CBM only</button>
-        <button class="rb-mode${mode === 'partial' ? ' on' : ''}" data-mode="partial">Allow partial</button></div>
-      <details id="rb-sup"><summary>Predict for: <b>${supplierFilterSummary()}</b></summary>
-        <div class="rb-sup-actions"><button type="button" id="rb-sup-all">Select all</button><button type="button" id="rb-sup-none">Select none</button></div>
-        <div class="rb-sup-list">${supChecks}</div>
-      </details>
-      <span class="spacer"></span>
-      <button id="btn-commit-all" class="primary">Commit all suppliers</button>
-      <button id="btn-rebuy-reset" title="Rebuild suggestions, discarding edits">Reset suggestions</button>
-    </div>
-    <div id="rebuy-note">Editable proposed rebuys (<b>additional</b> orders on top of committed) to hold ~${REBUY_TARGET} weeks cover ·
-      <b>${mode === 'full' ? `full ${CC} CBM only` : 'partial allowed'}</b> · lead China ~11 / non‑China ~3 wk · ${+YEAR + 1} uses the rollover forecast.
-      Edit the blue <b>Proposed Rebuy</b> row, then commit per supplier or all.${rolloverNote}</div>
-    <div id="rebuy-grid"></div>`;
-  document.querySelectorAll('.rb-mode').forEach(b => b.addEventListener('click', () => {
-    SETTINGS.rebuy.mode = b.dataset.mode; markDirty(); resetProposed(); renderRebuy();
-  }));
-  const readSupChecks = () => {
-    const boxes = [...document.querySelectorAll('.rb-sup-cb')];
-    const checked = boxes.filter(b => b.checked).map(b => b.value);
-    SETTINGS.rebuy.suppliers = checked.length === boxes.length ? null : checked;
-    markDirty(); resetProposed(); renderRebuy();
-  };
-  document.querySelectorAll('.rb-sup-cb').forEach(cb => cb.addEventListener('change', readSupChecks));
-  document.getElementById('rb-sup-all').addEventListener('click', () => { document.querySelectorAll('.rb-sup-cb').forEach(c => c.checked = true); readSupChecks(); });
-  document.getElementById('rb-sup-none').addEventListener('click', () => { document.querySelectorAll('.rb-sup-cb').forEach(c => c.checked = false); readSupChecks(); });
-  document.getElementById('btn-commit-all').addEventListener('click', () => commitRebuy(null));
-  document.getElementById('btn-rebuy-reset').addEventListener('click', () => { resetProposed(); renderRebuy(); });
-  // pick a supplier that has proposals
-  const withProp = rebuySuppliersWithProposals();
-  if (!withProp.includes(currentSupplier)) currentSupplier = withProp[0] || (M.suppliers[0] && M.suppliers[0].name);
-  renderSidebar();
-  renderRebuyGrid();
-}
-
-const REBUY_ROWS = [
-  { key: 'forecast', label: 'Sales Forecast', fmt: fmtU },
-  { key: 'committed', label: 'Committed Order', fmt: fmtU },
-  { key: 'proposed', label: 'Proposed Rebuy', edit: true },
-  { key: 'stock', label: 'Projected Stock', fmt: fmtU },
-  { key: 'cover', label: 'Weeks Cover', fmt: fmt1 },
-];
 function combinedOrder(id) {
   const c = ORDERS[id] || EMPTY53, p = (PROPOSED && PROPOSED.get(id)) || EMPTY53;
   return c.map((v, w) => (v || 0) + (p[w] || 0));
-}
-function renderRebuyGrid() {
-  const wrap = document.getElementById('rebuy-grid'); if (!wrap) return;
-  const sup = supByName.get(currentSupplier);
-  if (!sup) { wrap.innerHTML = '<div class="empty">No supplier with proposed rebuys.</div>'; return; }
-  const cur = SETTINGS.current_week;
-  const skus = M.skus.filter(k => k.supplier === sup.name && PROPOSED.has(k.id));
-  const t = proposedSupTotals(sup.name);
-  let body = '';
-  skus.forEach((sku, idx) => {
-    const r = computeSku(sku, combinedOrder(sku.id));
-    const inf = `${sku.season} · FOB £${sku.fob.toFixed(2)} · ${sku.cbm ? sku.cbm.toFixed(3) + ' cbm' : ''} · stock now ${Math.round(sku.stock_now).toLocaleString()}`;
-    const img = sku.image ? `<img src="${esc(sku.image)}" loading="lazy" onerror="this.remove()">` : '';
-    body += `<tr class="skuhead"><td colspan="${WEEKS + 2}"><div class="skuhead-inner">${img}<span class="code">${esc(sku.code)}</span> <span class="nm">${esc(sku.name || '')}</span> ${statusBadge(sku.status)}<span class="inf">${inf}</span></div></td></tr>`;
-    for (const def of REBUY_ROWS) {
-      body += `<tr><td class="lbl">${def.label}</td>`;
-      let tot = 0;
-      const arr = def.key === 'committed' ? (ORDERS[sku.id] || zeros())
-        : def.key === 'proposed' ? (PROPOSED.get(sku.id) || zeros()) : r[def.key];
-      for (let w = 0; w < WEEKS; w++) {
-        const v = arr[w]; tot += v; const wk = w + 1;
-        if (def.edit) {
-          body += `<td class="ocell rb-prop${wk === cur ? ' curwk' : ''}"><input data-sku="${esc(sku.id)}" data-r="${idx}" data-w="${w}" value="${v || ''}" inputmode="numeric"></td>`;
-        } else {
-          let cls = wk === cur ? 'curwk ' : '', style = '';
-          if (def.key === 'cover') { const cc = coverCellStyle(arr, w); style = ` style="background:${cc.bg};color:${cc.color}"`; }
-          if (def.key === 'stock' && wk >= cur && v === 0 && r.forecast[w] > 0) cls += 'stockout ';
-          if (Math.abs(v) < .5 && def.key !== 'cover') cls += 'zero';
-          body += `<td class="${cls.trim()}"${style} data-sku="${esc(sku.id)}" data-k="${def.key}" data-w="${w}">${def.fmt(v)}</td>`;
-        }
-      }
-      if (def.key === 'forecast') {
-        const outturn = r.forecastDisp.reduce((a, b) => a + b, 0);
-        body += `<td class="tot tot-fc" data-sku="${esc(sku.id)}" data-k="forecast" data-w="T" title="Outturn = actual sales so far + forecast for the rest of the year">${fmtU(outturn)}<span class="tot-sub" title="Full-year sales forecast (plan)">plan ${fmtU(tot)}</span></td></tr>`;
-      } else {
-        body += `<td class="tot" data-sku="${esc(sku.id)}" data-k="${def.key}" data-w="T">${(def.edit ? fmtU : def.fmt)(tot)}</td></tr>`;
-      }
-    }
-  });
-  if (!skus.length) body = `<tr class="skuhead"><td colspan="${WEEKS + 2}"><div class="skuhead-inner" style="font-weight:400;color:var(--dim)">No proposed rebuys for this supplier (committed orders already cover the target).</div></td></tr>`;
-  wrap.innerHTML = `
-    <div class="sup-head">
-      <div class="sup-head-main"><h1>${esc(titleCase(sup.name))}</h1>
-        <div class="meta">Proposed: <b>${fmtU(t.units)}</b> units · <b>${fmt1(t.cbm)}</b> cbm (≈${(t.cbm / (SETTINGS.container_cbm || 68)).toFixed(1)} containers) · <b>${fmtGBP(t.fob)}</b> FOB</div></div>
-      <div class="sup-actions">
-        <button id="btn-commit-sup" class="primary"${t.units ? '' : ' disabled'}>Commit ${esc(titleCase(sup.name)).slice(0, 22)}</button>
-      </div>
-    </div>
-    <div class="gridwrap"><table class="grid"><thead>${headerRow()}</thead><tbody>${body}</tbody></table></div>`;
-  document.getElementById('btn-commit-sup').addEventListener('click', () => commitRebuy(sup.name));
-  wrap.querySelectorAll('td.rb-prop input').forEach(inp => {
-    inp.addEventListener('change', () => commitProposedEdit(inp));
-    inp.addEventListener('focus', () => inp.select());
-    inp.addEventListener('keydown', e => orderKeyNav(e, inp));
-  });
-}
-function commitProposedEdit(inp) {
-  const id = inp.dataset.sku, w = +inp.dataset.w;
-  let v = Math.round(parseFloat(String(inp.value).replace(/[^0-9.\-]/g, '')));
-  if (!isFinite(v) || v < 0) v = 0;
-  inp.value = v || '';
-  if (!PROPOSED.has(id)) PROPOSED.set(id, zeros());
-  PROPOSED.get(id)[w] = v;
-  // recompute this SKU's projected stock + cover cells and supplier totals
-  const sku = skuById.get(id), r = computeSku(sku, combinedOrder(id)), cur = SETTINGS.current_week;
-  document.querySelectorAll(`td[data-sku="${CSS.escape(id)}"]`).forEach(td => {
-    const k = td.dataset.k; if (k !== 'stock' && k !== 'cover') return;
-    if (td.dataset.w === 'T') { td.textContent = (k === 'cover' ? fmt1 : fmtU)(r[k].reduce((a, b) => a + b, 0)); return; }
-    const wk = +td.dataset.w, val = r[k][wk]; td.textContent = (k === 'cover' ? fmt1 : fmtU)(val);
-    td.className = ''; td.style.background = ''; td.style.color = '';
-    if (wk + 1 === cur) td.classList.add('curwk');
-    if (k === 'cover') { const cc = coverCellStyle(r[k], wk); td.style.background = cc.bg; td.style.color = cc.color; }
-    else if (k === 'stock' && wk + 1 >= cur && val === 0 && r.forecast[wk] > 0) td.classList.add('stockout');
-    else if (Math.abs(val) < .5) td.classList.add('zero');
-  });
-  const t = proposedSupTotals(sku.supplier);
-  const meta = document.querySelector('#rebuy-grid .sup-head .meta');
-  if (meta) meta.innerHTML = `Proposed: <b>${fmtU(t.units)}</b> units · <b>${fmt1(t.cbm)}</b> cbm (≈${(t.cbm / (SETTINGS.container_cbm || 68)).toFixed(1)} containers) · <b>${fmtGBP(t.fob)}</b> FOB`;
 }
 function commitRebuy(supName) {
   const cur = SETTINGS.current_week;
@@ -6894,8 +6728,6 @@ function arrWeekBlocks(events, counts, body) {
     + (w.sub ? `<span class="awh-sub">${esc(w.sub)}</span>` : '')
     + `<span class="awh-n">${counts(w)}</span></div>${body(w.events)}</div>`).join('');
 }
-// Export the page (as filtered on screen) to a shareable .xlsx — the client sends
-// its already-joined rows so the workbook always matches what the user is looking at.
 // Loading port for an arrival/order event, from the supplier record in the plan (the same
 // field that sets the lead time). The Qlik / WEBSA supplier name can differ in case or
 // spacing from the plan's, so the event's own products identify the supplier first, then
@@ -6912,6 +6744,8 @@ function arrPort(ev) {
   const rec = recFor(viaSku) || recFor(ev.supplier);
   return rec ? String(rec.port || rec.origin || '').trim() : '';
 }
+// Export the page (as filtered on screen) to a shareable .xlsx — the client sends
+// its already-joined rows so the workbook always matches what the user is looking at.
 async function exportArrivals() {
   const { booked, awaiting, plan } = arrFilteredEvents();
   const line = l => {
