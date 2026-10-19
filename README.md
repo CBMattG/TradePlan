@@ -165,9 +165,10 @@ in Settings → Forecast.
   overall sheet numbers (forecast sales, FOB, units, volume, containers, peak
   stock/racking/stillage) no matter which supplier you're looking at, and updates
   live as you edit. Forecast sales, FOB, units, volume and containers are shown
-  as **committed / proposed / total** — the big figure is the **total** (committed
-  orders **plus** the proposed rebuys), with a sub-line splitting out the committed
-  base and the proposed-rebuy addition (in teal). So **before committing** anything
+  as **committed + proposed = total** — the big figure is the **total** (committed
+  orders **plus** the proposed rebuys), with a small teal **+x** beside it for the
+  proposed-rebuy addition when there is one; hover a figure for the full committed +
+  proposed split. So **before committing** anything
   you can see what the whole-sheet sales and FOB spend would become if the
   suggested rebuys were placed. (Forecast sales is stock-aware — adding proposed
   orders lifts sales only where extra stock lets more forecast demand be met;
@@ -363,8 +364,9 @@ in Settings → Forecast.
     (`min(forecast, stock)`), so it sits a little below the demand target — that's what
     you'd actually sell given stock timing; compare the target against the uncapped
     forecast (the "plan N" sub-value on the Sales Forecast total).
-  - A **banner** on the plan shows the active mode for the year, with **adjust** / **turn
-    off** links. **Shared model settings** (own-shape weight, weather on/off + sensitivity
+  - A **forecast pill** beside the supplier name on the Plan page shows the year's active
+    mode (e.g. *🌦️ Seasonality 100%*, *🎯 Target £15m*, *📈 Original forecast*); click it
+    for the detail and the **adjust** / **revert** / **turn off** links. **Shared model settings** (own-shape weight, weather on/off + sensitivity
     + location, the **"Show calibrated curves"** diagnostic) apply to every year that uses
     Seasonality or Target. The **ⓘ button on each product** opens a per-SKU explainer
     (demand signals, blended baseline, applied curve, original→modelled result).

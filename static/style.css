@@ -109,7 +109,6 @@ body {
 /* Plan view: fill the height so the product grid uses all remaining space and
    scrolls internally (the totals band + supplier header stay fixed above it). */
 #main.plan { display: flex; flex-direction: column; overflow: hidden; }
-#main.plan > #season-banner,
 #main.plan > #totals-band,
 #main.plan > #sup-panel { flex: 0 0 auto; }
 
@@ -117,11 +116,6 @@ body {
 .grid td.rb-propcell input { width: 100%; min-width: 52px; border: 0; background: transparent; text-align: right; font: inherit; font-size: 12.5px; font-weight: 700; color: #0e6b54; padding: 2px 6px; outline: none; }
 .grid td.rb-propcell input:focus { background: #fff; box-shadow: inset 0 0 0 2px #16a085; }
 
-#season-banner {
-  background: #eef6ff; border: 1px solid #bcd9f5; border-radius: 8px;
-  padding: 7px 12px; margin-bottom: 10px; font-size: 12.5px; color: #1c3d5a;
-}
-#season-banner a { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .grid td.modeled { background: #f3f0ff; }
 .grid td.modeled.curwk { background: #e6f0ee; }
 /* forecast tail of the "LY Sales" row in generated future years (vs banked actuals) */
@@ -203,9 +197,6 @@ body {
 .tb-item { line-height: 1.15; }
 .tb-item .v { font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
 .tb-item .l { font-size: 11px; color: var(--dim); }
-.tb-item.tb-bd .tb-split { font-size: 10.5px; font-variant-numeric: tabular-nums; margin-top: 1px; white-space: nowrap; }
-.tb-item.tb-bd .tb-split .c-com { color: #5f7387; }
-.tb-item.tb-bd .tb-split .c-prop { color: #0e6b54; font-weight: 700; margin-left: 7px; }
 
 #btn-export-sup { border-color: #b6e0c2; color: #1e7e34; }
 #btn-export-sup:hover { background: #e3f4e7; border-color: #1e7e34; color: #1e7e34; }
@@ -973,7 +964,6 @@ legend { font-size: 12px; color: var(--dim); padding: 0 6px; }
 [data-theme="dark"] .grid td.rb-propcell input { color: #6fe0b8; }
 
 /* info banners */
-[data-theme="dark"] #season-banner { background: #16243a; border-color: #2b456b; color: #b9cbe4; }
 
 /* status badges + sidebar stock chips */
 [data-theme="dark"] .badge.live { background: #16352b; color: #6fd49a; border-color: #225a43; }
@@ -1778,7 +1768,6 @@ details.dd.dd-right.dd-flip .dd-pop { left: 0; right: auto; }   /* right-aligned
   #totals-band { flex-wrap: nowrap; gap: 6px 14px; overflow-x: auto; scrollbar-width: thin; }
   #totals-band .tb-title { display: none; }
   #totals-band .tb-item { flex: 0 0 auto; }
-  .tb-item.tb-bd .tb-split .c-com, .tb-item.tb-bd .tb-split .c-prop { display: block; margin-left: 0; }
   #plan-toolbar .ptb-row2 { gap: 6px; }
 }
 
@@ -1803,3 +1792,25 @@ details.dd.dd-right.dd-flip .dd-pop { left: 0; right: auto; }   /* right-aligned
   #topbar { flex-wrap: wrap; height: auto; row-gap: 6px; padding-top: 6px; padding-bottom: 6px; }
   #topbar-right { flex-wrap: wrap; justify-content: flex-end; }
 }
+
+/* ---- forecast-mode pill (replaces the full-width banner) ---- */
+#plan-toolbar .ptb-row1 .fc-dd { flex: 0 0 auto; align-self: center; }
+#plan-toolbar .fc-dd > summary { font-size: 11px; padding: 3px 10px; white-space: nowrap; }
+#plan-toolbar .fc-dd.fc-seasonality > summary { color: #0e6b54; border-color: rgba(22,160,133,.45); background: rgba(22,160,133,.10); }
+#plan-toolbar .fc-dd.fc-target > summary { color: #8a5a00; border-color: rgba(224,168,40,.55); background: rgba(224,168,40,.12); }
+#plan-toolbar .fc-dd.fc-off > summary { color: var(--dim); }
+[data-theme="dark"] #plan-toolbar .fc-dd.fc-seasonality > summary { color: #6fe0b8; }
+[data-theme="dark"] #plan-toolbar .fc-dd.fc-target > summary { color: #f0c46a; }
+.fc-pop { width: 340px; white-space: normal; font-size: 12px; line-height: 1.45; }
+.fc-pop p { margin: 0 0 8px; }
+.fc-pop small { color: var(--dim); }
+.fc-pop .fc-links { display: flex; gap: 14px; }
+.fc-pop .fc-links a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+/* ---- whole-plan totals: one compact row, tight to the toolbar ---- */
+#totals-band { padding: 6px 14px; margin-bottom: 0; gap: 4px 18px; align-items: center; }
+#totals-band .tb-item { cursor: default; }
+#totals-band .tb-item .v { font-size: 15px; white-space: nowrap; }
+#totals-band .tb-item .l { white-space: nowrap; }
+#totals-band .tb-prop { font-size: 10.5px; font-weight: 700; color: #0e6b54; margin-left: 5px; }
+[data-theme="dark"] #totals-band .tb-prop { color: #6fe0b8; }
+@media (max-width: 1800px) { #totals-band { gap: 4px 14px; } }

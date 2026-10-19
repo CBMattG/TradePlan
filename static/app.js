@@ -670,12 +670,16 @@ function totalsHtml() {
   for (const s of M.skus) { if (s.status === 'Live') live++; else if (s.status === 'Not Live') notlive++; }
   const num = n => Math.round(n).toLocaleString('en-GB');
   const simple = (v, l) => `<div class="tb-item"><div class="v">${v}</div><div class="l">${l}</div></div>`;
-  // committed / proposed / total breakdown: big value = total (committed + proposed),
-  // sub-line shows the committed base and the proposed-rebuy addition
-  const broken = (com, prop, fmt, l) =>
-    `<div class="tb-item tb-bd"><div class="v">${fmt(com + prop)}</div><div class="l">${l}</div>`
-    + `<div class="tb-split"><span class="c-com">${fmt(com)} committed</span>`
-    + `<span class="c-prop">${prop > 0 ? '+' : ''}${fmt(prop)} proposed</span></div></div>`;
+  // committed / proposed / total: the big value is the total (committed + proposed); a
+  // small teal "+x" shows the proposed-rebuy part only when there is one, and the full
+  // committed + proposed split is on hover — keeps the band to one compact row
+  const broken = (com, prop, fmt, l) => {
+    const hasProp = Math.abs(prop) >= 0.5;
+    const tip = `${l}: ${fmt(com)} committed + ${fmt(prop)} proposed = ${fmt(com + prop)}`;
+    return `<div class="tb-item tb-bd" title="${esc(tip)}"><div class="v">${fmt(com + prop)}`
+      + (hasProp ? `<span class="tb-prop">${prop > 0 ? '+' : ''}${fmt(prop)}</span>` : '')
+      + `</div><div class="l">${l}</div></div>`;
+  };
   return '<div class="tb-title">Whole&#8209;plan totals</div>'
     + broken(g.totSales, g.totSalesProposed, fmtGBPk, 'Forecast sales ' + YEAR)
     + broken(g.totSold, g.totSoldProposed, num, 'Selling units ' + YEAR)
@@ -1935,15 +1939,26 @@ function renderPlan() {
 
   const se = SEASON();
   const mode = seasonModeFor(YEAR);
-  let seasonBanner = '';
+  // Forecast mode for the year: a compact pill on the supplier-name row (was a full-width
+  // banner). Its popover carries the detail + the same revert / adjust / turn-off links.
+  let fcLabel, fcBody;
   if (mode === 'target') {
     const tgt = targetValueFor(YEAR);
-    seasonBanner = `<div id="season-banner">🎯 <b>Target sales mode</b> — ${YEAR} forecast scaled to a <b>${fmtGBPk(tgt)}</b> sales target (modelled demand <b>${fmtGBPk(forecastDemandTotal())}</b>), distributed by recency-weighted history + seasonality. <a id="season-edit-link">adjust</a> · <a id="target-off-link">turn off</a></div>`;
+    fcLabel = `🎯 Target ${fmtGBPk(tgt)}`;
+    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Target sales</b> — the ${YEAR} forecast is scaled to a <b>${fmtGBPk(tgt)}</b> sales target (modelled demand <b>${fmtGBPk(forecastDemandTotal())}</b>), distributed by recency-weighted history + seasonality.</p>`
+      + `<div class="fc-links"><a id="season-edit-link">Adjust…</a><a id="target-off-link">Turn off</a></div>`;
   } else if (mode === 'seasonality') {
-    const gp = growthPctFor(YEAR);
-    const growthNote = gp ? ` · <b>${gp > 0 ? '+' : ''}${gp}%</b> YoY growth applied` : '';
-    seasonBanner = `<div id="season-banner">🌦️ <b>Seasonality model active</b> (${YEAR}) — future Sales Forecast re-modelled at ${Math.round(seasonStrengthFor(YEAR) * 100)}% strength${growthNote}${se.useWeather ? ' · ' + esc(weatherSummary()) : ''}. <a id="season-revert-link">Revert to original</a> · <a id="season-edit-link">adjust</a></div>`;
+    const gp = growthPctFor(YEAR), pct = Math.round(seasonStrengthFor(YEAR) * 100);
+    fcLabel = `🌦️ Seasonality ${pct}%${gp ? ` · ${gp > 0 ? '+' : ''}${gp}%` : ''}`;
+    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Seasonality model</b> — future Sales Forecast re-modelled at <b>${pct}%</b> strength`
+      + `${gp ? ` with <b>${gp > 0 ? '+' : ''}${gp}%</b> year-on-year growth` : ''}.${se.useWeather ? `<br><small>${esc(weatherSummary())}</small>` : ''}</p>`
+      + `<div class="fc-links"><a id="season-edit-link">Adjust…</a><a id="season-revert-link">Revert to original</a></div>`;
+  } else {
+    fcLabel = '📈 Original forecast';
+    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Original</b> — the imported / rolled-over forecast is used as-is.</p>`
+      + `<div class="fc-links"><a id="season-edit-link">Change forecast mode…</a></div>`;
   }
+  const forecastDD = `<details class="dd fc-dd fc-${mode}" id="dd-forecast"><summary title="How the ${YEAR} Sales Forecast is built — click for details">${fcLabel} ▾</summary><div class="dd-pop fc-pop">${fcBody}</div></details>`;
   const allOpen = skus.length > 0 && skus.every(k => accForceOpen || openSkus.has(k.id));
   const rebuyDD = `<details class="dd" id="dd-rebuy"><summary>⟳ Rebuy: <b>${rbMode === 'full' ? `Full ${CC}` : 'Partial'}</b> · ${rebuyScope === 'sup' ? 'supplier' : 'year'} ▾</summary><div class="dd-pop">`
     + `<div class="dd-sec">Container basket</div>`
@@ -1961,10 +1976,9 @@ function renderPlan() {
     + `<hr><button id="btn-revert-orders" class="danger" title="Revert all ${YEAR} orders — choose the most recent saved configuration or the original imported file">&#8634; Revert orders</button>`
     + `</div></details>`;
   main.innerHTML = `
-    ${seasonBanner}
     <div id="totals-band">${totalsHtml()}</div>
     <div id="plan-toolbar">
-      <div class="ptb-row1"><h1>${esc(sup.name)}</h1><div class="meta">${meta}</div><span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span></div>
+      <div class="ptb-row1"><h1>${esc(sup.name)}</h1>${forecastDD}<div class="meta">${meta}</div><span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span></div>
       <div class="ptb-row2">
         ${sortSeg}
         ${statusDD}
@@ -2079,7 +2093,7 @@ function renderPlan() {
   const toff = document.getElementById('target-off-link');
   if (toff) toff.addEventListener('click', () => { delete seasonYears()[String(YEAR)]; markDirty(); applySeasonality(); });
   const ed = document.getElementById('season-edit-link');
-  if (ed) ed.addEventListener('click', openSettings);
+  if (ed) ed.addEventListener('click', () => { document.getElementById('dd-forecast')?.removeAttribute('open'); openSettings(); });
   main.querySelectorAll('.sku-explain').forEach(b => b.addEventListener('click', () => explainSku(b.dataset.sku)));
   main.querySelectorAll('.sku-details').forEach(b => b.addEventListener('click', () => openSkuDialog(b.dataset.sku)));
   main.querySelectorAll('.asp-chip').forEach(b => b.addEventListener('click', () => editAspInline(b.dataset.aspSku)));
