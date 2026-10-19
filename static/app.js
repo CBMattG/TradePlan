@@ -7271,6 +7271,19 @@ async function init() {
     applySettings();
   });
   document.querySelectorAll('.stab').forEach(b => b.addEventListener('click', () => setSettingsTab(b.dataset.tab)));
+  // Toolbar dropdowns (<details class="dd">) close like normal menus: a click anywhere
+  // outside, Escape, opening another one, or picking an action from a menu. (Re-renders
+  // that must keep one open — ticking several Rows — reopen it via reopenDD.)
+  const closeDDs = keep => document.querySelectorAll('details.dd[open]').forEach(d => { if (d !== keep) d.open = false; });
+  document.addEventListener('click', e => {
+    const inDD = e.target.closest && e.target.closest('details.dd');
+    closeDDs(inDD);
+    if (inDD && e.target.closest('.dd-menu button')) inDD.open = false;
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDDs(null); });
+  document.addEventListener('toggle', e => {
+    if (e.target.matches && e.target.matches('details.dd') && e.target.open) closeDDs(e.target);
+  }, true);
   document.getElementById('explain-close').addEventListener('click', () => document.getElementById('explain-dialog').close());
   document.getElementById('notice-close').addEventListener('click', () => document.getElementById('notice-dialog').close());
   document.getElementById('btn-season-diag').addEventListener('click', () => {
