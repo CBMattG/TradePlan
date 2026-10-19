@@ -37,6 +37,8 @@ function loadPref(key, fallback) {
   catch { return fallback; }
 }
 function savePref(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+let SUMMARIES_HIDDEN = loadPref('tp_hide_summaries', false);   // Plan: hide whole-plan band + supplier cards
+document.documentElement.classList.toggle('hide-summaries', SUMMARIES_HIDDEN);
 let GHOST_ON = loadPref('tp_ghost', true);   // supplier cards: draw the faint last-year trend line
 
 /* ---------------- colour theme (light / dark) ---------------- */
@@ -743,8 +745,10 @@ function renderSidebar() {
 
   const sortLabel = { 'value-desc': `forecast value, high→low`, 'value-asc': `forecast value, low→high`,
                       'name': 'supplier name (A–Z)', 'default': 'workbook order' }[sortMode];
-  document.getElementById('sidebar-legend').innerHTML =
+  const legend = document.getElementById('sidebar-legend');
+  legend.innerHTML =
     `Sorted by <b>${sortLabel}</b> · <b>£ = forecast sales value</b> (demand × price, uncapped) · <b>% = stocked-in</b> (committed supply vs forecast; &lt;100% needs orders, &gt;100% overstock)`;
+  legend.title = legend.textContent;
   document.querySelectorAll('.sortbtn').forEach(b => b.classList.toggle('active', b.dataset.sort === sortMode));
   renderTagQuick(term);
   renderSearchExport();
@@ -1967,6 +1971,8 @@ function renderPlan() {
         ${rowsDD}
         ${rebuyDD}
         <button id="btn-acc-all" class="tbtn" title="${allOpen ? 'Collapse every product to its summary strip' : 'Expand every product to its full weekly grid'}">${allOpen ? '⌃ Collapse all' : '⌄ Expand all'}</button>
+        <button id="btn-summaries" class="tbtn" title="Show or hide the whole-plan totals and the supplier cards above the grid, to give the products more room (remembered)">${SUMMARIES_HIDDEN ? '▾ Show summaries' : '▴ Hide summaries'}</button>
+        ${LY_CACHE ? `<label class="ghost-toggle" title="Overlay each supplier card with a faint dashed ${LY_CACHE.year} trend line"><input type="checkbox" id="ghost-chk"${GHOST_ON ? ' checked' : ''}><span>${LY_CACHE.year} trend</span></label>` : ''}
         <span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span>
         <span class="spacer"></span>
         ${REBUY_STALE ? `<span class="rb-stale" title="Suggestions are only ever built when you click Run rebuy — nothing has been changed for you.">⚠ suggestions may be out of date</span>` : ''}
@@ -1977,7 +1983,6 @@ function renderPlan() {
         <input type="file" id="import-file" accept=".xlsx" hidden>
       </div>
     </div>
-    ${LY_CACHE ? `<div id="sup-panel-head"><label class="ghost-toggle" title="Overlay each card with a faint dashed ${LY_CACHE.year} trend line"><input type="checkbox" id="ghost-chk"${GHOST_ON ? ' checked' : ''}><span>${LY_CACHE.year} trend</span></label></div>` : ''}
     <div id="sup-panel">${supplierPanelHtml(t, sup.name)}</div>
     <div class="gridwrap"><table class="grid"><thead>${headerRow(proposedWeekSet(skus), weekSalesFor(skus))}${poRowHtml(sup.name)}</thead>
       <tbody>${body}</tbody>
@@ -2021,6 +2026,11 @@ function renderPlan() {
     savePref('tp_openSkus', [...openSkus]);
     main.querySelectorAll(`tr[data-skurow="${CSS.escape(id)}"]`).forEach(rr => rr.classList.toggle('acc-hide', !nowOpen));
   }));
+  document.getElementById('btn-summaries').addEventListener('click', e => {
+    SUMMARIES_HIDDEN = !SUMMARIES_HIDDEN; savePref('tp_hide_summaries', SUMMARIES_HIDDEN);
+    document.documentElement.classList.toggle('hide-summaries', SUMMARIES_HIDDEN);
+    e.currentTarget.textContent = SUMMARIES_HIDDEN ? '▾ Show summaries' : '▴ Hide summaries';
+  });
   document.getElementById('btn-acc-all').addEventListener('click', () => {
     const shown = skus.map(k => k.id);
     const everyOpen = shown.length && shown.every(id => accForceOpen || openSkus.has(id));

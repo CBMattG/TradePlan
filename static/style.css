@@ -1703,3 +1703,56 @@ tr.skuhead.acc-open .acc-car { transform: rotate(90deg); }
 :root:not([data-theme="dark"]) .cl-up { background: #e3f4e7; color: #1a6b30; }
 :root:not([data-theme="dark"]) .cl-ed { background: #e2edfb; color: #1d4e8f; }
 :root:not([data-theme="dark"]) .cl-rv { background: #fff3e0; color: #8a6410; }
+
+/* ==================== DENSITY: more room for the plan + readable lists ====================
+   Placed last so it wins on equal specificity. */
+:root { --sidebar-w: 300px; }
+
+/* ---- sidebar: wider, full supplier names (wrap to two lines instead of cutting off) ---- */
+#sidebar { width: var(--sidebar-w); }
+.sup-item { align-items: center; padding-top: 5px; padding-bottom: 5px; }
+.sup-item .n { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  line-height: 1.25; overflow-wrap: anywhere; }
+/* the sort legend is one line; its full wording is on hover */
+#sidebar-legend { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+
+/* ---- plan toolbar: tighter, and the LY-trend toggle lives in it now ---- */
+#plan-toolbar { padding: 7px 12px; margin: 6px 0; }
+#plan-toolbar .ptb-row2 { padding-top: 6px; margin-top: 6px; }
+#plan-toolbar .ghost-toggle { margin-left: 2px; }
+#sup-panel { margin-bottom: 6px; }
+/* "Hide summaries": drop the whole-plan band + supplier cards so the grid gets the room */
+.hide-summaries #main.plan > #totals-band,
+.hide-summaries #main.plan > #sup-panel,
+.hide-summaries #main.plan #plan-toolbar .ghost-toggle { display: none; }
+
+/* ---- product header: one or two lines across the full width, not four stacked rows ---- */
+.skuhead-inner { width: calc(100vw - var(--sidebar-w) - 64px); max-width: none; padding: 3px 8px; }
+.skuhead img { height: 38px; width: 38px; margin-right: 8px; }
+.skuhead .skh-main { flex: 1 1 auto; min-width: 0; align-items: center; }
+.skuhead .skh-body { flex: 1 1 auto; flex-wrap: nowrap; align-items: center; gap: 4px 24px; }
+.skh-left { flex: 1 1 auto; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 3px 5px; min-width: 0; flex-shrink: 1; }
+.skh-left > .skh-line1 { flex-basis: 100%; }
+.skh-left > .skh-pills { display: contents; }   /* status, prices, costs and tags flow as one row */
+.skh-right { flex: 0 0 auto; }
+.skh-tags { margin-top: 0; }
+
+/* ---- Settings: wider, taller, tabs + Apply always visible, two-column tabs ---- */
+#settings-dialog { width: min(1240px, 96vw); max-width: 96vw; max-height: 94vh; }
+#settings-dialog .dialog-actions { position: sticky; bottom: -18px; z-index: 5; background: var(--panel);
+  margin: 10px 0 -18px; padding: 10px 0 14px; border-top: 1px solid var(--glass-brd); }
+#settings-dialog .stab { padding: 5px 11px; }
+#settings-dialog .stab-panel.cols2:not(.hidden) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 18px; align-items: start; }
+#settings-dialog .stab-panel.cols2 > .col { min-width: 0; }
+/* long lists fill the window height instead of scrolling inside a scrolling dialog */
+#settings-dialog .fill-panel .asp-edit-list,
+#settings-dialog .fill-panel #chan-map-wrap { max-height: calc(94vh - 400px); min-height: 220px; }
+#settings-dialog #rb-op-list { max-height: calc(94vh - 560px); min-height: 200px; }
+/* tag rows were full-width with most of it empty: two per row */
+#settings-dialog #tag-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+@media (max-width: 1100px) { #settings-dialog #tag-settings { display: block; } }
+#settings-dialog .cl-list { max-height: calc(94vh - 330px); }
+@media (max-width: 1100px) {
+  #settings-dialog .stab-panel.cols2:not(.hidden) { display: block; }
+}

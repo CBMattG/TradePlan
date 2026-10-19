@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=116">
+<link rel="stylesheet" href="style.css?v=119">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -68,7 +68,10 @@
         <button type="button" class="stab" data-tab="rebuy">Rebuy</button>
         <button type="button" class="stab" data-tab="supplier">Supplier forms</button>
         <button type="button" class="stab" data-tab="imports">File Imports</button>
-        <button type="button" class="stab" data-tab="data">Data</button>
+        <button type="button" class="stab" data-tab="channels">Sales channels</button>
+        <button type="button" class="stab" data-tab="prices">Prices</button>
+        <button type="button" class="stab" data-tab="cbm">CBM</button>
+        <button type="button" class="stab" data-tab="data">POs &amp; orders</button>
         <button type="button" class="stab" data-tab="changelog">Changelog</button>
       </div>
     </div>
@@ -135,7 +138,8 @@
     </div>
 
     <!-- CAPACITY & WEEKS -->
-    <div class="stab-panel hidden" data-panel="capacity">
+    <div class="stab-panel hidden cols2" data-panel="capacity">
+      <div class="col">
       <label>Current week (1&ndash;53)
         <input type="number" step="1" min="1" max="53" id="set-week">
         <small>Weeks before this use actuals; this week and later use the forecast model. Today is ISO week <span id="iso-week-now"></span>.</small>
@@ -154,6 +158,19 @@
           <label>Express stillage <input type="number" id="cap-stillage_express"></label>
         </div>
       </fieldset>
+      <fieldset>
+        <legend>Landed cost estimate</legend>
+        <small>Assumptions used to estimate each product's future <b>landed cost</b> (shown on the plan next to its Landed Cost). Estimate = FOB&nbsp;+&nbsp;sea&nbsp;freight per item &rarr; convert to &pound; &rarr; add duty &rarr; add inland haulage per item. Freight/haulage per item = the rate below &divide; how many units fit in a full container (container&nbsp;CBM &divide; the product's CBM).</small>
+        <div class="cap-grid lc-params">
+          <label>Container rate ($) <input type="number" step="1" min="0" id="lc-container-rate"></label>
+          <label>FX ($ per &pound;1) <input type="number" step="0.01" min="0.01" id="lc-fx"></label>
+          <label>Full container (CBM) <input type="number" step="1" min="1" id="lc-full-cbm"></label>
+          <label>Inland charge (&pound;) <input type="number" step="1" min="0" id="lc-inland-rate"></label>
+          <label>Default duty rate (%) <input type="number" step="0.1" min="0" id="lc-duty-pct"></label>
+        </div>
+      </fieldset>
+      </div>
+      <div class="col">
       <fieldset>
         <legend>Pallet space dimensions</legend>
         <small>The usable pallet footprint and max stack height (cm), used to estimate each product's pallet loading quantity from its carton sizes. A carton bigger than this is flagged for stillage storage.</small>
@@ -175,17 +192,7 @@
           <label>Max load weight (kg) <input type="number" step="1" min="1" id="sd-maxKg"></label>
         </div>
       </fieldset>
-      <fieldset>
-        <legend>Landed cost estimate</legend>
-        <small>Assumptions used to estimate each product's future <b>landed cost</b> (shown on the plan next to its Landed Cost). Estimate = FOB&nbsp;+&nbsp;sea&nbsp;freight per item &rarr; convert to &pound; &rarr; add duty &rarr; add inland haulage per item. Freight/haulage per item = the rate below &divide; how many units fit in a full container (container&nbsp;CBM &divide; the product's CBM).</small>
-        <div class="cap-grid lc-params">
-          <label>Container rate ($) <input type="number" step="1" min="0" id="lc-container-rate"></label>
-          <label>FX ($ per &pound;1) <input type="number" step="0.01" min="0.01" id="lc-fx"></label>
-          <label>Full container (CBM) <input type="number" step="1" min="1" id="lc-full-cbm"></label>
-          <label>Inland charge (&pound;) <input type="number" step="1" min="0" id="lc-inland-rate"></label>
-          <label>Default duty rate (%) <input type="number" step="0.1" min="0" id="lc-duty-pct"></label>
-        </div>
-      </fieldset>
+      </div>
     </div>
 
     <!-- WEEKS COVER -->
@@ -209,7 +216,8 @@
     </div>
 
     <!-- REBUY -->
-    <div class="stab-panel hidden" data-panel="rebuy">
+    <div class="stab-panel hidden cols2" data-panel="rebuy">
+      <div class="col">
       <small>The rebuy algorithm proposes additional orders to keep each Live product in stock, consolidated into ~container loads and timed by supplier lead time (China ~11 wks, non&#8209;China ~3). On a forecast year it can place orders arriving in the first weeks (placed in the prior year's tail). These settings tune the cover it targets and how containers are grouped.</small>
       <label>Default weeks cover target
         <input type="number" step="0.5" min="0" id="rb-cover">
@@ -228,6 +236,8 @@
           <small>Don't restock a Summer/Winter line for an arrival in its off&#8209;season once demand there falls below this fraction of the line's peak week — it runs down instead of carrying off&#8209;season stock (e.g. summer stock arriving in winter). Raise it to stop earlier, lower it to keep buying further into the shoulder. Lines with genuinely strong off&#8209;season demand still rebuy.</small>
         </label>
       </fieldset>
+      </div>
+      <div class="col">
       <label>Partial&#8209;container target (CBM)
         <input type="number" step="1" min="1" id="rb-partialcbm">
         <small>In "Allow partial" mode, build each shipment up to about this load before it goes (e.g. a half container &asymp; 28 CBM), instead of sending very small amounts. Containers still ship full at <span class="rb-cc"></span> CBM when they fill.</small>
@@ -242,6 +252,7 @@
         <input id="rb-op-search" type="search" placeholder="Filter suppliers…">
         <div id="rb-op-list" class="ex-list"></div>
       </fieldset>
+      </div>
     </div>
 
     <!-- SUPPLIER FORMS -->
@@ -289,8 +300,8 @@
       <div id="cartons-status" class="muted-note imp-status"></div>
     </div>
 
-    <!-- DATA -->
-    <div class="stab-panel hidden" data-panel="data">
+    <!-- SALES CHANNELS -->
+    <div class="stab-panel hidden fill-panel" data-panel="channels">
       <fieldset>
         <legend>Sales channels</legend>
         <small>Customers from the forecasting workbook's CustomerIndex, heaviest first. Assign each to a channel
@@ -298,6 +309,10 @@
         channel split follow this mapping. Unassigned customers report as <b>Unmapped</b>.</small>
         <div id="chan-map-wrap"></div>
       </fieldset>
+    </div>
+
+    <!-- PRICES -->
+    <div class="stab-panel hidden fill-panel" data-panel="prices">
       <fieldset>
         <legend>Manual selling prices</legend>
         <small>Edit any product's ASP by hand — e.g. new products not in the sales file. <b>Previous</b> shows the price before the last update and <b>Var %</b> the change from it (e.g. how the most recent upload moved each price). Hand-edited prices are tagged <b>manual</b>; products still on their original imported price are tagged <b>not updated</b> (and highlighted in the supplier screen). Changes apply to the current year and later forecast years.</small>
@@ -310,6 +325,10 @@
         <div id="asp-edit-list" class="asp-edit-list"></div>
         <div class="band-buttons"><button type="button" id="btn-apply-manual-asp" class="primary" disabled>Apply manual prices</button></div>
       </fieldset>
+    </div>
+
+    <!-- CBM -->
+    <div class="stab-panel hidden fill-panel" data-panel="cbm">
       <fieldset>
         <legend>Manual CBM</legend>
         <small>Edit any product's CBM (m³ per unit) by hand — e.g. a newly-sized product, or a correction. Figures tagged <b>import</b> came straight from the last workbook import; hand-edited ones are tagged <b>manual</b>. <b>Previous</b> shows the CBM before your last manual edit and <b>Var %</b> the change from it. CBM drives container fill, CBM totals and the estimated landed cost. Changes apply to the current year and later forecast years.</small>
@@ -322,6 +341,10 @@
         <div id="cbm-edit-list" class="asp-edit-list"></div>
         <div class="band-buttons"><button type="button" id="btn-apply-manual-cbm" class="primary" disabled>Apply manual CBM</button></div>
       </fieldset>
+    </div>
+
+    <!-- POs & ORDERS -->
+    <div class="stab-panel hidden" data-panel="data">
       <fieldset>
         <legend>Purchase orders &amp; container bookings</legend>
         <small>Upload the <b>WEBSA Open PO</b> and <b>Qlik Container</b> files from the <b>File Imports</b> tab. Here you can view diagnostics and re-time committed stock arrivals to their PO/container weeks (matched by PO number, across all years).</small>
@@ -694,6 +717,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=167"></script>
+<script src="app.js?v=168"></script>
 </body>
 </html>
