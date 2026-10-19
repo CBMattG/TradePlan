@@ -1964,22 +1964,23 @@ function renderPlan() {
     ${seasonBanner}
     <div id="totals-band">${totalsHtml()}</div>
     <div id="plan-toolbar">
-      <div class="ptb-row1"><h1>${esc(sup.name)}</h1><div class="meta">${meta}</div></div>
+      <div class="ptb-row1"><h1>${esc(sup.name)}</h1><div class="meta">${meta}</div><span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span></div>
       <div class="ptb-row2">
         ${sortSeg}
         ${statusDD}
         ${rowsDD}
         ${rebuyDD}
         <button id="btn-acc-all" class="tbtn" title="${allOpen ? 'Collapse every product to its summary strip' : 'Expand every product to its full weekly grid'}">${allOpen ? '⌃ Collapse all' : '⌄ Expand all'}</button>
-        <button id="btn-summaries" class="tbtn" title="Show or hide the whole-plan totals and the supplier cards above the grid, to give the products more room (remembered)">${SUMMARIES_HIDDEN ? '▾ Show summaries' : '▴ Hide summaries'}</button>
+        <button id="btn-summaries" class="tbtn" title="Show or hide the whole-plan totals and the supplier cards above the grid, to give the products more room (remembered)">${SUMMARIES_HIDDEN ? '▾ Summaries' : '▴ Summaries'}</button>
         ${LY_CACHE ? `<label class="ghost-toggle" title="Overlay each supplier card with a faint dashed ${LY_CACHE.year} trend line"><input type="checkbox" id="ghost-chk"${GHOST_ON ? ' checked' : ''}><span>${LY_CACHE.year} trend</span></label>` : ''}
-        <span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span>
         <span class="spacer"></span>
+        <span class="ptb-actions">
         ${REBUY_STALE ? `<span class="rb-stale" title="Suggestions are only ever built when you click Run rebuy — nothing has been changed for you.">⚠ suggestions may be out of date</span>` : ''}
         <button id="btn-run-rebuy" class="tbtn${REBUY_STALE ? ' rb-nudge' : ''}" title="(Re)build the Proposed Rebuy row for ${scopeWord} from the current committed orders.">&#8635; Run rebuy</button>
         <button id="btn-clear-prop" class="tbtn"${scoped.units ? '' : ' disabled'} title="Remove proposed rebuy suggestions for ${scopeWord}">Clear</button>
         <button id="btn-commit-all" class="tbtn primary"${scoped.units ? '' : ' disabled'} title="Add ${scopeWord}'s proposed rebuys (teal row) to Committed Orders as confirmed orders">&#10003; Commit ${fmtU(scoped.units)}</button>
         ${moreDD}
+        </span>
         <input type="file" id="import-file" accept=".xlsx" hidden>
       </div>
     </div>
@@ -1987,7 +1988,9 @@ function renderPlan() {
     <div class="gridwrap"><table class="grid"><thead>${headerRow(proposedWeekSet(skus), weekSalesFor(skus))}${poRowHtml(sup.name)}</thead>
       <tbody>${body}</tbody>
       <tfoot>${supCbmFooterHtml(sup.name, CC, highlightWeek())}</tfoot></table></div>`;
-  if (reopenDD) { const dd = document.getElementById(reopenDD); if (dd) dd.open = true; reopenDD = null; }
+  if (reopenDD) { const dd = document.getElementById(reopenDD); if (dd) { dd.open = true; placeDD(dd); } reopenDD = null; }
+  const ptbMeta = main.querySelector('#plan-toolbar .meta');   // truncates on narrow screens: full text on hover
+  if (ptbMeta) ptbMeta.title = ptbMeta.textContent.replace(/\s+/g, ' ').trim();
 
   const ghostChk = main.querySelector('#ghost-chk');
   if (ghostChk) ghostChk.addEventListener('change', e => {
@@ -2029,7 +2032,7 @@ function renderPlan() {
   document.getElementById('btn-summaries').addEventListener('click', e => {
     SUMMARIES_HIDDEN = !SUMMARIES_HIDDEN; savePref('tp_hide_summaries', SUMMARIES_HIDDEN);
     document.documentElement.classList.toggle('hide-summaries', SUMMARIES_HIDDEN);
-    e.currentTarget.textContent = SUMMARIES_HIDDEN ? '▾ Show summaries' : '▴ Hide summaries';
+    e.currentTarget.textContent = SUMMARIES_HIDDEN ? '▾ Summaries' : '▴ Summaries';
   });
   document.getElementById('btn-acc-all').addEventListener('click', () => {
     const shown = skus.map(k => k.id);
@@ -2910,6 +2913,15 @@ async function applySeasonality(opts = {}) {
 const SUPPLIER_FORM_DEFAULTS = { sailing_days: 50, grace_days: 7, inland_days: 7, marketing_pct: 0.01, deposit_pct: 0.15 };
 function formCfg() { return Object.assign({}, SUPPLIER_FORM_DEFAULTS, SETTINGS.supplier_form || {}); }
 let settingsTab = 'forecast';
+// Open a toolbar dropdown toward the side with room: right-aligned menus flip to
+// left-aligned (and vice versa) when they would cross the edge of the page area.
+function placeDD(dd) {
+  const pop = dd.querySelector('.dd-pop'), area = document.getElementById('main');
+  if (!pop || !area) return;
+  dd.classList.remove('dd-flip');
+  const a = area.getBoundingClientRect(), b = pop.getBoundingClientRect();
+  if (b.left < a.left + 6 || b.right > a.right - 6) dd.classList.add('dd-flip');
+}
 function setSettingsTab(name) {
   settingsTab = name;
   document.querySelectorAll('.stab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -7282,7 +7294,7 @@ async function init() {
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDDs(null); });
   document.addEventListener('toggle', e => {
-    if (e.target.matches && e.target.matches('details.dd') && e.target.open) closeDDs(e.target);
+    if (e.target.matches && e.target.matches('details.dd') && e.target.open) { closeDDs(e.target); placeDD(e.target); }
   }, true);
   document.getElementById('explain-close').addEventListener('click', () => document.getElementById('explain-dialog').close());
   document.getElementById('notice-close').addEventListener('click', () => document.getElementById('notice-dialog').close());

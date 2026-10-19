@@ -1762,3 +1762,44 @@ tr.skuhead.acc-open .acc-car { transform: rotate(90deg); }
 .dd-pop { background: var(--panel); backdrop-filter: none; -webkit-backdrop-filter: none;
   box-shadow: 0 12px 32px rgba(10,20,35,.22), var(--shadow-card); }
 [data-theme="dark"] .dd-pop { background: #1d2430; border-color: #34405a; box-shadow: 0 14px 36px rgba(0,0,0,.55); }
+
+/* toolbar actions (Run rebuy / Clear / Commit / ⋯) wrap together, pinned right */
+#plan-toolbar .ptb-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap; margin-left: auto; }
+/* dropdown flipped to the side with room (set by placeDD) */
+details.dd.dd-flip .dd-pop { left: auto; right: 0; }            /* left-opening -> right-aligned */
+details.dd.dd-right.dd-flip .dd-pop { left: 0; right: auto; }   /* right-aligned -> opens rightwards */
+
+/* proposed-rebuy summary sits on the supplier-name row, pinned right */
+#plan-toolbar .ptb-row1 .rb-bar-sum { margin-left: auto; white-space: nowrap; }
+/* narrower screens (e.g. 1920 px at 125% display scaling = ~1536 px): keep the whole-plan
+   totals on ONE row — stack each committed/proposed split under its figure, drop the title,
+   and only scroll sideways if it still can't fit */
+@media (max-width: 1800px) {
+  #totals-band { flex-wrap: nowrap; gap: 6px 14px; overflow-x: auto; scrollbar-width: thin; }
+  #totals-band .tb-title { display: none; }
+  #totals-band .tb-item { flex: 0 0 auto; }
+  .tb-item.tb-bd .tb-split .c-com, .tb-item.tb-bd .tb-split .c-prop { display: block; margin-left: 0; }
+  #plan-toolbar .ptb-row2 { gap: 6px; }
+}
+
+/* supplier-name row stays one line: the contact/port/email details shorten with … (full text on hover) */
+#plan-toolbar .ptb-row1 { flex-wrap: nowrap; min-width: 0; }
+#plan-toolbar .ptb-row1 h1 { flex: 0 0 auto; white-space: nowrap; }
+#plan-toolbar .ptb-row1 .meta { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#plan-toolbar .ptb-row1 .rb-bar-sum { flex: 0 0 auto; }
+
+/* top bar: buttons never wrap their labels onto two lines (which made the bar ~40% taller);
+   on narrower screens the controls tighten up instead */
+#topbar .tab, #topbar-right button, #btn-build-year { white-space: nowrap; }
+@media (max-width: 1800px) {
+  #topbar { gap: 8px; }
+  #topbar .tab { padding: 6px 11px; }
+  #topbar-right { gap: 5px; }
+  #topbar-right button { padding-left: 9px; padding-right: 9px; }
+  #config-select { max-width: 135px; }
+}
+/* very narrow (~1280 px): let the top bar take a second row rather than push buttons off-screen */
+@media (max-width: 1400px) {
+  #topbar { flex-wrap: wrap; height: auto; row-gap: 6px; padding-top: 6px; padding-bottom: 6px; }
+  #topbar-right { flex-wrap: wrap; justify-content: flex-end; }
+}
