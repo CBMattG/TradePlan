@@ -459,6 +459,80 @@ function growthPctFor(year) {      // YoY growth % applied in Seasonality mode (
   const c = seasonCfg(year);
   return (c && c.mode === 'seasonality' && isFinite(+c.growth)) ? +c.growth : 0;
 }
+// ---- quick forecast controls (the Plan page's forecast pill) ----
+// Change the loaded year's mode / strength / growth / target straight from the pill, with
+// the same rules as Settings → Forecast: Original removes the year's entry; Target needs a
+// positive £ target (seeded from the current modelled demand). Each committed change is
+// saved + logged, re-models the forecast and leaves existing rebuys alone (flagged stale).
+const FC_GROWTH_MIN = -30, FC_GROWTH_MAX = 50;
+function fcTargetRange(base) {             // slider span for the £ target: 50%–200% of the base
+  const b = Math.max(10000, base || 0);
+  const step = b >= 5e6 ? 50000 : b >= 1e6 ? 10000 : 1000;
+  return { min: Math.floor(b * 0.5 / step) * step, max: Math.ceil(b * 2 / step) * step, step };
+}
+function fcQuickHtml(mode, se) {
+  const radio = (v, lbl) => `<label class="fcq-mode${mode === v ? ' on' : ''}"><input type="radio" name="fcq-mode" value="${v}"${mode === v ? ' checked' : ''}>${lbl}</label>`;
+  let h = `<div class="dd-sec">${YEAR} forecast mode</div>`
+    + `<div class="fcq-modes">${radio('off', '📈 Original')}${radio('seasonality', '🌦️ Seasonality')}${radio('target', '🎯 Target')}</div>`;
+  if (mode === 'seasonality') {
+    const pct = Math.round(seasonStrengthFor(YEAR) * 100), gp = growthPctFor(YEAR);
+    h += `<label class="fcq-row">Model strength <b id="fcq-strength-val">${pct}%</b>`
+      + `<input type="range" id="fcq-strength" min="0" max="100" step="5" value="${pct}"></label>`
+      + `<small>0% = original forecast · 100% = fully model-driven</small>`
+      + `<label class="fcq-row">Year-on-year growth <b id="fcq-growth-val">${gp > 0 ? '+' : ''}${gp}%</b>`
+      + `<input type="range" id="fcq-growth" min="${FC_GROWTH_MIN}" max="${FC_GROWTH_MAX}" step="1" value="${Math.max(FC_GROWTH_MIN, Math.min(FC_GROWTH_MAX, gp))}"></label>`
+      + `<small>Scales the whole ${YEAR} forecast for expected growth beyond history (0 = pure history)</small>`
+      + (se.useWeather ? `<small>${esc(weatherSummary())}</small>` : '');
+  } else if (mode === 'target') {
+    const tgt = targetValueFor(YEAR), r = fcTargetRange(tgt);
+    h += `<label class="fcq-row">Target sales <b id="fcq-target-val">${fmtGBPk(tgt)}</b>`
+      + `<input type="range" id="fcq-target" min="${r.min}" max="${r.max}" step="${r.step}" value="${Math.round(tgt)}"></label>`
+      + `<div class="fcq-exact">Exact £ <input type="number" id="fcq-target-num" min="0" step="1000" value="${Math.round(tgt)}"></div>`
+      + `<small>Modelled demand ${fmtGBPk(forecastDemandTotal())} · the slider spans 50%–200% of the target; type an exact figure for anything outside it</small>`;
+  } else {
+    h += `<small>The imported / rolled-over forecast is used as-is. Pick Seasonality or Target to re-model ${YEAR}.</small>`;
+  }
+  h += `<div class="fc-links"><a id="season-edit-link">All forecast settings…</a></div>`;
+  return h;
+}
+function fcQuickSet(patch, label) {
+  const by = seasonYears(), y = String(YEAR);
+  const next = Object.assign({ mode: 'off' }, by[y] || {}, patch);
+  if (next.mode === 'off') delete by[y];
+  else {
+    const o = { mode: next.mode, strength: next.strength != null ? +next.strength : 0.7 };
+    if (next.mode === 'seasonality') o.growth = isFinite(+next.growth) ? +next.growth : 0;
+    if (next.mode === 'target') o.target = +next.target > 0 ? Math.round(+next.target) : Math.round(forecastDemandTotal());
+    by[y] = o;
+  }
+  labelNextSave(label || `Forecast mode · ${y}`);
+  markDirty();
+  if (PROPOSED && PROPOSED.size) REBUY_STALE = true;   // rebuys are never rebuilt for you
+  reopenDD = 'dd-forecast';                            // keep the pill open across the re-render
+  applySeasonality();
+}
+function wireFcQuick() {
+  const dd = document.getElementById('dd-forecast'); if (!dd) return;
+  dd.querySelectorAll('input[name="fcq-mode"]').forEach(r => r.addEventListener('change', () => {
+    const lbl = { off: 'Original', seasonality: 'Seasonality', target: 'Target sales' }[r.value];
+    fcQuickSet({ mode: r.value }, `Forecast mode: ${lbl} · ${YEAR}`);
+  }));
+  // sliders: live readout while dragging, commit (re-model) on release
+  const slider = (id, fmt, commit) => {
+    const el = document.getElementById(id); if (!el) return;
+    const out = document.getElementById(id + '-val');
+    el.addEventListener('input', () => { if (out) out.textContent = fmt(+el.value); });
+    el.addEventListener('change', () => commit(+el.value));
+  };
+  slider('fcq-strength', v => v + '%', v => fcQuickSet({ strength: v / 100 }, `Forecast strength ${v}% · ${YEAR}`));
+  slider('fcq-growth', v => (v > 0 ? '+' : '') + v + '%', v => fcQuickSet({ growth: v }, `Forecast growth ${v > 0 ? '+' : ''}${v}% · ${YEAR}`));
+  slider('fcq-target', v => fmtGBPk(v), v => fcQuickSet({ target: v }, `Sales target ${fmtGBPk(v)} · ${YEAR}`));
+  const num = document.getElementById('fcq-target-num');
+  if (num) num.addEventListener('change', () => {
+    const v = Math.round(parseFloat(num.value));
+    if (v > 0) fcQuickSet({ target: v }, `Sales target ${fmtGBPk(v)} · ${YEAR}`);
+  });
+}
 function seasonYears() {           // forecast byYear map, creating it on first use
   const s = SETTINGS.seasonality || (SETTINGS.seasonality = {});
   return s.byYear || (s.byYear = {});
@@ -1941,23 +2015,13 @@ function renderPlan() {
   const mode = seasonModeFor(YEAR);
   // Forecast mode for the year: a compact pill on the supplier-name row (was a full-width
   // banner). Its popover carries the detail + the same revert / adjust / turn-off links.
-  let fcLabel, fcBody;
-  if (mode === 'target') {
-    const tgt = targetValueFor(YEAR);
-    fcLabel = `🎯 Target ${fmtGBPk(tgt)}`;
-    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Target sales</b> — the ${YEAR} forecast is scaled to a <b>${fmtGBPk(tgt)}</b> sales target (modelled demand <b>${fmtGBPk(forecastDemandTotal())}</b>), distributed by recency-weighted history + seasonality.</p>`
-      + `<div class="fc-links"><a id="season-edit-link">Adjust…</a><a id="target-off-link">Turn off</a></div>`;
-  } else if (mode === 'seasonality') {
-    const gp = growthPctFor(YEAR), pct = Math.round(seasonStrengthFor(YEAR) * 100);
-    fcLabel = `🌦️ Seasonality ${pct}%${gp ? ` · ${gp > 0 ? '+' : ''}${gp}%` : ''}`;
-    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Seasonality model</b> — future Sales Forecast re-modelled at <b>${pct}%</b> strength`
-      + `${gp ? ` with <b>${gp > 0 ? '+' : ''}${gp}%</b> year-on-year growth` : ''}.${se.useWeather ? `<br><small>${esc(weatherSummary())}</small>` : ''}</p>`
-      + `<div class="fc-links"><a id="season-edit-link">Adjust…</a><a id="season-revert-link">Revert to original</a></div>`;
-  } else {
-    fcLabel = '📈 Original forecast';
-    fcBody = `<div class="dd-sec">${YEAR} forecast mode</div><p><b>Original</b> — the imported / rolled-over forecast is used as-is.</p>`
-      + `<div class="fc-links"><a id="season-edit-link">Change forecast mode…</a></div>`;
-  }
+  let fcLabel;
+  if (mode === 'target') fcLabel = `🎯 Target ${fmtGBPk(targetValueFor(YEAR))}`;
+  else if (mode === 'seasonality') {
+    const gp = growthPctFor(YEAR);
+    fcLabel = `🌦️ Seasonality ${Math.round(seasonStrengthFor(YEAR) * 100)}%${gp ? ` · ${gp > 0 ? '+' : ''}${gp}%` : ''}`;
+  } else fcLabel = '📈 Original forecast';
+  const fcBody = fcQuickHtml(mode, se);
   const forecastDD = `<details class="dd fc-dd fc-${mode}" id="dd-forecast"><summary title="How the ${YEAR} Sales Forecast is built — click for details">${fcLabel} ▾</summary><div class="dd-pop fc-pop">${fcBody}</div></details>`;
   const allOpen = skus.length > 0 && skus.every(k => accForceOpen || openSkus.has(k.id));
   const rebuyDD = `<details class="dd" id="dd-rebuy"><summary>⟳ Rebuy: <b>${rbMode === 'full' ? `Full ${CC}` : 'Partial'}</b> · ${rebuyScope === 'sup' ? 'supplier' : 'year'} ▾</summary><div class="dd-pop">`
@@ -2088,10 +2152,7 @@ function renderPlan() {
     REBUY_STALE = true;
     reopenDD = 'dd-rebuy'; renderPlan();
   }));
-  const rv = document.getElementById('season-revert-link');
-  if (rv) rv.addEventListener('click', () => { delete seasonYears()[String(YEAR)]; markDirty(); applySeasonality(); });
-  const toff = document.getElementById('target-off-link');
-  if (toff) toff.addEventListener('click', () => { delete seasonYears()[String(YEAR)]; markDirty(); applySeasonality(); });
+  wireFcQuick();
   const ed = document.getElementById('season-edit-link');
   if (ed) ed.addEventListener('click', () => { document.getElementById('dd-forecast')?.removeAttribute('open'); openSettings(); });
   main.querySelectorAll('.sku-explain').forEach(b => b.addEventListener('click', () => explainSku(b.dataset.sku)));
@@ -7302,6 +7363,7 @@ async function init() {
   // that must keep one open — ticking several Rows — reopen it via reopenDD.)
   const closeDDs = keep => document.querySelectorAll('details.dd[open]').forEach(d => { if (d !== keep) d.open = false; });
   document.addEventListener('click', e => {
+    if (!e.target.isConnected) return;   // the click's element was re-rendered away (e.g. a slider release re-modelled the plan)
     const inDD = e.target.closest && e.target.closest('details.dd');
     closeDDs(inDD);
     if (inDD && e.target.closest('.dd-menu button')) inDD.open = false;

@@ -365,8 +365,14 @@ in Settings → Forecast.
     you'd actually sell given stock timing; compare the target against the uncapped
     forecast (the "plan N" sub-value on the Sales Forecast total).
   - A **forecast pill** beside the supplier name on the Plan page shows the year's active
-    mode (e.g. *🌦️ Seasonality 100%*, *🎯 Target £15m*, *📈 Original forecast*); click it
-    for the detail and the **adjust** / **revert** / **turn off** links. **Shared model settings** (own-shape weight, weather on/off + sensitivity
+    mode (e.g. *🌦️ Seasonality 100%*, *🎯 Target £15m*, *📈 Original forecast*). Click it
+    for **quick controls** that change that year straight from the plan: switch between
+    **Original / Seasonality / Target**, drag the **model strength** and **year-on-year
+    growth** sliders (Seasonality), or the **target £** slider / type an exact target
+    (Target). Each change applies when you let go of the slider — the forecast re-models,
+    the change is saved and logged in History, and existing rebuy suggestions are left as
+    they are (flagged *may be out of date*). **All forecast settings…** opens Settings →
+    Forecast. **Shared model settings** (own-shape weight, weather on/off + sensitivity
     + location, the **"Show calibrated curves"** diagnostic) apply to every year that uses
     Seasonality or Target. The **ⓘ button on each product** opens a per-SKU explainer
     (demand signals, blended baseline, applied curve, original→modelled result).
