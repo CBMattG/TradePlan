@@ -426,8 +426,8 @@ function computeSkuModel(sku) {
   const modeled = new Array(WEEKS);
   for (let w = 0; w < WEEKS; w++) {
     let m = Math.min(D, cap) * prof[w];
-    if (se.useWeather && WEATHER && WEATHER.ok && WEATHER.weeks) {
-      const an = WEATHER.weeks[w + 1];
+    if (se.useWeather && weatherWeeks()) {
+      const an = weatherWeeks()[w + 1];
       if (an && typeof an.anomaly === 'number' && seasonal) {
         const sens = (se.weatherStrength ?? 0.5) * 0.06;
         const dir = /summer/i.test(sku.season) ? 1 : -1;
@@ -511,8 +511,8 @@ function buildTargetForecasts(target) {
     const arr = new Array(WEEKS);
     for (let w = 0; w < WEEKS; w++) {
       let v = U * it.prof[w] / profSum;             // weekly split by seasonality (profile mean 1)
-      if (se.useWeather && WEATHER && WEATHER.ok && WEATHER.weeks && /summer|winter/i.test(it.sku.season || '')) {
-        const an = WEATHER.weeks[w + 1];
+      if (se.useWeather && weatherWeeks() && /summer|winter/i.test(it.sku.season || '')) {
+        const an = weatherWeeks()[w + 1];
         if (an && typeof an.anomaly === 'number') {
           const sens = (se.weatherStrength ?? 0.5) * 0.06, dir = /summer/i.test(it.sku.season) ? 1 : -1;
           v *= 1 + dir * clamp(an.anomaly, -8, 8) * sens;
@@ -2856,10 +2856,18 @@ function renderWarehouse() {
 async function loadWeather() {
   const se = SEASON();
   try {
-    const r = await fetch(`/api/weather?lat=${se.lat || 52.77}&lon=${se.lon || -1.21}`);
+    const wk1 = (M && M.week1_start) ? `&week1=${encodeURIComponent(M.week1_start)}` : '';
+    const r = await fetch(`/api/weather?lat=${se.lat || 52.77}&lon=${se.lon || -1.21}${wk1}`);
     WEATHER = await r.json();
   } catch (e) { WEATHER = { ok: false, error: e.message }; }
   return WEATHER;
+}
+// The live weather's week numbers, but only when they were filed against THIS year's
+// week 1 — so switching year never applies another year's weeks (refetched on load).
+function weatherWeeks() {
+  if (!WEATHER || !WEATHER.ok || !WEATHER.weeks) return null;
+  if (WEATHER.week1 && M && M.week1_start && WEATHER.week1 !== M.week1_start) return null;
+  return WEATHER.weeks;
 }
 function weatherSummary() {
   if (!seasonActiveFor(YEAR) || !SEASON().useWeather) return '';
@@ -2951,10 +2959,11 @@ function explainSku(id) {
     <div class="l">${label}${val == null ? '' : ` · weight ${weight.toFixed(1)}`}</div></div>`;
   // weather note
   let weatherNote = '';
-  if (d.seasonal && SEASON().useWeather && WEATHER && WEATHER.ok && WEATHER.weeks) {
+  if (d.seasonal && SEASON().useWeather && weatherWeeks()) {
     const dir = /summer/i.test(sku.season) ? 1 : -1, sens = (SEASON().weatherStrength ?? 0.5) * 0.06;
-    const parts = Object.keys(WEATHER.weeks).map(Number).sort((a, b) => a - b).map(wk => {
-      const an = WEATHER.weeks[wk].anomaly, f = dir * clamp(an, -8, 8) * sens;
+    const ww = weatherWeeks();
+    const parts = Object.keys(ww).map(Number).filter(wk => wk >= 1 && wk <= WEEKS).sort((a, b) => a - b).map(wk => {
+      const an = ww[wk].anomaly, f = dir * clamp(an, -8, 8) * sens;
       return `W${wk} ${an >= 0 ? '+' : ''}${an}°C → ${f >= 0 ? '+' : ''}${(f * 100).toFixed(0)}%`;
     });
     weatherNote = `<div class="xp-note"><b>Weather</b> (${esc(SEASON().locationName || '')}): ${parts.join(' · ')} applied to these near weeks.</div>`;

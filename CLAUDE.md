@@ -16,7 +16,7 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 
 ## Run
     python server.py                     # or run.bat → http://localhost:8765
-    python import_data.py --year 2026    # DESTRUCTIVE: replaces data/2026/master.json (all app-side imports lost; orders.json kept). Never for 2027+ (no workbook; falls back to the 2026 file)
+    python import_data.py --year 2026    # DESTRUCTIVE: replaces data/2026/master.json (all app-side imports lost; orders.json kept). Prompts + backs up to *.pre-import-<ts>; refuses years with no workbook (2027+) unless given a path. Never run it to "test"
 
 ## Editing conventions (important)
 - **Bump the cache-bust `?v=N`** on `app.js`/`style.css` in `index.html` for every edit, or the browser runs stale code.
@@ -29,6 +29,8 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 - Before any test that writes to `data/`, **back up** the file and restore/verify after (or snapshot/restore in memory).
 - Cost/status imports (`apply-asp|landed|buying|duty`) write additive `master.json` fields (`asp`, `fob`, `landed`, `status`, `os_purchases`, `duty_rate`), matched by product code; `asp`/`fob`/`landed` are tagged with a `*_src` (buying/duty aren't).
 - `apply-buying` also writes `stock_now` / `stock_snap[week]`, re-chains `running_stock`, and **deletes Not Live entries from `proposed.json`** (`drop_not_live_proposals`; `apply-sku` does too when a line is set Not Live). Other `master.json` writers: `apply-wksales`, `apply-cbm`, `apply-cartons`, `apply-tixhi`, `apply-sku`, `add-product`, `revert-change`. Each `apply-*` is logged via `record_change` with a before-snapshot.
+- **Server writes:** every data-file write goes through `write_atomic(path, text)` (temp file + `os.replace`) — never `Path.write_text` on a data file. Writing POST routes run under `WRITE_LOCK` (`/api/export-*` skip it). Any new route that changes data must `record_change(kind, label, detail, [every file it touches])` **before** writing, so History can undo it (a file absent at snapshot time is deleted on revert).
+- Offline server tests: import `server`, point `S.DATA` / `S.CHANGELOG_PATH` / `S.SNAP_DIR` at a scratch **copy** of `data/`, and call `Handler.method(fake_self, qs)` with a fake exposing `send_json`, `headers`, `rfile`.
 
 ## Working style
 - **Don't start the preview / restart the user's server to verify unless asked** — they run their own server on :8765 and restarting disrupts their session. Rely on code review + offline checks by default.

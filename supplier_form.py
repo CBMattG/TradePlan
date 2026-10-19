@@ -33,6 +33,7 @@ FORM_DEFAULTS = {
     "inland_days": 7,       # UK inland transport days
     "marketing_pct": 0.01,  # marketing contribution
     "deposit_pct": 0.15,    # deposit
+    "container_cbm": CONTAINER_CBM,   # the app's Settings → container CBM overrides this
 }
 
 # ---- palette (solid ARGB, approximating the sample's themed fills) ----
@@ -184,6 +185,11 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     if master is None:
         master = json.loads((ddir / "master.json").read_text(encoding="utf-8"))
     cfg = {**FORM_DEFAULTS, **(form_cfg or {})}
+    try:
+        ccbm = float(cfg.get("container_cbm") or CONTAINER_CBM)
+    except (TypeError, ValueError):
+        ccbm = CONTAINER_CBM
+    ccbm = ccbm if ccbm > 0 else CONTAINER_CBM
     # Week-1 anchor for THIS year's calendar: a 2027 form must date its weeks from
     # 2026-12-28, not the module default (2025-12-29 = 2026's week 1). Each year's
     # master carries its own week1_start; fall back to the module constant.
@@ -378,7 +384,7 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
 
     # ---- summary block ----
     kcol = get_column_letter(11)
-    put(sr, 9, f'=CONCATENATE("Estimated # of Containers: ",ROUND({kcol}{tr}/{CONTAINER_CBM},2))',
+    put(sr, 9, f'=CONCATENATE("Estimated # of Containers: ",ROUND({kcol}{tr}/{ccbm:g},2))',
         bold=True, align=left, fill=None)
     ws.merge_cells(start_row=sr, start_column=9, end_row=sr, end_column=11)
 
@@ -392,7 +398,7 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     all_years = sorted(p.name for p in root_data.iterdir() if p.is_dir() and p.name.isdigit())
     exp_year = str(year) if year else (ddir.name if ddir.name.isdigit() else None)
     scodes = {s["code"] for s in skus}
-    static = {y: _year_totals_for_codes(root_data / y, scodes)
+    static = {y: _year_totals_for_codes(root_data / y, scodes, container_cbm=ccbm)
               for y in all_years if y != exp_year}
 
     ncol = {}
@@ -412,7 +418,7 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     rows = [
         ("Order Quantity",       FMT_QTY_T,   f"=I{tr}"),
         ("Order Value",          FMT_USD,     f"=J{tr}"),
-        ("Number of Containers", "#,##0.00",  f"=K{tr}/{CONTAINER_CBM}"),
+        ("Number of Containers", "#,##0.00",  f"=K{tr}/{ccbm:g}"),
     ]
     for idx, (label, fmt, live_expr) in enumerate(rows):
         rr = b1 + 1 + idx

@@ -319,7 +319,8 @@ in Settings → Forecast.
   Sales channels** (unassigned = Unmapped). Each product's **⇄ Channels** chip shows its
   forecast units and value by channel and customer, and the Summary shows the plan-wide
   split.
-- **↻ History** (top bar) — every upload and data-edit save is logged with a timestamp
+- **↻ History** (top bar) — every upload, supplier-form import, Load config, Revert
+  orders and data-edit save is logged with a timestamp
   (bursts of the same edit within 10 minutes merge into one entry). The menu lists the
   last 5 revertable changes; the full log is in **Settings → Changelog**. Reverting
   restores the affected data files from a before-snapshot (kept for the 5 most recent
@@ -487,8 +488,10 @@ reverted.
 from its Excel workbook. It **replaces that year's `master.json`**, losing every price,
 cost, status, stock reading, weekly actual, carton/duty update, NPD tag and product
 added in the app since. Your order quantities in `orders.json` are kept unless you pass
-`--reset-orders`. Take a **💾 Save config** / backup first, and only use it to (re)seed
-a year — never on a generated forecast year (2027+), which has no workbook.
+`--reset-orders`. It asks you to type the year to confirm before replacing an existing
+year (`--yes` skips this) and first copies each file it replaces to
+`*.pre-import-<timestamp>`. It refuses a year with no workbook (generated forecast
+years, 2027+) unless you give a path. Only use it to (re)seed a year.
 
 ## Files
 

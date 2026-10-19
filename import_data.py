@@ -1,10 +1,13 @@
 """Import a Tradeplan Excel workbook (2025 or 2026 layout) into data/<year>/.
 
 Usage:
-    python import_data.py [--year YYYY] ["path\to\file.xlsx"] [--reset-orders]
+    python import_data.py [--year YYYY] ["path\to\file.xlsx"] [--reset-orders] [--yes]
 
---year defaults to 2026; the workbook path defaults per year (DEFAULT_EXCEL_BY_YEAR).
+--year defaults to 2026; the workbook path defaults per year (DEFAULT_EXCEL_BY_YEAR),
+and any other year needs an explicit path.
 --reset-orders also overwrites data/<year>/orders.json with Excel's orders.
+--yes skips the confirmation asked before replacing a year that already exists.
+Existing files it replaces are first copied to *.pre-import-<timestamp>.
 
 Reads cached (calculated) values from the workbook, so the file must have been
 saved by Excel at least once. WARNING: this OVERWRITES data/<year>/master.json
@@ -15,8 +18,10 @@ refreshes -- use the app's File Imports for those. Forecast years created in the
 app (2027+) have no workbook and must not be re-imported.
 """
 import json
+import os
+import shutil
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -30,6 +35,23 @@ OUT_DIR = Path(__file__).resolve().parent / "data"
 WEEKS = 53
 WCOL0 = 10          # Suppliers sheet: week 1 = column K (0-based index 10)
 SHEET_W = 96        # Suppliers sheet width (col CR)
+
+def week1_start(year):
+    """Monday of planning week 1: the Monday on or before 1 January (2026 -> 2025-12-29).
+    Matches every year the app holds; note this is NOT ISO week 1."""
+    d = date(year, 1, 1)
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def write_atomic(path, text):
+    """Temp file + swap, so an interrupted import never leaves a truncated data file."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
 
 def norm_status(*vals):
     """Normalise catalog status to Live / Not Live / Unknown (authoritative
@@ -264,8 +286,8 @@ def build_2026(wb, src, year):
         s["origin"] = origins.get(s["name"])
     multiplier = num(vs_rows[493][15], 1.0) or 1.0   # Value Splits P494
     history = {"quarters": {
-        "2023": [num(vs_rows[i][5]) for i in range(499, 503)],
-        "2024": [num(vs_rows[i][6]) for i in range(499, 503)],
+        str(year - 3): [num(vs_rows[i][5]) for i in range(499, 503)],
+        str(year - 2): [num(vs_rows[i][6]) for i in range(499, 503)],
     }}
     capacities = {
         "racking_websa": num(vs_rows[477][3], 3960),
@@ -346,7 +368,7 @@ def build_2026(wb, src, year):
     master = {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "source": str(src), "year": year,
-        "weeks": WEEKS, "week1_start": "2025-12-29", "data_week": cur_week,
+        "weeks": WEEKS, "week1_start": week1_start(year), "data_week": cur_week,
         "suppliers": suppliers, "skus": list(skus.values()),
         "history": history, "capacities": capacities,
         "container_cbm": 68, "multiplier": multiplier,
@@ -402,7 +424,7 @@ def build_2025(wb, src, year):
     master = {
         "generated": datetime.now().isoformat(timespec="seconds"),
         "source": str(src), "year": year,
-        "weeks": WEEKS, "week1_start": "2024-12-30", "data_week": cur_week,
+        "weeks": WEEKS, "week1_start": week1_start(year), "data_week": cur_week,
         "suppliers": suppliers, "skus": list(skus.values()),
         "history": {"quarters": {str(year - 3): [0, 0, 0, 0], str(year - 2): [0, 0, 0, 0]}},
         "capacities": capacities, "container_cbm": 68, "multiplier": 1.0,
@@ -413,36 +435,67 @@ def build_2025(wb, src, year):
 def main():
     argv = sys.argv[1:]
     reset_orders = "--reset-orders" in argv
+    assume_yes = "--yes" in argv
     year, positionals, i = 2026, [], 0
     while i < len(argv):
         a = argv[i]
         if a == "--year":
+            if i + 1 >= len(argv) or not argv[i + 1].isdigit():
+                sys.exit("--year needs a 4-digit year, e.g. --year 2026")
             year = int(argv[i + 1]); i += 2; continue
-        if a == "--reset-orders":
+        if a in ("--reset-orders", "--yes"):
             i += 1; continue
         positionals.append(a); i += 1
-    src = Path(positionals[0]) if positionals else DEFAULT_EXCEL_BY_YEAR.get(year, DEFAULT_EXCEL)
+    if positionals:
+        src = Path(positionals[0])
+    elif year in DEFAULT_EXCEL_BY_YEAR:
+        src = DEFAULT_EXCEL_BY_YEAR[year]
+    else:
+        # never fall back to another year's workbook: that would overwrite this year
+        # (e.g. a forecast year built in the app) with the wrong year's data
+        sys.exit(f"No default workbook for {year}. Forecast years built in the app (2027+) "
+                 f"have no workbook and must not be re-imported. To import {year} from a "
+                 f"file, pass its path: python import_data.py --year {year} \"path\\to\\file.xlsx\"")
     out = OUT_DIR / str(year)
+    if (out / "master.json").exists() and not assume_yes:
+        print(f"WARNING: data/{year}/master.json already exists. Re-importing REPLACES it, losing "
+              "everything the app has written since (imported prices/costs/status, Buying Report "
+              "stock, weekly actuals, cartons, NPD tags, products added or renamed in the app). "
+              "It is backed up first.")
+        if input(f"Type {year} to continue: ").strip() != str(year):
+            sys.exit("Cancelled - nothing changed.")
     out.mkdir(parents=True, exist_ok=True)
     print(f"Reading {src} ... (year {year})")
     wb = load_workbook(src, read_only=True, data_only=True)
 
     master, orders = (build_2025 if year <= 2025 else build_2026)(wb, src, year)
 
-    (out / "master.json").write_text(json.dumps(master), encoding="utf-8")
-    (out / "orders_imported.json").write_text(json.dumps(orders), encoding="utf-8")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    replacing = ["master.json", "orders_imported.json"] + (["orders.json"] if reset_orders else [])
+    for name in replacing:
+        if (out / name).exists():
+            bak = out / f"{name}.pre-import-{stamp}"
+            shutil.copy2(out / name, bak)
+            print(f"  backed up {name} -> {bak.name}")
+    write_atomic(out / "master.json", json.dumps(master))
+    write_atomic(out / "orders_imported.json", json.dumps(orders))
     if reset_orders or not (out / "orders.json").exists():
-        (out / "orders.json").write_text(json.dumps(orders), encoding="utf-8")
+        write_atomic(out / "orders.json", json.dumps(orders))
         print(f"  {out / 'orders.json'} written from Excel order quantities")
     else:
         print(f"  {out / 'orders.json'} kept (your edits preserved); use --reset-orders to overwrite")
     if not (OUT_DIR / "settings.json").exists():
-        (OUT_DIR / "settings.json").write_text(json.dumps(
+        write_atomic(OUT_DIR / "settings.json", json.dumps(
             {"multiplier": master.get("multiplier", 1), "container_cbm": 68,
-             "capacities": master["capacities"]}), encoding="utf-8")
+             "capacities": master["capacities"]}))
     years = sorted(p.name for p in OUT_DIR.iterdir() if p.is_dir() and p.name.isdigit())
-    (OUT_DIR / "years.json").write_text(json.dumps(
-        {"years": years, "default": max(years) if years else str(year)}), encoding="utf-8")
+    idx_path = OUT_DIR / "years.json"
+    try:
+        prev_default = json.loads(idx_path.read_text(encoding="utf-8")).get("default")
+    except (OSError, ValueError):
+        prev_default = None
+    default = prev_default if prev_default in years else (max(years) if years else str(year))
+    write_atomic(idx_path, json.dumps({"years": years, "default": default}))
     print(f"Done. Year {year} written to {out}. Years available: {years}")
 
 

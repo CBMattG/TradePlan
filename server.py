@@ -5,6 +5,7 @@ Then open http://localhost:8765 (opens automatically).
 """
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -93,7 +94,7 @@ def drop_not_live_proposals(ydir, master):
     for k in gone:
         del prop[k]
     if gone:
-        pp.write_text(json.dumps(prop), encoding="utf-8")
+        write_atomic(pp, json.dumps(prop))
     return len(gone)
 
 
@@ -118,8 +119,8 @@ def year_dir(qs):
     return (DATA / str(y)) if y else DATA, y
 
 
-def planning_week(d):
-    return (d - WEEK1_START).days // 7 + 1
+def planning_week(d, week1=WEEK1_START):
+    return (d - week1).days // 7 + 1
 
 
 def _num(v):
@@ -168,8 +169,11 @@ def seasonal_normal(doy):
     return 10.5 - 6.5 * math.cos(2 * math.pi * (doy - 15) / 365)
 
 
-def fetch_weather(lat, lon):
-    key = (round(lat, 2), round(lon, 2))
+def fetch_weather(lat, lon, week1=WEEK1_START):
+    """Daily forecast -> per planning-week temperature anomaly, numbered against
+    `week1` (the Monday of week 1 of the year being modelled), so a 2027 plan gets
+    2027 week numbers and late-December days roll into the next year's week 1."""
+    key = (round(lat, 2), round(lon, 2), week1.isoformat())
     hit = _weather_cache.get(key)
     if hit and (time.time() - hit[0]) < 3 * 3600:
         return hit[1]
@@ -184,7 +188,7 @@ def fetch_weather(lat, lon):
             if tmax is None or tmin is None:
                 continue
             d = datetime.strptime(ds, "%Y-%m-%d").date()
-            wk = planning_week(d)
+            wk = planning_week(d, week1)
             mean = (tmax + tmin) / 2.0
             agg.setdefault(wk, [[], []])
             agg[wk][0].append(mean)
@@ -194,12 +198,42 @@ def fetch_weather(lat, lon):
             t = sum(temps) / len(temps)
             n = sum(normals) / len(normals)
             weeks[wk] = {"temp": round(t, 1), "normal": round(n, 1), "anomaly": round(t - n, 1)}
-        payload = {"ok": True, "weeks": weeks, "lat": lat, "lon": lon,
+        payload = {"ok": True, "weeks": weeks, "lat": lat, "lon": lon, "week1": week1.isoformat(),
                    "generated": datetime.now().isoformat(timespec="minutes")}
     except Exception as exc:
         payload = {"ok": False, "error": str(exc)}
     _weather_cache[key] = (time.time(), payload)
     return payload
+
+
+def write_atomic(path, text):
+    """Write a data file crash-safely: write a temp file beside it, flush it to disk,
+    then swap it into place in one step. A crash or full disk mid-write leaves the
+    old file intact instead of a truncated one (which read_json would quietly turn
+    into an empty default, and the client could then save back over real data).
+    os.replace can briefly fail on Windows while antivirus/indexing holds the file,
+    so it is retried."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
+# Serialises every request that writes data files: ThreadingHTTPServer handles
+# requests in parallel, and the read-modify-write of master.json / changelog.json
+# would otherwise lose an update when two land together (e.g. an autosave during
+# an upload). Read-only export routes skip it so a long zip build never blocks saves.
+WRITE_LOCK = threading.RLock()
 
 
 def read_json(path, default):
@@ -211,8 +245,16 @@ def read_json(path, default):
 
 def supplier_form_cfg():
     """Lead-time / payment assumptions the supplier order-planning form embeds,
-    set in the app under Settings → Supplier forms (global, all years)."""
-    return read_json(DATA / "settings.json", {}).get("supplier_form") or {}
+    set in the app under Settings → Supplier forms (global, all years), plus the
+    app's container size so the form's container counts match the plan's."""
+    st = read_json(DATA / "settings.json", {}) or {}
+    cfg = dict(st.get("supplier_form") or {})
+    try:
+        if float(st.get("container_cbm") or 0) > 0:
+            cfg["container_cbm"] = float(st["container_cbm"])
+    except (TypeError, ValueError):
+        pass
+    return cfg
 
 
 def with_imported_at(path):
@@ -245,7 +287,7 @@ def _read_changelog():
 
 
 def _write_changelog(obj):
-    CHANGELOG_PATH.write_text(json.dumps(obj), encoding="utf-8")
+    write_atomic(CHANGELOG_PATH, json.dumps(obj))
 
 
 def _delete_snapshot(cid):
@@ -306,7 +348,7 @@ def record_change(kind, label, detail, rel_files, coalesce_key=None):
         except OSError:
             snap[rel] = None
     SNAP_DIR.mkdir(exist_ok=True)
-    (SNAP_DIR / (cid + ".json")).write_text(json.dumps({"files": snap}), encoding="utf-8")
+    write_atomic(SNAP_DIR / (cid + ".json"), json.dumps({"files": snap}))
     entries.insert(0, {
         "id": cid, "ts": now.isoformat(timespec="seconds"), "kind": kind,
         "label": label, "detail": detail, "files": list(rel_files),
@@ -379,10 +421,12 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 lat = float((q.get("lat") or ["52.77"])[0])
                 lon = float((q.get("lon") or ["-1.21"])[0])
+                wk1 = q.get("week1")
+                week1 = datetime.strptime(wk1[0], "%Y-%m-%d").date() if wk1 else WEEK1_START
             except ValueError:
-                self.send_json({"ok": False, "error": "bad coordinates"}, 400)
+                self.send_json({"ok": False, "error": "bad coordinates or week1"}, 400)
                 return
-            self.send_json(fetch_weather(lat, lon))
+            self.send_json(fetch_weather(lat, lon, week1))
         else:
             super().do_GET()
 
@@ -558,6 +602,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/export-"):
+            return self._do_POST(parsed)       # read-only: never blocks behind a save
+        with WRITE_LOCK:
+            return self._do_POST(parsed)
+
+    def _do_POST(self, parsed):
         if parsed.path == "/api/save":
             try:
                 ydir, _ = year_dir(parse_qs(parsed.query))
@@ -571,13 +621,13 @@ class Handler(SimpleHTTPRequestHandler):
                     snapf = [f"{yr}/orders.json"] + ([f"{yr}/proposed.json"] if "proposed" in body else [])
                     record_change("edit", lbl, f"{yr} plan", snapf, coalesce_key=f"{lbl}|{yr}")
                 if "orders" in body:
-                    (ydir / "orders.json").write_text(json.dumps(body["orders"]), encoding="utf-8")
+                    write_atomic((ydir / "orders.json"), json.dumps(body["orders"]))
                 if "settings" in body:   # settings are global across years
-                    (DATA / "settings.json").write_text(json.dumps(body["settings"]), encoding="utf-8")
+                    write_atomic((DATA / "settings.json"), json.dumps(body["settings"]))
                 if "proposed" in body:   # editable rebuy suggestions (per year), for export merge
-                    (ydir / "proposed.json").write_text(json.dumps(body["proposed"]), encoding="utf-8")
+                    write_atomic((ydir / "proposed.json"), json.dumps(body["proposed"]))
                 if "stockbase" in body:  # prior-year-end stock a forecast year was last chained to
-                    (ydir / "stockbase.json").write_text(json.dumps(body["stockbase"]), encoding="utf-8")
+                    write_atomic((ydir / "stockbase.json"), json.dumps(body["stockbase"]))
                 self.send_json({"ok": True})
             except Exception as exc:  # report save failures to the UI
                 self.send_json({"ok": False, "error": str(exc)}, 500)
@@ -687,7 +737,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "proposed": read_json(p / "proposed.json", {}),
                 }
             stem = safe_filename(name)
-            (cdir / (stem + ".json")).write_text(json.dumps(snapshot), encoding="utf-8")
+            write_atomic(cdir / (stem + ".json"), json.dumps(snapshot))
             self.send_json({"ok": True, "name": name, "file": stem, "saved_at": snapshot["saved_at"]})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
@@ -705,15 +755,21 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             yrs = d.get("years") or {}
             targets = list(yrs.keys()) if scope == "all" else ([scope] if scope in yrs else [])
+            targets = [y for y in targets if (DATA / str(y)).is_dir()]
+            files = (["settings.json"] if scope == "all" and isinstance(d.get("settings"), dict) else []) + \
+                [f"{y}/{f}" for y in targets for f in ("orders.json", "proposed.json", "stockbase.json")]
+            if files:
+                record_change("edit", f"Load config: {d.get('name', stem)}"[:80],
+                              ", ".join(map(str, targets)) or "settings", files)
             if scope == "all" and isinstance(d.get("settings"), dict):
-                (DATA / "settings.json").write_text(json.dumps(d["settings"]), encoding="utf-8")
+                write_atomic((DATA / "settings.json"), json.dumps(d["settings"]))
             for y in targets:
                 ydir = DATA / str(y)
                 if not ydir.is_dir():
                     continue
                 yd = yrs[y]
-                (ydir / "orders.json").write_text(json.dumps(yd.get("orders", {})), encoding="utf-8")
-                (ydir / "proposed.json").write_text(json.dumps(yd.get("proposed", {})), encoding="utf-8")
+                write_atomic((ydir / "orders.json"), json.dumps(yd.get("orders", {})))
+                write_atomic((ydir / "proposed.json"), json.dumps(yd.get("proposed", {})))
                 if (ydir / "stockbase.json").exists():   # let forecast years re-chain cleanly
                     (ydir / "stockbase.json").unlink()
             self.send_json({"ok": True, "name": d.get("name", stem), "restored": targets})
@@ -728,11 +784,13 @@ class Handler(SimpleHTTPRequestHandler):
         years = [p.name for p in DATA.iterdir() if p.is_dir() and p.name.isdigit()]
         targets = years if scope == "all" else [scope if scope in years else year]
         try:
+            record_change("edit", "Revert orders to original import", ", ".join(map(str, targets)),
+                          [f"{y}/{f}" for y in targets for f in ("orders.json", "proposed.json", "stockbase.json")])
             for y in targets:
                 yd = DATA / str(y)
                 imp = read_json(yd / "orders_imported.json", {})
-                (yd / "orders.json").write_text(json.dumps(imp), encoding="utf-8")
-                (yd / "proposed.json").write_text("{}", encoding="utf-8")
+                write_atomic((yd / "orders.json"), json.dumps(imp))
+                write_atomic((yd / "proposed.json"), "{}")
                 if (yd / "stockbase.json").exists():
                     (yd / "stockbase.json").unlink()
             self.send_json({"ok": True, "restored": targets})
@@ -755,11 +813,11 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"{year} already exists - existing years are never rebuilt"}, 409)
                 return
             ydir.mkdir(parents=True, exist_ok=True)
-            (ydir / "master.json").write_text(json.dumps(body["master"]), encoding="utf-8")
-            (ydir / "orders.json").write_text(json.dumps(body.get("orders", {})), encoding="utf-8")
-            (ydir / "orders_imported.json").write_text(json.dumps(body.get("orders", {})), encoding="utf-8")
+            write_atomic((ydir / "master.json"), json.dumps(body["master"]))
+            write_atomic((ydir / "orders.json"), json.dumps(body.get("orders", {})))
+            write_atomic((ydir / "orders_imported.json"), json.dumps(body.get("orders", {})))
             years = sorted(p.name for p in DATA.iterdir() if p.is_dir() and p.name.isdigit())
-            (DATA / "years.json").write_text(json.dumps({"years": years, "default": years[-1] if years else year}), encoding="utf-8")
+            write_atomic((DATA / "years.json"), json.dumps({"years": years, "default": years[-1] if years else year}))
             self.send_json({"ok": True, "year": year, "years": years})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
@@ -804,7 +862,10 @@ class Handler(SimpleHTTPRequestHandler):
             orders[sid] = vec
             updated.append(code)
 
-        (ydir / "orders.json").write_text(json.dumps(orders), encoding="utf-8")
+        if updated:
+            record_change("upload", f"Supplier form import: {name or 'all suppliers'}"[:80],
+                          f"{len(updated)} products · {ydir.name}", [f"{ydir.name}/orders.json"])
+        write_atomic((ydir / "orders.json"), json.dumps(orders))
         self.send_json({"ok": True, "updated": len(updated), "unmatched": unmatched,
                         "weeks": sorted(weeks), "supplier": name,
                         "total_units": sum(sum(v.values()) for v in parsed["orders"].values())})
@@ -893,7 +954,7 @@ class Handler(SimpleHTTPRequestHandler):
                         s["asp"] = a
                         s["asp_src"] = src
                         n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets, "src": src})
         except Exception as exc:
@@ -986,7 +1047,7 @@ class Handler(SimpleHTTPRequestHandler):
                         touched = True
                     if touched:
                         n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
@@ -1019,7 +1080,7 @@ class Handler(SimpleHTTPRequestHandler):
                         s["cbm"] = v
                         s["cbm_src"] = "manual"
                         n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
@@ -1152,7 +1213,7 @@ class Handler(SimpleHTTPRequestHandler):
                 m.setdefault("skus", []).append(sku)
                 if not any(str(s.get("name", "")).strip() == supplier for s in m.get("suppliers", [])):
                     m.setdefault("suppliers", []).append(dict(supplier_rec))
-                (DATA / y / "master.json").write_text(json.dumps(m), encoding="utf-8")
+                write_atomic((DATA / y / "master.json"), json.dumps(m))
                 applied[y] = sid
             self.send_json({"ok": True, "code": code, "supplier": supplier, "years": targets, "applied": applied})
         except Exception as exc:
@@ -1222,7 +1283,7 @@ class Handler(SimpleHTTPRequestHandler):
                     s["fpq_src"] = fpq_src
                     s["pallet_type"] = pallet_type
                     n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "code": code, "years": targets, "applied": applied})
         except Exception as exc:
@@ -1316,7 +1377,9 @@ class Handler(SimpleHTTPRequestHandler):
                              + (["code"] if new_code else []))
             record_change("edit", f"Product details {code}" + (f" → {new_code}" if new_code else ""),
                           f"{', '.join(changed)} · {', '.join(targets)}",
-                          [f"{y}/master.json" for y in targets])
+                          [f"{y}/master.json" for y in targets]
+                          # setting Not Live drops that line's proposed rebuys
+                          + ([f"{y}/proposed.json" for y in targets] if fields.get("status") == "Not Live" else []))
             applied, missing = {}, []
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -1348,7 +1411,7 @@ class Handler(SimpleHTTPRequestHandler):
                     master.setdefault("suppliers", []).append({"name": sup})
                 if not n:
                     missing.append(y)
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 if fields.get("status") == "Not Live":
                     drop_not_live_proposals(DATA / y, master)
                 applied[y] = n
@@ -1463,7 +1526,7 @@ class Handler(SimpleHTTPRequestHandler):
                     s["pack_size"] = max(1, int(rec.get("pack") or 1))
                     s["cartons_src"] = "import"
                     n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
@@ -1543,7 +1606,8 @@ class Handler(SimpleHTTPRequestHandler):
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
             if targets:
                 record_change("upload", "Buying report", "catalogue status, stock & OS purchases · " + ", ".join(targets),
-                              [f"{y}/master.json" for y in targets])
+                              [f"{y}/master.json" for y in targets]
+                              + [f"{y}/proposed.json" for y in targets])   # Not Live lines lose proposals
             applied = {}
             for y in targets:
                 mpath = DATA / y / "master.json"
@@ -1588,7 +1652,7 @@ class Handler(SimpleHTTPRequestHandler):
                     ords = read_json(DATA / y / "orders.json", {}) or {}
                     closed = int(master.get("data_week") or 1) - 1
                     rechain_running_stock(master, ords, min(year_snap, closed + 1), closed)
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 drop_not_live_proposals(DATA / y, master)
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week})
@@ -1665,7 +1729,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if r is not None:
                         s["duty_rate"] = r
                         n += 1
-                mpath.write_text(json.dumps(master), encoding="utf-8")
+                write_atomic(mpath, json.dumps(master))
                 applied[y] = n
             self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
@@ -1857,7 +1921,7 @@ class Handler(SimpleHTTPRequestHandler):
         data["importedAt"] = datetime.now().isoformat(timespec="seconds")
         data["basis"] = basis
         record_change("upload", "Channel index", f"{len(data['skus'])} SKUs · {rows} shares · basis {basis}", ["channel_index.json"])
-        (DATA / "channel_index.json").write_text(json.dumps(data), encoding="utf-8")
+        write_atomic((DATA / "channel_index.json"), json.dumps(data))
         self.send_json({"ok": True, "skus": len(data["skus"]), "rows": rows,
                         "customers": len(data["customers"]), "basis": basis})
 
@@ -1954,7 +2018,7 @@ class Handler(SimpleHTTPRequestHandler):
             new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
             record_change("upload", f"Weekly sales · week {week}", f"{n} products · {year}", [f"{year}/master.json"])
-            mpath.write_text(json.dumps(master), encoding="utf-8")
+            write_atomic(mpath, json.dumps(master))
             self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw,
                             "year": year, "closedThrough": closed_through})
         except Exception as exc:
@@ -2109,7 +2173,7 @@ class Handler(SimpleHTTPRequestHandler):
                         p.unlink()
                 else:
                     p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(content, encoding="utf-8")
+                    write_atomic(p, content)
                 restored.append(rel)
             entry["reverted"] = True
             entry["revertable"] = False
@@ -2136,7 +2200,7 @@ class Handler(SimpleHTTPRequestHandler):
             data = self.parse_po_websa(self.rfile.read(length))
             data["importedAt"] = datetime.now().isoformat(timespec="seconds")
             record_change("upload", "WEBSA Open PO", f"{len(data['pos'])} POs · {data['rows']} lines", ["po_websa.json"])
-            (DATA / "po_websa.json").write_text(json.dumps(data), encoding="utf-8")
+            write_atomic((DATA / "po_websa.json"), json.dumps(data))
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
             return
@@ -2149,7 +2213,7 @@ class Handler(SimpleHTTPRequestHandler):
             data = self.parse_qlik(self.rfile.read(length))
             data["importedAt"] = datetime.now().isoformat(timespec="seconds")
             record_change("upload", "Qlik containers", f"{len(data['dates'])} POs · {data['rows']} rows", ["po_containers.json"])
-            (DATA / "po_containers.json").write_text(json.dumps(data), encoding="utf-8")
+            write_atomic((DATA / "po_containers.json"), json.dumps(data))
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
             return
