@@ -878,7 +878,7 @@ def export_arrivals(payload):
 
     booked_cols = [
         ("Arrival", 9, "date"), ("Wk", 5, "week"), ("PO", 11, "po"),
-        ("Supplier", 30, "supplier"), ("Container", 14, "container"), ("Status", 12, "status"),
+        ("Supplier", 30, "supplier"), ("Loading Port", 13, "port"), ("Container", 14, "container"), ("Status", 12, "status"),
         ("ETD", 9, "etd"), ("ETA UK Port", 11, "etaPort"), ("Delivery to CB", 13, "deliveryCB"),
         ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
         ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
@@ -893,7 +893,7 @@ def export_arrivals(payload):
             rows.append({
                 "_group": (ev.get("po") or "") + (ev.get("container") or ""),
                 "date": _date(ev.get("date")), "week": ev.get("week"), "po": ev.get("po", ""),
-                "supplier": ev.get("supplier", ""), "container": ev.get("container", ""),
+                "supplier": ev.get("supplier", ""), "port": ev.get("port") or "", "container": ev.get("container", ""),
                 "status": (ev.get("status") or "") + (" · SPLIT" if ev.get("split") else ""),
                 "etd": _date(ev.get("etd")), "etaPort": _date(ev.get("etaPort")),
                 "deliveryCB": _date(ev.get("deliveryCB")),
@@ -920,6 +920,7 @@ def export_arrivals(payload):
                     for (y, m), g in sorted(mon.items())]
     note = (f"Generated {payload.get('generated', '')} · arrival units = ordered − delivered (WEBSA Open PO)"
             " · arrival = delivery-to-CB, else UK-port ETA (Qlik)"
+            " · loading port from the supplier's record in the plan (origin where no port is set)"
             " · Cover Wks = (current stock + arrival units) / the 4-week average, i.e. how long"
             " the delivery lasts at the recent selling rate; blank when nothing sold in those 4"
             " weeks · averages are banked actual sales per week over the last 4 / 12 completed weeks")
@@ -929,7 +930,7 @@ def export_arrivals(payload):
 
     await_cols = [
         ("WEBSA Due", 10, "date"), ("Est. Booking", 11, "bookDate"), ("PO", 11, "po"),
-        ("Supplier", 28, "supplier"), ("Overdue", 9, "overdue"),
+        ("Supplier", 28, "supplier"), ("Loading Port", 13, "port"), ("Overdue", 9, "overdue"),
         ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
         ("Arrival Units", 12, "qty"), ("Current Stock", 12, "stock"),
     ]
@@ -939,7 +940,7 @@ def export_arrivals(payload):
             arows.append({
                 "_group": ev.get("po", ""),
                 "date": _date(ev.get("date")), "bookDate": _date(ev.get("bookDate")),
-                "po": ev.get("po", ""), "supplier": ev.get("supplier", ""),
+                "po": ev.get("po", ""), "supplier": ev.get("supplier", ""), "port": ev.get("port") or "",
                 "overdue": "OVERDUE" if ev.get("overdue") else "",
                 "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
                 "qty": ln.get("qty"), "stock": ln.get("stock"),
@@ -978,7 +979,7 @@ def export_arrivals(payload):
     if plan:
         plan_cols = [
             ("Arrival w/c", 11, "date"), ("Wk", 5, "week"), ("Est. Booking", 11, "bookDate"),
-            ("Type", 20, "kind"), ("Supplier", 28, "supplier"),
+            ("Type", 20, "kind"), ("Supplier", 28, "supplier"), ("Loading Port", 13, "port"),
             ("Product", 18, "code"), ("Description", 36, "name"), ("Season", 16, "season"),
             ("Arrival Units", 12, "qty"), ("CBM", 9, "cbm"), ("Current Stock", 12, "stock"),
         ]
@@ -990,7 +991,7 @@ def export_arrivals(payload):
                     "_group": f"{ev.get('supplier','')}|{ev.get('week')}|{ev.get('kind')}",
                     "date": _date(ev.get("date")), "week": ev.get("week"),
                     "bookDate": _date(ev.get("bookDate")), "kind": kind,
-                    "supplier": ev.get("supplier", ""),
+                    "supplier": ev.get("supplier", ""), "port": ev.get("port") or "",
                     "code": ln.get("code", ""), "name": ln.get("name", ""), "season": ln.get("season", ""),
                     "qty": ln.get("qty"), "cbm": ln.get("cbm"), "stock": ln.get("stock"),
                 })
@@ -1086,6 +1087,112 @@ def export_arrivals(payload):
             if isinstance(v, float):
                 cell.number_format = "#,##0.0" if c == 6 else "#,##0"
         # left unfrozen too, to match the other sheets in this workbook
+
+    # ---- Bookings by Port: per month, how many containers there are and from which
+    # loading ports. One block per kind, all counted exactly as their own tabs count
+    # them, so every month's total here equals that tab's month total.
+    def _mkey_of(dv):
+        return (dv.year, dv.month) if isinstance(dv, date) else None
+
+    NO_PORT = "No port set"
+
+    def _distinct(rows_in, month_of, id_of):
+        """(month -> port -> distinct ids, month -> distinct ids overall). The month total is
+        counted on its own: a container shared by two suppliers' ports appears under both
+        ports but is still one container."""
+        out, tot = {}, {}
+        for row in rows_in:
+            m = month_of(row)
+            out.setdefault(m, {}).setdefault(row.get("port") or NO_PORT, set()).add(id_of(row))
+            tot.setdefault(m, set()).add(id_of(row))
+        return ({m: {p: len(s) for p, s in ports.items()} for m, ports in out.items()},
+                {m: len(s) for m, s in tot.items()})
+
+    blocks = [(
+        "Container bookings required",
+        "Outstanding POs awaiting a container booking (one booking per PO), by ESTIMATED BOOKING month - "
+        "the same counts as the Awaiting Booking tab's monthly totals.",
+        *_distinct(arows, lambda r: _mkey_of(r.get("bookDate")), lambda r: r.get("po")), False)]
+    if plan:
+        pc = {}
+        for row in prows:
+            m = pc.setdefault(_mkey_of(row.get("bookDate")), {})
+            p = row.get("port") or NO_PORT
+            m[p] = m.get(p, 0.0) + (row.get("cbm") or 0) / ccbm
+        blocks.append((
+            "Plan orders to book (estimated containers)",
+            f"Committed-without-PO and proposed plan orders, by estimated booking month - containers estimated "
+            f"from CBM at {ccbm:g} cbm each, so these are part-containers until consolidated.", pc,
+            {m: sum(v.values()) for m, v in pc.items()}, True))
+    blocks.append((
+        "Booked containers arriving",
+        "Dated Qlik containers by ARRIVAL month (for reference - these are already booked).",
+        *_distinct(rows, lambda r: _mkey_of(r.get("date")), lambda r: r.get("container") or r.get("po")), False))
+
+    ws = wb.create_sheet("Bookings by Port", 1 if plan else 0)
+    ws.cell(row=1, column=1, value="Container bookings by month and loading port").font = Font(name=FONT, size=13, bold=True)
+    ws.cell(row=2, column=1, value=(
+        f"Generated {payload.get('generated', '')} · loading port from the supplier's record in the plan "
+        f"(origin where no port is set) · '{NO_PORT}' = supplier has neither in the plan")
+    ).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 10
+    hdr_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    r = 4
+    for title_txt, note, data, totals, decimal in blocks:
+        fmt = "#,##0.0" if decimal else "#,##0"
+        port_tot = {}
+        for ports in data.values():
+            for p, v in ports.items():
+                port_tot[p] = port_tot.get(p, 0) + v
+        # busiest ports first; the no-port bucket always last
+        port_cols = sorted((p for p in port_tot if p != NO_PORT), key=lambda p: (-port_tot[p], p.lower()))
+        if NO_PORT in port_tot:
+            port_cols.append(NO_PORT)
+        ws.cell(row=r, column=1, value=title_txt).font = Font(name=FONT, size=11, bold=True)
+        ws.cell(row=r + 1, column=1, value=note).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+        r += 2
+        if not data:
+            ws.cell(row=r, column=1, value="None.").font = Font(name=FONT, size=9)
+            r += 2
+            continue
+        for c, label in enumerate(["Month", "Total"] + port_cols, start=1):
+            cell = ws.cell(row=r, column=c, value=label)
+            cell.font = Font(name=FONT, size=9, bold=True)
+            cell.fill = _fill(C_SUBHDR)
+            cell.border = BORDER
+            cell.alignment = hdr_align
+            if c > 2:
+                ws.column_dimensions[get_column_letter(c)].width = max(
+                    ws.column_dimensions[get_column_letter(c)].width or 0, 12)
+        ws.row_dimensions[r].height = 28
+        r += 1
+        grand = 0
+        for k in sorted(data, key=lambda x: (x is None, x or (0, 0))):
+            ports = data[k]
+            total = totals[k]
+            grand += total
+            vals = [("No est. date" if k is None else f"{MONTH_NAMES[k[1] - 1]} {k[0]}"), total] + \
+                   [ports.get(p) or None for p in port_cols]       # blank, not 0, so the ports used stand out
+            for c, v in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=c, value=v)
+                cell.font = Font(name=FONT, size=10, bold=(c <= 2))
+                cell.border = BORDER
+                cell.alignment = Alignment(horizontal="left" if c == 1 else "center", vertical="center")
+                if c == 2:
+                    cell.fill = _fill(C_REF_HDR)
+                if isinstance(v, (int, float)):
+                    cell.number_format = fmt
+            r += 1
+        for c, v in enumerate(["Total", grand] + [port_tot[p] for p in port_cols], start=1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name=FONT, size=10, bold=True)
+            cell.fill = _fill(C_REF_HDR)
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="left" if c == 1 else "center", vertical="center")
+            if isinstance(v, (int, float)):
+                cell.number_format = fmt
+        r += 3
 
     bio = io.BytesIO()
     wb.save(bio)

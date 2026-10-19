@@ -488,8 +488,11 @@ function buildModeledForecasts() {
   if (mode === 'off') return;
   calibrateSeasonalShapes(SETTINGS.current_week);   // calibrate peaks from actual sales history
   if (mode === 'target') { buildTargetForecasts(targetValueFor(YEAR)); return; }
-  for (const sku of M.skus) MODELED.set(sku.id, computeSkuModel(sku).modeled);
+  for (const sku of M.skus) if (!sku.fc_pinned) MODELED.set(sku.id, computeSkuModel(sku).modeled);
 }
+// A pinned forecast (sku.fc_pinned, e.g. a sell-through plan for a line with no sales
+// history) is a deliberate weekly plan: the seasonality / target model leaves it as set
+// rather than re-modelling it, so its base_forecast is what the plan shows and sells.
 
 // Target Sales mode: distribute an overall £ sales target across products by their
 // recency-weighted historical sales weight (the model's de-seasonalised demand D,
@@ -500,13 +503,14 @@ function buildTargetForecasts(target) {
   const info = [];
   let sumHistVal = 0;
   for (const sku of M.skus) {
+    if (sku.fc_pinned) continue;                    // pinned plan: kept as set (counted as fixed below)
     const m = computeSkuModel(sku);                 // gives prof + D (recency-weighted demand rate)
     const histUnits = Math.max(0, m.D * WEEKS);     // annual units implied by weighted history
     const histVal = histUnits * (sku.asp || 0);     // weight the target by £ contribution
     sumHistVal += histVal;
     info.push({ sku, prof: m.prof, histUnits });
   }
-  if (sumHistVal <= 0) { for (const sku of M.skus) MODELED.set(sku.id, computeSkuModel(sku).modeled); return; }
+  if (sumHistVal <= 0) { for (const sku of M.skus) if (!sku.fc_pinned) MODELED.set(sku.id, computeSkuModel(sku).modeled); return; }
   for (const it of info) {
     const U = target * it.histUnits / sumHistVal;   // annual target units for this product (Σ value = target)
     const profSum = it.prof.reduce((a, b) => a + b, 0) || WEEKS;
@@ -532,12 +536,13 @@ function buildTargetForecasts(target) {
     const mod = MODELED.get(sku.id), asp = sku.asp || 0;
     for (let w = 0; w < WEEKS; w++) {
       if ((w + 1) < cur) pastVal += (sku.actual[w] || 0) * asp;
+      else if (!mod) pastVal += (sku.base_forecast[w] || 0) * mult * asp;   // pinned: a fixed part of the target
       else futureVal += (mod[w] || 0) * mult * asp;
     }
   }
   if (futureVal > 0) {
     const k = Math.max(0, (target - pastVal) / futureVal);
-    for (const sku of M.skus) { const mod = MODELED.get(sku.id); for (let w = 0; w < WEEKS; w++) if ((w + 1) >= cur) mod[w] *= k; }
+    for (const sku of M.skus) { const mod = MODELED.get(sku.id); if (mod) for (let w = 0; w < WEEKS; w++) if ((w + 1) >= cur) mod[w] *= k; }
   }
 }
 // Uncapped whole-sheet forecast demand value (Σ forecast units × ASP) — used to
@@ -1241,7 +1246,7 @@ function skuRowsHtml(sku, idx) {
         let style = '';
         if (def.key === 'stock' && wk >= cur && v === 0 && r.forecast[w] > 0) cls += 'stockout ';
         else if (def.key === 'cover') { const cc = coverCellStyle(src, w); style = ` style="background:${cc.bg};color:${cc.color}"`; }
-        if (def.key === 'forecast' && wk >= cur && seasonActiveFor(YEAR)) cls += 'modeled ';
+        if (def.key === 'forecast' && wk >= cur && seasonActiveFor(YEAR) && MODELED.has(sku.id)) cls += 'modeled ';
         if (def.key === 'ly' && lyIsForecast(w)) cls += 'ly-fc ';
         if (Math.abs(v) < .5 && def.key !== 'cover') cls += 'zero';
         let ttl = def.key === 'ly' && lyIsForecast(w) ? ' title="Forecast — prior-year actual sales not yet available for this week"' : '';
@@ -4421,10 +4426,10 @@ function rerenderKeepingPlace() {
    untouched cost never gets re-stamped 'manual'. Code + id are the keys every import
    matches on, so they are shown read-only. */
 let SKU_EDIT = null;   // { id, code, weekly:[53], weekly0:[53] }
-const SKU_SRC_LABEL = { manual: 'manual', upload: 'import', import: 'import', calc: 'from cartons', orig: 'original import' };
+const SKU_SRC_LABEL = { manual: 'manual', upload: 'import', import: 'import', calc: 'from cartons', orig: 'original import', sellthrough: 'sell-through plan (pinned)' };
 function srcPill(src, extra) {
   const s = src || 'orig';
-  const cls = s === 'manual' ? 's-manual' : s === 'calc' ? 's-calc' : s === 'orig' ? 's-orig' : 's-import';
+  const cls = (s === 'manual' || s === 'sellthrough') ? 's-manual' : s === 'calc' ? 's-calc' : s === 'orig' ? 's-orig' : 's-import';
   return `<span class="sku-src ${cls}">${esc(SKU_SRC_LABEL[s] || s)}${extra ? ' · ' + esc(extra) : ''}</span>`;
 }
 function skuNumField(id, label, value, step, note) {
@@ -6891,6 +6896,22 @@ function arrWeekBlocks(events, counts, body) {
 }
 // Export the page (as filtered on screen) to a shareable .xlsx — the client sends
 // its already-joined rows so the workbook always matches what the user is looking at.
+// Loading port for an arrival/order event, from the supplier record in the plan (the same
+// field that sets the lead time). The Qlik / WEBSA supplier name can differ in case or
+// spacing from the plan's, so the event's own products identify the supplier first, then
+// a loose name match. Suppliers with no port recorded fall back to their origin.
+function arrPort(ev) {
+  const norm = n => String(n || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const recFor = name => {
+    if (!name) return null;
+    if (supByName.has(name)) return supByName.get(name);
+    const k = norm(name);
+    return M.suppliers.find(s => norm(s.name) === k) || null;
+  };
+  const viaSku = (ev.lines || []).map(l => l.sku && l.sku.supplier).find(Boolean);
+  const rec = recFor(viaSku) || recFor(ev.supplier);
+  return rec ? String(rec.port || rec.origin || '').trim() : '';
+}
 async function exportArrivals() {
   const { booked, awaiting, plan } = arrFilteredEvents();
   const line = l => {
@@ -6909,16 +6930,16 @@ async function exportArrivals() {
     generated: `${arrTodayUk()}${flt ? ` · filtered: "${flt}"` : ''}`,
     lead: arrLead(),
     year: YEAR, containerCbm: SETTINGS.container_cbm || 68,
-    plan: plan.map(ev => ({ date: ev.date, week: ev.week, supplier: ev.supplier, kind: ev.kind,
+    plan: plan.map(ev => ({ date: ev.date, week: ev.week, supplier: ev.supplier, port: arrPort(ev), kind: ev.kind,
       cbm: +ev.cbm.toFixed(2), containers: +ev.containers.toFixed(2), bookDate: arrBookDate(ev.date) || null,
       lines: ev.lines.map(l => Object.assign(line(l), { cbm: +((l.qty * (+l.sku.cbm || 0)).toFixed(2)) })) })),
     months: arrMonthCounts(booked),
-    booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier,
+    booked: booked.map(ev => ({ date: ev.date, week: isoToWeek(ev.date) || null, po: ev.po, supplier: ev.supplier, port: arrPort(ev),
       container: ev.leg.container || '', status: ev.leg.status || '', split: ev.split,
       etd: ev.leg.etd || null, etaPort: ev.leg.etaPort || null, deliveryCB: ev.leg.deliveryCB || null,
       lines: ev.lines.map(line) })),
     awaiting: awaiting.map(ev => ({ date: ev.date || null, bookDate: arrBookDate(ev.date) || null, po: ev.po,
-      supplier: ev.supplier, overdue: ev.overdue, lines: ev.lines.map(line) })),
+      supplier: ev.supplier, port: arrPort(ev), overdue: ev.overdue, lines: ev.lines.map(line) })),
   };
   const status = document.getElementById('save-status');
   status.textContent = 'Building arrivals workbook…';
