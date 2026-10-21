@@ -98,6 +98,29 @@ def drop_not_live_proposals(ydir, master):
     return len(gone)
 
 
+def graveyard_remove(s):
+    """Move a product into the Graveyard: flagged `removed_at`, set Not Live (so it is never
+    rebought and its forecast runs down with its stock). The status it had is kept in
+    `removed_status` so a restore can put it back. Its history stays in every total."""
+    if s.get("removed_at"):
+        return False
+    s["removed_status"] = s.get("status")
+    s["removed_at"] = _today_iso()
+    s["status"] = "Not Live"
+    return True
+
+
+def graveyard_restore(s):
+    """Bring a product back out of the Graveyard (its pre-removal status returns)."""
+    if not s.get("removed_at"):
+        return False
+    prev = s.pop("removed_status", None)
+    s.pop("removed_at", None)
+    if prev:
+        s["status"] = prev
+    return True
+
+
 def safe_filename(name):
     return re.sub(r'[\\/:*?"<>|]+', " ", str(name)).strip() or "supplier"
 
@@ -661,6 +684,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
             self.apply_buying(parse_qs(parsed.query))
+        elif parsed.path == "/api/set-removed":
+            self.set_removed(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-channelindex":
             self.parse_channelindex()
         elif parsed.path == "/api/parse-wksales":
@@ -1537,7 +1562,9 @@ class Handler(SimpleHTTPRequestHandler):
     def aggregate_buying(raw):
         """Read a Buying Report → {code: {status, osPurchases, stock}} for WEBSA rows only.
         Columns: B=product code, D=location (keep only 'WEBSA'), E=catalog status
-        (LIVE/NOT LIVE → Live/Not Live), H=Stock (live warehouse stock), M=OS Purchases."""
+        (LIVE/NOT LIVE → Live/Not Live), H=Stock (live warehouse stock), M=OS Purchases —
+        or wherever a header row (Product / Location / Catalog Status / Stock / OS
+        Purchases) puts them, so a raw export starting at column A reads too."""
         import io
         import warnings
         import openpyxl
@@ -1549,27 +1576,53 @@ class Handler(SimpleHTTPRequestHandler):
                 return "Not Live"
             return None
         out, n = {}, 0
+        # fixed layout (B code, D location, E status, H stock, M OS) unless a header row
+        # names the columns — a raw export starts at column A, with title rows above
+        col = {"code": 1, "loc": 3, "status": 4, "stock": 7, "osp": 12}
+        def header_cols(row):
+            names = [str(c or "").strip().lower() for c in row]
+            if "location" not in names or not ({"catalog status", "catalogue status"} & set(names)):
+                return None
+            found = {"loc": names.index("location"),
+                     "status": names.index("catalog status" if "catalog status" in names else "catalogue status")}
+            for key, want in (("code", ("product", "product code")), ("stock", ("stock",)),
+                              ("osp", ("os purchases", "os"))):
+                j = next((names.index(w) for w in want if w in names), None)
+                if j is not None:
+                    found[key] = j
+            return {**col, **found} if "code" in found else None
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
             ws = wb.active
+            hdr_seen = False
             for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i == 0 or not row or len(row) < 5:
+                if not row:
+                    continue
+                if not hdr_seen and i < 30:
+                    h = header_cols(row)
+                    if h:
+                        col, hdr_seen = h, True
+                        continue                               # the header row itself
+                if i == 0 or len(row) < 5:
                     continue                                   # header / too-short
-                loc = str(row[3] or "").strip().upper() if len(row) > 3 else ""
+                def cell(k):
+                    j = col[k]
+                    return row[j] if j < len(row) else None
+                loc = str(cell("loc") or "").strip().upper()
                 if loc != "WEBSA":
                     continue                                   # only the WEBSA location
-                code = str(row[1] or "").strip()               # B  product code
+                code = str(cell("code") or "").strip()         # product code
                 if not code:
                     continue
                 rec = {}
-                st = norm_status(row[4])                        # E  catalog status
+                st = norm_status(cell("status"))                # catalog status
                 if st:
                     rec["status"] = st
-                stk = row[7] if len(row) > 7 else None          # H  live warehouse stock
+                stk = cell("stock")                             # live warehouse stock
                 if isinstance(stk, (int, float)):
                     rec["stock"] = float(stk)
-                osp = row[12] if len(row) > 12 else None        # M  OS Purchases
+                osp = cell("osp")                               # OS Purchases
                 if isinstance(osp, (int, float)):
                     rec["osPurchases"] = round(float(osp))
                 if rec:
@@ -1601,6 +1654,8 @@ class Handler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             buying = body.get("buying") or {}
+            # codes the user ticked for the Graveyard (no longer on the report)
+            remove = {str(c).strip() for c in (body.get("remove") or []) if str(c).strip()}
             snap_week = int(body.get("week") or 0)
             yrs, _ = years_index()
             targets = [str(y) for y in (body.get("years") or []) if str(y) in yrs]
@@ -1608,12 +1663,20 @@ class Handler(SimpleHTTPRequestHandler):
                 record_change("upload", "Buying report", "catalogue status, stock & OS purchases · " + ", ".join(targets),
                               [f"{y}/master.json" for y in targets]
                               + [f"{y}/proposed.json" for y in targets])   # Not Live lines lose proposals
-            applied = {}
+            applied, removed, restored = {}, {}, {}
             for y in targets:
                 mpath = DATA / y / "master.json"
                 master = read_json(mpath, None)
                 if not master:
                     continue
+                nrem = nres = 0
+                for s in master["skus"]:
+                    code = s.get("code")
+                    if code in buying:
+                        nres += graveyard_restore(s)    # back on the report → back in the plan
+                    elif code in remove:
+                        nrem += graveyard_remove(s)
+                removed[y], restored[y] = nrem, nres
                 # the reading is a stock position in the year being TRADED; a forecast
                 # year (no actuals yet) takes the live figure but keeps no history, else
                 # e.g. a 2026 W42 reading would land in October 2027
@@ -1655,7 +1718,43 @@ class Handler(SimpleHTTPRequestHandler):
                 write_atomic(mpath, json.dumps(master))
                 drop_not_live_proposals(DATA / y, master)
                 applied[y] = n
-            self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week})
+            self.send_json({"ok": True, "applied": applied, "years": targets, "week": snap_week,
+                            "removed": removed, "restored": restored})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
+    def set_removed(self, qs):
+        """Move products into (removed=true) or back out of (false) the Graveyard by hand,
+        for the given years, matched by code."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            b = json.loads(self.rfile.read(length)) if length else {}
+            codes = {str(c).strip() for c in (b.get("codes") or []) if str(c).strip()}
+            to_removed = bool(b.get("removed"))
+            yrs, _ = years_index()
+            targets = [str(y) for y in (b.get("years") or []) if str(y) in yrs]
+            if not codes or not targets:
+                self.send_json({"ok": False, "error": "No products or years given."}, 400)
+                return
+            first = sorted(codes)[0] + (f" +{len(codes) - 1}" if len(codes) > 1 else "")
+            record_change("edit", ("Graveyard: removed " if to_removed else "Graveyard: restored ") + first,
+                          f"{len(codes)} product(s) · {', '.join(targets)}",
+                          [f"{y}/master.json" for y in targets] + [f"{y}/proposed.json" for y in targets])
+            applied = {}
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                n = 0
+                for s in master["skus"]:
+                    if str(s.get("code", "")).strip() in codes:
+                        n += graveyard_remove(s) if to_removed else graveyard_restore(s)
+                if n:
+                    write_atomic(mpath, json.dumps(master))
+                    drop_not_live_proposals(DATA / y, master)
+                applied[y] = n
+            self.send_json({"ok": True, "applied": applied, "years": targets})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 

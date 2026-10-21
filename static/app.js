@@ -35,7 +35,7 @@ function loadPref(key, fallback) {
   catch { return fallback; }
 }
 function savePref(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
-const VIEWS = ['plan', 'summary', 'arrivals', 'warehouse'];
+const VIEWS = ['plan', 'summary', 'arrivals', 'warehouse', 'graveyard'];
 let currentView = VIEWS.includes(loadPref('tp_view')) ? loadPref('tp_view') : 'plan';   // reopen on the last tab
 let searchTerm = typeof loadPref('tp_search') === 'string' ? loadPref('tp_search') : '';   // carries across years + restarts
 function setSearchTerm(t) { searchTerm = t; savePref('tp_search', t); }
@@ -770,7 +770,7 @@ function persistStockbase(obj) {
 function totalsHtml() {
   const g = AGG.g;
   let live = 0, notlive = 0;
-  for (const s of M.skus) { if (s.status === 'Live') live++; else if (s.status === 'Not Live') notlive++; }
+  for (const s of M.skus) { if (isRemoved(s)) continue; if (s.status === 'Live') live++; else if (s.status === 'Not Live') notlive++; }
   const num = n => Math.round(n).toLocaleString('en-GB');
   const simple = (v, l) => `<div class="tb-item"><div class="v">${v}</div><div class="l">${l}</div></div>`;
   // committed / proposed / total: the big value is the total (committed + proposed); a
@@ -804,7 +804,11 @@ function fillTotals() {
 // A search term naming a condition tag ("overstocked", "npd", "nopo"…) filters by that
 // tag rather than by text — no product code or name contains those words. Anything else
 // stays a plain code/name search, and a supplier name still matches on text.
+// Graveyard: a delisted product that has dropped off the Buying Report. It stays in
+// every total (its history is real) but is kept off the Plan, sidebar, tags + search.
+function isRemoved(sku) { return !!(sku && sku.removed_at); }
 function skuMatchesTerm(k, term) {
+  if (isRemoved(k)) return false;
   const tag = tagTermId(term);
   if (tag) return skuTags(k).includes(tag);
   return k.code.toLowerCase().includes(term) || (k.name || '').toLowerCase().includes(term);
@@ -844,7 +848,9 @@ function updateSupWarnIcon(supName) {
 }
 function renderSidebar() {
   const term = searchTerm.toLowerCase();
-  let sups = M.suppliers.filter(s => !term || supplierMatches(s, term));
+  const liveSups = new Set(M.skus.filter(k => !isRemoved(k)).map(k => k.supplier));
+  const anySkus = new Set(M.skus.map(k => k.supplier));
+  let sups = M.suppliers.filter(s => (liveSups.has(s.name) || !anySkus.has(s.name)) && (!term || supplierMatches(s, term)));
   const metric = supForecastValue;
   if (sortMode === 'value-desc') sups = sups.slice().sort((a, b) => metric(b.name) - metric(a.name));
   else if (sortMode === 'value-asc') sups = sups.slice().sort((a, b) => metric(a.name) - metric(b.name));
@@ -1135,7 +1141,7 @@ function buildTags() {
   TAG_METRICS = new Map();
   for (const sku of M.skus) {
     const r = RES.get(sku.id);
-    if (!r) { TAG_CACHE.set(sku.id, []); TAG_METRICS.set(sku.id, {}); continue; }
+    if (!r || isRemoved(sku)) { TAG_CACHE.set(sku.id, []); TAG_METRICS.set(sku.id, {}); continue; }
     const prop = ((PROPOSED && PROPOSED.get(sku.id)) || EMPTY53);
     const com = ORDERS[sku.id] || EMPTY53;
     let outWk = 0;
@@ -1978,7 +1984,8 @@ function renderPlan() {
   const sup = supByName.get(currentSupplier);
   if (!sup) { main.innerHTML = '<div class="empty">Select a supplier</div>'; return; }
   const term = searchTerm.toLowerCase();
-  const allSkus = M.skus.filter(k => k.supplier === sup.name);
+  const allSkus = M.skus.filter(k => k.supplier === sup.name && !isRemoved(k));
+  const graveN = M.skus.filter(k => k.supplier === sup.name && isRemoved(k)).length;
   const liveN = allSkus.filter(k => k.status === 'Live').length;
   const notN = allSkus.filter(k => k.status === 'Not Live').length;
   const unkN = allSkus.length - liveN - notN;
@@ -1997,7 +2004,7 @@ function renderPlan() {
     sup.contact ? `Contact <b>${esc(sup.contact)}</b>` : null,
     sup.port ? `Port <b>${esc(sup.port)}</b>` : null,
     sup.origin ? `Group <b>${esc(sup.origin)}</b>` : null,
-    `<b>${allSkus.length}</b> products · <b class="c-live">${liveN} Live</b> · <b class="c-notlive">${notN} Not Live</b>${unkN ? ` · ${unkN} unknown` : ''}`,
+    `<b>${allSkus.length}</b> products · <b class="c-live">${liveN} Live</b> · <b class="c-notlive">${notN} Not Live</b>${unkN ? ` · ${unkN} unknown` : ''}${graveN ? ` · <a class="gy-link" data-gy-sup="${esc(sup.name)}" title="Delisted products no longer on the Buying Report — open the Graveyard">${graveN} in Graveyard</a>` : ''}`,
     sup.email ? `<b>${esc(sup.email)}</b>` : null,
   ].filter(Boolean).join(' &nbsp;·&nbsp; ');
   // product ordering within the supplier: original import order / sales value / A–Z
@@ -4106,11 +4113,48 @@ function openBuyingDialog() {
     `<div class="bc-row"><span class="bc-code">${esc(c.code)}</span><span class="bc-name" title="${esc(c.name)}">${esc(c.name)}</span>`
     + `<span class="badge ${badgeCls(c.from)}">${esc(c.from)}</span><span class="bc-arrow">→</span>`
     + `<span class="badge ${badgeCls(c.to)}">${esc(c.to)}</span></div>`).join('');
-  document.getElementById('buying-changes').innerHTML = changes.length
+  document.getElementById('buying-changes').innerHTML = (changes.length
     ? `<div class="bc-headline">Catalogue status changes (${changes.length})</div><div class="bc-list">${rows}</div>`
-    : '<p class="muted-note">No catalogue-status changes — matched products already match the report. Outstanding purchases will still update.</p>';
+    : '<p class="muted-note">No catalogue-status changes — matched products already match the report. Outstanding purchases will still update.</p>')
+    + buyingGraveyardHtml(p);
   document.getElementById('buying-apply').disabled = matched.length === 0;
   document.getElementById('buying-dialog').showModal();
+}
+// Products the Buying Report no longer lists. One that was on an earlier report (a known
+// Live / Not Live status) with no stock, no open orders and no outstanding purchases is
+// ticked for the Graveyard; one still holding stock or orders is listed but left unticked.
+// "Unknown" products were never on the report (e.g. a new NPD line) and are left alone.
+function buyingGraveyardCandidates(p) {
+  const cur = SETTINGS.current_week || 1;
+  const out = [];
+  for (const s of M.skus) {
+    if (p.map[s.code] || isRemoved(s) || (s.status !== 'Live' && s.status !== 'Not Live')) continue;
+    const stock = +s.stock_now || 0, osp = +s.os_purchases || 0;
+    const ord = (ORDERS[s.id] || []).slice(cur - 1).reduce((a, b) => a + (+b || 0), 0);
+    const why = [stock > 0 ? `${Math.round(stock).toLocaleString('en-GB')} in stock` : null,
+                 ord > 0 ? `${Math.round(ord).toLocaleString('en-GB')} on order` : null,
+                 osp > 0 ? `${osp.toLocaleString('en-GB')} OS purchases` : null].filter(Boolean);
+    out.push({ s, why });
+  }
+  return out;
+}
+function buyingGraveyardHtml(p) {
+  const cand = buyingGraveyardCandidates(p);
+  const back = M.skus.filter(s => isRemoved(s) && p.map[s.code]).length;
+  const h = back ? `<p class="muted-note">${back} Graveyard product${back === 1 ? ' is' : 's are'} back on the report and will be restored to the Plan.</p>` : '';
+  if (!cand.length) return h;
+  // a report that drops a big slice of the range is more likely a partial / filtered export
+  const known = M.skus.filter(s => !isRemoved(s) && (s.status === 'Live' || s.status === 'Not Live')).length;
+  const suspicious = cand.length > Math.max(20, known * 0.15);
+  const clean = cand.filter(c => !c.why.length).length;
+  const rows = cand.sort((a, b) => a.why.length - b.why.length || a.s.code.localeCompare(b.s.code)).map(({ s, why }) =>
+    `<label class="bc-row gy-row"><input type="checkbox" class="gy-cand" data-code="${esc(s.code)}"${!why.length && !suspicious ? ' checked' : ''}>`
+    + `<span class="bc-code">${esc(s.code)}</span><span class="bc-name" title="${esc(s.name || '')}">${esc(s.name || '')}</span>`
+    + `<span class="gy-why${why.length ? ' warn' : ''}">${why.length ? esc(why.join(' · ')) : 'no stock · no orders'}</span></label>`).join('');
+  return h + `<div class="bc-headline">Not on this report — move to the Graveyard? (${cand.length})</div>`
+    + (suspicious ? `<p class="gy-alert">⚠ ${cand.length} of ${known} products are missing from this file — is it a full Buying Report? Nothing is ticked; tick any you do want removed.</p>`
+                  : `<p class="muted-note">${clean} with no stock or orders ${clean === 1 ? 'is' : 'are'} ticked. Removed products leave the Plan and supplier screens but stay in every total; restore any time from the Graveyard tab.</p>`)
+    + `<div class="bc-list">${rows}</div>`;
 }
 // The plan week the Buying Report's stock reading belongs to (its Monday).
 function buyingSnapWeek() {
@@ -4124,24 +4168,33 @@ async function applyBuyingUpdates() {
   const p = BUYING_PARSED; if (!p) return;
   const years = [...document.querySelectorAll('#buying-years input:checked')].map(i => i.value);
   if (!years.length) { alert('Pick at least one year to apply to.'); return; }
+  const remove = [...document.querySelectorAll('#buying-changes .gy-cand:checked')].map(c => c.dataset.code);
   const status = document.getElementById('save-status'); status.textContent = 'Updating catalogue…';
   try {
     const r = await fetch('/api/apply-buying', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ buying: p.map, years, week: buyingSnapWeek() }) });
+      body: JSON.stringify({ buying: p.map, years, week: buyingSnapWeek(), remove }) });
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
-    const n = applyBuyingToMemory(p.map, years, buyingSnapWeek());
+    const n = applyBuyingToMemory(p.map, years, buyingSnapWeek(), remove);
+    const gyN = (j.removed && j.removed[YEAR]) || 0, backN = (j.restored && j.restored[YEAR]) || 0;
     SETTINGS.buying_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
     document.getElementById('buying-dialog').close();
     document.getElementById('settings-dialog').close();
     status.textContent = `Catalogue status & purchases updated (${(j.years || []).join(', ')})`;
-    alert(`Catalogue status & outstanding purchases updated.\n\nApplied to ${(j.years || []).join(', ')}${years.includes(String(YEAR)) ? ` — ${n} products in ${YEAR}` : ''}.`);
+    alert(`Catalogue status & outstanding purchases updated.\n\nApplied to ${(j.years || []).join(', ')}${years.includes(String(YEAR)) ? ` — ${n} products in ${YEAR}` : ''}.`
+      + (gyN ? `\n${gyN} product${gyN === 1 ? '' : 's'} moved to the Graveyard.` : '')
+      + (backN ? `\n${backN} product${backN === 1 ? '' : 's'} back on the report — restored from the Graveyard.` : ''));
     BUYING_PARSED = null;
   } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
 }
-function applyBuyingToMemory(map, years, snapWeek) {
+function applyBuyingToMemory(map, years, snapWeek, remove) {
   if (!years.includes(String(YEAR))) return 0;
   if (!(+M.data_week > 1)) snapWeek = 0;   // forecast year: live figure only, no history (as the server)
+  const gone = new Set(remove || []);
+  for (const s of M.skus) {                // Graveyard in/out, as the server did
+    if (map[s.code]) graveyardRestore(s);
+    else if (gone.has(s.code)) graveyardRemove(s);
+  }
   let n = 0;
   for (const s of M.skus) {
     const rec = map[s.code]; if (!rec) continue;
@@ -4540,6 +4593,7 @@ function rerenderKeepingPlace() {
   const s = planScrollSnap();
   renderSidebar();
   if (currentView === 'plan') renderPlan(); else setView(currentView);
+  updateGraveyardTab();
   planScrollRestore(s);
 }
 
@@ -5715,7 +5769,7 @@ function searchMatches() {
   const term = searchTerm.trim().toLowerCase();
   if (!term || !M) return [];
   const tag = tagTermId(term);
-  let out = M.skus.filter(k => skuMatchesTerm(k, term) || (!tag && (k.supplier || '').toLowerCase().includes(term)));
+  let out = M.skus.filter(k => skuMatchesTerm(k, term) || (!tag && !isRemoved(k) && (k.supplier || '').toLowerCase().includes(term)));
   if (statusFilter === 'live') out = out.filter(k => k.status === 'Live');
   else if (statusFilter === 'notlive') out = out.filter(k => k.status === 'Not Live');
   return out;
@@ -6977,7 +7031,108 @@ function setView(v) {
   if (v === 'plan') renderPlan();
   else if (v === 'arrivals') renderArrivals();
   else if (v === 'warehouse') renderWarehouse();
+  else if (v === 'graveyard') renderGraveyard();
   else renderSummary();
+  updateGraveyardTab();
+}
+function updateGraveyardTab() {
+  const el = document.getElementById('gy-count');
+  if (!el || !M) return;
+  const n = M.skus.filter(isRemoved).length;
+  el.textContent = n ? String(n) : '';
+}
+
+/* ---------------- Graveyard (delisted products off the Buying Report) ---------------- */
+let GY_FILTER = '';
+function renderGraveyard() {
+  const main = document.getElementById('main');
+  main.innerHTML = `<div class="arr-wrap gy-wrap"><div class="arr-top"><h2>Graveyard</h2>`
+    + `<input type="search" id="gy-filter" placeholder="Filter code / name / supplier" value="${esc(GY_FILTER)}" autocomplete="off">`
+    + `<button type="button" id="gy-restore-sel" disabled>Restore selected</button>`
+    + `<span class="arr-note">Delisted products that dropped off the Buying Report — kept out of the Plan, supplier list, tags, search and supplier forms. `
+    + `They still count in every ${YEAR} total (their sales history is real). A product that reappears on a later Buying Report comes back automatically.</span></div>`
+    + `<div id="gy-body"></div></div>`;
+  const draw = () => { document.getElementById('gy-body').innerHTML = graveyardBodyHtml(); syncGySel(); };
+  document.getElementById('gy-filter').addEventListener('input', e => { GY_FILTER = e.target.value; draw(); });
+  const body = document.getElementById('gy-body');
+  body.addEventListener('change', e => {
+    if (e.target.id === 'gy-all') body.querySelectorAll('.gy-pick').forEach(c => { c.checked = e.target.checked; });
+    syncGySel();
+  });
+  body.addEventListener('click', e => {
+    const b = e.target.closest('.gy-restore');
+    if (b) setRemoved([b.dataset.code], false);
+  });
+  document.getElementById('gy-restore-sel').addEventListener('click', () => {
+    const codes = [...body.querySelectorAll('.gy-pick:checked')].map(c => c.dataset.code);
+    if (codes.length) setRemoved(codes, false);
+  });
+  draw();
+}
+function syncGySel() {
+  const n = document.querySelectorAll('#gy-body .gy-pick:checked').length;
+  const b = document.getElementById('gy-restore-sel');
+  if (b) { b.disabled = !n; b.textContent = n ? `Restore ${n} selected` : 'Restore selected'; }
+}
+function graveyardBodyHtml() {
+  const f = GY_FILTER.trim().toLowerCase();
+  const all = M.skus.filter(isRemoved);
+  if (!all.length) return `<div class="empty">No products in the Graveyard for ${YEAR}. When a Buying Report no longer lists a product, the import offers to move it here.</div>`;
+  const rows = all.filter(k => !f || k.code.toLowerCase().includes(f) || (k.name || '').toLowerCase().includes(f)
+                                 || (k.supplier || '').toLowerCase().includes(f))
+    .sort((a, b) => (a.supplier || '').localeCompare(b.supplier || '') || a.code.localeCompare(b.code));
+  const aw = Math.max(0, (SETTINGS.current_week || 1) - 1);
+  const sum = a => (a || []).reduce((x, y) => x + (+y || 0), 0);
+  const fmtD = iso => { const d = new Date(iso + 'T00:00:00'); return isNaN(d) ? esc(iso) : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }); };
+  const num = n => Math.round(n).toLocaleString('en-GB');
+  const body = rows.map(k => {
+    const act = (k.actual || []).slice(0, aw);
+    const lastWk = act.reduce((last, v, w) => (+v ? w + 1 : last), 0);
+    return `<tr><td><input type="checkbox" class="gy-pick" data-code="${esc(k.code)}"></td>`
+      + `<td class="gy-code">${esc(k.code)}</td><td class="gy-name" title="${esc(k.name || '')}">${esc(k.name || '')}</td>`
+      + `<td>${esc(titleCase(k.supplier || ''))}</td><td>${statusBadge(k.removed_status || 'Unknown')}</td>`
+      + `<td>${fmtD(k.removed_at)}</td><td>${num(+k.stock_now || 0)}</td>`
+      + `<td>${num(sum(act))}</td><td>${lastWk ? 'W' + lastWk : '–'}</td><td>${num(sum(k.ly))}</td>`
+      + `<td><button type="button" class="gy-restore" data-code="${esc(k.code)}" title="Put ${esc(k.code)} back in the Plan">Restore</button></td></tr>`;
+  }).join('');
+  return `<div class="gy-count"><b>${rows.length}</b>${rows.length !== all.length ? ` of ${all.length}` : ''} product${all.length === 1 ? '' : 's'} in the ${YEAR} Graveyard</div>`
+    + `<table class="flat gy-table"><thead><tr><th><input type="checkbox" id="gy-all" title="Select all shown"></th><th>Code</th><th>Name</th><th>Supplier</th>`
+    + `<th title="Catalogue status before it was removed">Was</th><th>Removed</th><th>Stock now</th>`
+    + `<th title="Units sold this year to W${aw}">${YEAR} sold</th><th title="Last week with a sale this year">Last sale</th><th>LY units</th><th></th></tr></thead>`
+    + `<tbody>${body || `<tr><td colspan="11" class="empty">Nothing matches “${esc(GY_FILTER)}”.</td></tr>`}</tbody></table>`;
+}
+// Move products into (removed=true) or out of the Graveyard by hand. Defaults to the
+// viewed year and every later one (the same default as the imports).
+async function setRemoved(codes, removed, years) {
+  years = years || YEARS.filter(y => y >= String(YEAR));
+  const status = document.getElementById('save-status');
+  if (saveTimer) await saveNow();
+  try {
+    const r = await fetch('/api/set-removed', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes, removed, years }) });
+    const j = await r.json();
+    if (!j.ok) { alert('Graveyard update failed: ' + (j.error || 'unknown')); return false; }
+    if (years.includes(String(YEAR))) {
+      const want = new Set(codes);
+      for (const s of M.skus) if (want.has(s.code)) { if (removed) graveyardRemove(s); else graveyardRestore(s); }
+      if (removed) dropNotLiveProposals();   // the server cleared them too
+      computeAll(); rerenderKeepingPlace();
+    }
+    status.textContent = `${removed ? 'Moved to' : 'Restored from'} the Graveyard: ${codes.length === 1 ? codes[0] : codes.length + ' products'} (${(j.years || []).join(', ')})`;
+    return true;
+  } catch (err) { alert('Graveyard update error: ' + err.message); return false; }
+}
+// in-memory mirrors of the server's graveyard_remove / graveyard_restore
+function graveyardRemove(s) {
+  if (s.removed_at) return false;
+  s.removed_status = s.status; s.removed_at = new Date().toISOString().slice(0, 10); s.status = 'Not Live';
+  return true;
+}
+function graveyardRestore(s) {
+  if (!s.removed_at) return false;
+  if (s.removed_status) s.status = s.removed_status;
+  delete s.removed_status; delete s.removed_at;
+  return true;
 }
 
 // Project a year's per-SKU year-end stock (committed orders PLUS proposed rebuys —
@@ -7282,6 +7437,19 @@ async function init() {
   document.getElementById('landed-search').addEventListener('input', renderLandedPreview);
   document.getElementById('landed-list').addEventListener('input', e => { if (e.target.classList.contains('lc-in')) landedEditInput(e.target); });
   document.getElementById('buying-file').addEventListener('change', buyingFileChosen);
+  document.getElementById('main').addEventListener('click', e => {
+    const a = e.target.closest('.gy-link');
+    if (a) { GY_FILTER = a.dataset.gySup || ''; setView('graveyard'); }
+  });
+  document.getElementById('sku-grave').addEventListener('click', async () => {
+    if (!SKU_EDIT) return;
+    const years = [...document.querySelectorAll('#sku-years input:checked')].map(i => i.value);
+    if (!years.length) { alert('Pick at least one year to apply to.'); return; }
+    const code = SKU_EDIT.code;
+    if (!confirm(`Move ${code} to the Graveyard for ${years.join(', ')}?\n\nIt leaves the Plan and supplier screens (set Not Live, proposed rebuys cleared) but stays in every total. Restore it any time from the Graveyard tab.`)) return;
+    document.getElementById('sku-dialog').close();
+    await setRemoved([code], true, years);
+  });
   document.getElementById('buying-cancel').addEventListener('click', () => document.getElementById('buying-dialog').close());
   document.getElementById('buying-apply').addEventListener('click', applyBuyingUpdates);
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);

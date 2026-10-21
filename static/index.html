@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=129">
+<link rel="stylesheet" href="style.css?v=130">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -20,6 +20,7 @@
     <button class="tab" data-view="summary">Summary</button>
     <button class="tab" data-view="arrivals" title="Upcoming container arrivals — Qlik bookings joined to WEBSA open PO balances">Arrivals</button>
     <button class="tab" data-view="warehouse" title="Warehouse space capacity — pallet &amp; stillage utilisation through the year">Warehouse Capacity</button>
+    <button class="tab" data-view="graveyard" title="Graveyard — delisted products that dropped off the Buying Report, kept out of the main screens">Graveyard <span id="gy-count" class="tab-count"></span></button>
   </nav>
   <div id="topbar-right">
     <span id="save-status" title="Changes save automatically"></span>
@@ -541,7 +542,9 @@
   <div class="asp-scope-wrap"><span class="asp-scope-lbl">Apply to year(s):</span>
     <div id="sku-years" class="asp-years"></div></div>
   <div id="sku-msg" class="ap-msg"></div>
-  <div class="dialog-actions"><span class="spacer"></span>
+  <div class="dialog-actions">
+    <button type="button" id="sku-grave" title="Delisted for good? Take it off the Plan + supplier screens (restorable from the Graveyard tab)">Move to Graveyard</button>
+    <span class="spacer"></span>
     <button type="button" id="sku-cancel">Cancel</button>
     <button type="button" id="sku-save" class="primary">Save changes</button>
   </div>
@@ -717,6 +720,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=177"></script>
+<script src="app.js?v=178"></script>
 </body>
 </html>

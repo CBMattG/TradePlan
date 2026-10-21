@@ -216,7 +216,10 @@ def export_supplier(supplier, master=None, orders=None, current_week=None, data_
     if current_week is None:
         current_week = int(master.get("data_week", 1))
 
-    skus = [s for s in master["skus"] if s["supplier"] == supplier]
+    # Graveyard products (delisted, off the Buying Report) stay off the form unless an
+    # order still sits against them
+    skus = [s for s in master["skus"] if s["supplier"] == supplier
+            and not (s.get("removed_at") and not any(orders.get(s["id"]) or []))]
     skus.sort(key=lambda s: s["code"])
 
     ref_cols = _ref_cols(year)                                   # year labels match the export year
