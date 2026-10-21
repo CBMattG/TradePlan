@@ -29,14 +29,16 @@ let AGG = null;          // aggregates
 let skuById = new Map();
 let supByName = new Map();
 let currentSupplier = null;
-let currentView = 'plan';
-let searchTerm = '';
 // view prefs persisted across years and app restarts (localStorage)
 function loadPref(key, fallback) {
   try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); }
   catch { return fallback; }
 }
 function savePref(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+const VIEWS = ['plan', 'summary', 'arrivals', 'warehouse'];
+let currentView = VIEWS.includes(loadPref('tp_view')) ? loadPref('tp_view') : 'plan';   // reopen on the last tab
+let searchTerm = typeof loadPref('tp_search') === 'string' ? loadPref('tp_search') : '';   // carries across years + restarts
+function setSearchTerm(t) { searchTerm = t; savePref('tp_search', t); }
 let SUMMARIES_HIDDEN = loadPref('tp_hide_summaries', false);   // Plan: hide whole-plan band + supplier cards
 document.documentElement.classList.toggle('hide-summaries', SUMMARIES_HIDDEN);
 let GHOST_ON = loadPref('tp_ghost', true);   // supplier cards: draw the faint last-year trend line
@@ -744,7 +746,18 @@ async function saveNow() {
       : 'Save failed!';
   } catch { document.getElementById('save-status').textContent = 'Save failed!'; }
 }
-window.addEventListener('beforeunload', e => { if (saveTimer) { saveNow(); e.preventDefault(); } });
+window.addEventListener('beforeunload', e => { savePlanPlace(); if (saveTimer) { saveNow(); e.preventDefault(); } });
+window.addEventListener('pagehide', () => savePlanPlace());
+// Remember the Plan grid's scroll position so reopening the app lands on the same rows.
+// Keyed to the year/supplier/search it was taken in — restored only when those match.
+function savePlanPlace() {
+  const s = currentView === 'plan' ? planScrollSnap() : null;
+  if (s) savePref('tp_planScroll', { year: YEAR, sup: currentSupplier, term: searchTerm, top: s.top, left: s.left });
+}
+function restorePlanPlace() {
+  const p = loadPref('tp_planScroll', null);
+  if (p && currentView === 'plan' && p.year === YEAR && p.sup === currentSupplier && p.term === searchTerm) planScrollRestore(p);
+}
 // Remember the prior-year-end stock a forecast year was last chained to, so we can tell
 // when a year's rebuy suggestions have gone stale (not on every visit).
 function persistStockbase(obj) {
@@ -1244,7 +1257,7 @@ function renderTagQuick(term) {
   box.innerHTML = chips || '';
   box.querySelectorAll('.tq-chip').forEach(b => b.addEventListener('click', () => {
     const t = b.classList.contains('on') ? '' : b.dataset.tag;
-    searchTerm = t;
+    setSearchTerm(t);
     const inp = document.getElementById('search');
     if (inp) inp.value = t;
     renderSidebar();
@@ -6957,6 +6970,7 @@ function arrApplyLead() {
 
 function setView(v) {
   currentView = v;
+  savePref('tp_view', v);
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
   document.getElementById('sidebar').style.display = v === 'plan' ? '' : 'none';
   document.getElementById('main').classList.toggle('plan', v === 'plan');
@@ -7146,8 +7160,8 @@ async function loadYear(year) {
   const wantSup = currentSupplier || loadPref('tp_supplier', null);
   currentSupplier = (wantSup && M.suppliers.some(s => s.name === wantSup))
     ? wantSup : (M.suppliers[0] && M.suppliers[0].name);
-  searchTerm = '';   // statusFilter persists across years (saved in localStorage)
-  const sb = document.getElementById('search'); if (sb) sb.value = '';
+  // the search (like statusFilter) carries across years, so a product code stays in view
+  const sb = document.getElementById('search'); if (sb) sb.value = searchTerm;
   const ys = document.getElementById('year-select'); if (ys) ys.value = YEAR;
   refreshBuildYearBtn();   // button targets the year AFTER the one now being viewed
   try { localStorage.setItem('tp_year', YEAR); } catch {}
@@ -7189,6 +7203,13 @@ async function loadYear(year) {
   REBUY_STALE = stockChainChanged && PROPOSED.size > 0;
   computeAll();                    // band reflects the proposed layer
   await refreshLyCache();          // prior-year aggregates for the supplier cards' vs-LY deltas
+  // a carried-over search: if the kept supplier has no match this year, jump to the
+  // first supplier that does (after computeAll, as tag searches read computed figures)
+  const term = searchTerm.toLowerCase();
+  if (term && !M.suppliers.some(s => s.name === currentSupplier && supplierMatches(s, term))) {
+    const hit = M.suppliers.find(s => supplierMatches(s, term));
+    if (hit) currentSupplier = hit.name;
+  }
   renderSidebar(); setView(currentView);   // stay on the page the user was viewing (Plan or Summary)
   if (seasonActiveFor(YEAR) && SEASON().useWeather) applySeasonality();   // refine with live weather (never touches proposals)
   document.title = `${YEAR} Tradeplan — week ${SETTINGS.current_week}`;
@@ -7214,7 +7235,7 @@ async function init() {
     if (item) { currentSupplier = item.dataset.sup; savePref('tp_supplier', currentSupplier); renderSidebar(); renderPlan(); }
   });
   document.getElementById('search').addEventListener('input', e => {
-    searchTerm = e.target.value.trim();
+    setSearchTerm(e.target.value.trim());
     renderSidebar();
     if (currentView === 'plan') renderPlan();
   });
@@ -7398,7 +7419,9 @@ async function init() {
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveNow(); }
   });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') savePlanPlace(); });
   await loadYear(active);
+  restorePlanPlace();   // back to the rows the user was looking at when the app was closed
 }
 
 init();
