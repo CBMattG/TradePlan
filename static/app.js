@@ -4123,12 +4123,14 @@ function openBuyingDialog() {
 // Products the Buying Report no longer lists. One that was on an earlier report (a known
 // Live / Not Live status) with no stock, no open orders and no outstanding purchases is
 // ticked for the Graveyard; one still holding stock or orders is listed but left unticked.
-// "Unknown" products were never on the report (e.g. a new NPD line) and are left alone.
+// "Unknown" products were never on the report, and an NPD line launching this year or
+// later isn't on it yet (it is entered as Live) — both are left alone.
 function buyingGraveyardCandidates(p) {
   const cur = SETTINGS.current_week || 1;
   const out = [];
   for (const s of M.skus) {
     if (p.map[s.code] || isRemoved(s) || (s.status !== 'Live' && s.status !== 'Not Live')) continue;
+    if (s.npd_year && +s.npd_year >= +YEAR) continue;
     const stock = +s.stock_now || 0, osp = +s.os_purchases || 0;
     const ord = (ORDERS[s.id] || []).slice(cur - 1).reduce((a, b) => a + (+b || 0), 0);
     const why = [stock > 0 ? `${Math.round(stock).toLocaleString('en-GB')} in stock` : null,
