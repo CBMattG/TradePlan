@@ -12,7 +12,8 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 - `static/app.js` — one large (~7.3k-line) vanilla-JS calc engine (mirrors the Excel formulas) + all UI. No framework/bundler.
 - `static/index.html`, `static/style.css`.
 - `data/<year>/` — per-year `master.json`, `orders.json`, `proposed.json`, `orders_imported.json`; `stockbase.json` on forecast years only.
-  Global: `data/years.json`, `settings.json`, `po_websa.json`, `po_containers.json`, `channel_index.json`, `changelog.json` + `change_snapshots/`, `configs/` (Save config).
+  Global: `data/years.json`, `settings.json`, `po_websa.json`, `po_containers.json`, `channel_index.json`, `channel_sales.json`, `changelog.json` + `change_snapshots/`, `configs/` (Save config).
+- **Channel history:** `channel_sales.json` (server-side only, ~6 MB) = units + £ per plan week (`"2026|45"`) × product × customer, seeded from the daily sales-by-channel exports (1 Dec 2025 – 6 Nov 2026) and extended by each **Sales by Account** upload (the File Imports tile, id `chanidx`, which runs the weekly-sales flow: `aggregate_wksales` detects the `cmp_product`/`soh_cusndcode` layout and `apply-wksales` also replaces that week's history slot). `channel_index.json` is then **rebuilt from the last 52 weeks** (`rebuild_channel_index`, basis `52wk`) — don't hand-edit it; the legacy `/api/parse-channelindex` snapshot import still exists but has no tile.
 
 ## Run
     python server.py                     # or run.bat → http://localhost:8765

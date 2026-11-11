@@ -495,6 +495,9 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .sl-pin { stroke: var(--accent); stroke-width: 2; opacity: .6; vector-effect: non-scaling-stroke; }
 #wh-chart .sl-hit { cursor: pointer; }
 .sl-fc { fill: none; stroke: var(--fc-line); stroke-width: 1.4; vector-effect: non-scaling-stroke; opacity: .9; }
+.sl-large { fill: none; stroke: #e8892b; stroke-width: 1.7; vector-effect: non-scaling-stroke; }
+.sl-large-area { fill: #e8892b; opacity: .14; }
+.st-large b:first-child { color: #c96d14; }
 .sl-stock { fill: none; stroke: var(--stock-line); stroke-width: 1.5; stroke-dasharray: 4 2.5; vector-effect: non-scaling-stroke; opacity: .9; }
 .sl-cont circle { fill: #16a085; }
 .sl-cont { cursor: default; }
@@ -507,6 +510,7 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 .sum-legend span::before { content: ''; display: inline-block; width: 14px; height: 0; border-top: 2px solid currentColor; margin-right: 5px; }
 .sum-legend .lg-line::before { border-top-color: var(--accent); }
 .sum-legend .lg-fc::before { border-top-color: var(--fc-line); }
+.sum-legend .lg-large::before { border-top: 2px solid #e8892b; background: rgba(232, 137, 43, .18); }
 .sum-legend .lg-stock::before { border-top: 2px dashed var(--stock-line); }
 .sum-legend .lg-cont::before { width: 9px; height: 9px; border: 0; border-radius: 50%; background: #16a085; margin-right: 5px; }
 .sum-legend .lg-cur::before { border-top: 2px dashed var(--spark-cur); }
@@ -578,6 +582,10 @@ h2.sect { font-size: 14px; margin: 16px 0 6px; color: var(--dim); font-weight: 6
 [data-theme="dark"] .wh-npd b { color: #b9a6f0; }
 .wh-wk select { margin-left: 6px; padding: 5px 8px; font: inherit; font-size: 12.5px; border-radius: var(--r-ctl, 8px);
   border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
+/* matches the week picker beside it (same pill tokens, so dark mode follows) */
+.wh-export { padding: 5px 11px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  border-radius: var(--r-ctl, 8px); border: 1px solid var(--pill-brd); background: var(--pill-bg); color: var(--text); }
+.wh-export:hover { border-color: var(--text); }
 .wh-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 12px; }
 @media (max-width: 900px) { .wh-lists { grid-template-columns: 1fr; } }
 .wh-col { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
@@ -738,6 +746,8 @@ dialog h2 { margin: 0 0 10px; font-size: 16px; }
 .sku-stat b { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
 .sku-warn { font-size: 11.5px; line-height: 1.45; padding: 6px 10px; margin-bottom: 8px; border-radius: 6px;
   background: var(--accent-soft); border: 1px solid var(--glass-brd); }
+.sku-warn .sku-pin { display: flex; align-items: flex-start; gap: 6px; margin-top: 6px; cursor: pointer; }
+.sku-warn .sku-pin input { margin: 2px 0 0; flex: none; }
 /* Summary: ranking + filtering the per-supplier blocks */
 .sum-suptools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin: 0 0 16px;
   padding: 9px 13px; border: 1px solid var(--glass-brd); border-radius: var(--r-card);

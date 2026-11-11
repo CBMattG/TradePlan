@@ -659,7 +659,7 @@ function computeAll() {
 function aggregateOver(skus) {
   const bySup = new Map();
   const g = { sales: zeros(), units: zeros(), fob: zeros(), cbm: zeros(), shv: zeros(),
-              fcUnits: zeros(), fcSales: zeros(), sold: zeros(), pallet: zeros(), stillage: zeros(), racking: zeros() };
+              fcUnits: zeros(), fcSales: zeros(), sold: zeros(), pallet: zeros(), stillage: zeros(), racking: zeros(), largePallet: zeros() };
   const cSales = zeros(), cSold = zeros();         // sales value / selling units with committed + proposed orders
   let propUnits = 0, propFob = 0, propCbm = 0;     // proposed-rebuy additions (purely additive)
   for (const sku of skus) {
@@ -686,6 +686,7 @@ function aggregateOver(skus) {
         if (sku.pallet_type === 'Pallet') g.pallet[w] += sp;
         else if (sku.pallet_type === 'Stillage') g.stillage[w] += sp;
         else if (sku.pallet_type === 'Racking') g.racking[w] += sp;
+        else if (sku.pallet_type === 'Large Pallet') g.largePallet[w] += sp;
       }
     }
     // proposed-rebuy uplift: sales come from the pre-simulated combined run (RESC),
@@ -708,6 +709,8 @@ function aggregateOver(skus) {
   g.rackUseTotal = g.pallet.map((p, w) => (p + g.racking[w]) / rackTotal);
   g.stillUseWebsa = g.stillage.map(v => v / cap.stillage_websa);
   g.stillUseTotal = g.stillage.map(v => v / stillTotal);
+  const largeTotal = +cap.large_pallet || 0;              // 0 until the capacity is entered in Settings
+  g.largeUse = g.largePallet.map(v => largeTotal > 0 ? v / largeTotal : 0);
   const sum = a => a.reduce((x, y) => x + y, 0);
   g.totSales = sum(g.sales); g.totFob = sum(g.fob); g.totUnits = sum(g.units);
   g.totCbm = sum(g.cbm); g.totContainers = g.totCbm / SETTINGS.container_cbm;
@@ -721,6 +724,7 @@ function aggregateOver(skus) {
   g.peakShv = Math.max(...g.shv); g.peakShvWk = g.shv.indexOf(g.peakShv) + 1;
   g.peakRack = Math.max(...g.rackUseTotal); g.peakRackWk = g.rackUseTotal.indexOf(g.peakRack) + 1;
   g.peakStill = Math.max(...g.stillUseTotal); g.peakStillWk = g.stillUseTotal.indexOf(g.peakStill) + 1;
+  g.peakLarge = Math.max(...g.largeUse); g.peakLargeWk = g.largeUse.indexOf(g.peakLarge) + 1;
   for (const s of bySup.values()) {
     s.forecastValue = s.fcValue;
     s.stockedPct = s.covDen > 0 ? (s.covNum / s.covDen) * 100 : null;
@@ -1943,12 +1947,15 @@ function initSparkTooltip() {
     } else if (sl.dataset.kind === 'cap') {
       const w = +sl.dataset.w, pallet = +sl.dataset.pallet, racking = +sl.dataset.racking, stillage = +sl.dataset.stillage;
       const ruse = +sl.dataset.ruse, suse = +sl.dataset.suse;
+      const large = +sl.dataset.large || 0, hasLuse = (sl.dataset.luse || '') !== '', luse = hasLuse ? +sl.dataset.luse : 0;
       const rcls = ruse > 100 ? 'st-var-down' : 'st-var-up', scls = suse > 100 ? 'st-var-down' : 'st-var-up';
       tip.innerHTML = `<div class="st-wk">Week ${w} · w/c ${weekDate(w)}</div>`
         + `<div class="st-val st-sales">Pallets &amp; racking: <b>${fmtU(pallet + racking)}</b> spaces · <b class="${rcls}">${ruse}%</b> of capacity</div>`
         + (racking ? `<div class="st-val"><span class="st-lywk">${fmtU(pallet)} pallet + ${fmtU(racking)} racking</span></div>` : '')
         + `<div class="st-val st-stock">Stillages: <b>${fmtU(stillage)}</b> spaces · <b class="${scls}">${suse}%</b> of capacity</div>`
-        + (ruse > 100 || suse > 100 ? `<div class="st-cum st-note st-var-down">over capacity this week ✗</div>` : '');
+        + (large || hasLuse ? `<div class="st-val st-large">Large pallets: <b>${fmtU(large)}</b> spaces`
+            + (hasLuse ? ` · <b class="${luse > 100 ? 'st-var-down' : 'st-var-up'}">${luse}%</b> of capacity` : ' · <i>no capacity set</i>') + `</div>` : '')
+        + (ruse > 100 || suse > 100 || luse > 100 ? `<div class="st-cum st-note st-var-down">over capacity this week ✗</div>` : '');
     } else {
       const w = +sl.dataset.w, sales = +sl.dataset.sales, fc = +sl.dataset.fc, stock = +sl.dataset.stock, cont = +sl.dataset.cont;
       const csales = +sl.dataset.csales, cfc = +sl.dataset.cfc;
@@ -2682,12 +2689,14 @@ function renderSummaryBody() {
       ['Containers', g.containers, fmt1],
       ['Stock holding £', g.shv, fmtGBP],
       ['Pallet spaces', g.pallet, fmtU],
+      ['Large pallet spaces', g.largePallet, fmtU],
       ['Stillage spaces', g.stillage, fmtU],
       ['Racking spaces', g.racking, fmtU],
       ['Racking use (WEBSA)', g.rackUseWebsa, fmtPct],
       ['Racking use (total)', g.rackUseTotal, fmtPct],
       ['Stillage use (WEBSA)', g.stillUseWebsa, fmtPct],
       ['Stillage use (total)', g.stillUseTotal, fmtPct],
+      ['Large pallet use', g.largeUse, fmtPct],
     ])}
     <h2 class="sect">Quarterly sales${filtered ? ' — selection' : ' vs history'}</h2>
     ${filtered ? '<p class="muted-note">Prior-year quarters are whole-plan actuals only, so they are left out while a filter is on.</p>' : ''}${qt}
@@ -2706,14 +2715,16 @@ let WH_PIN = 0;     // clicked week: holds WH_WEEK against hover until clicked a
 const WH_FIND = { pal: '', still: '' };   // per-table search (code / name / supplier)
 let WH_NPD = false;                       // narrow both tables + the chart to NPD lines
 const WH_TOP = 15;  // leaderboard length — always rendered, so the panels never resize
-// Capacity utilisation chart — same visual language as salesChart. Two lines:
-// pallets+racking and stillage, each as a % of their capacity, with a dashed 100%
-// reference. Hit columns drive the shared hover tooltip (kind='cap').
+// Capacity utilisation chart — same visual language as salesChart. Pallets+racking and
+// stillage lines, plus large pallets as an orange shaded line (once a large-pallet
+// capacity is set), each as a % of its capacity, with a dashed 100% reference. Hit
+// columns drive the shared hover tooltip (kind='cap').
 function capacityChart(d, opt) {
   opt = opt || {};
   const W = 1000, H = opt.h || 150, padT = 12, padB = 22, n = d.rackUse.length;
   const innerH = H - padT - padB, base = padT + innerH;
-  const maxV = Math.max(1.05, ...d.rackUse, ...d.stillUse) * 1.05;
+  const large = !!(d.largeUse && d.largeTotal > 0);       // no capacity → no % to plot
+  const maxV = Math.max(1.05, ...d.rackUse, ...d.stillUse, ...(large ? d.largeUse : [0])) * 1.05;
   const x = i => (i / (n - 1)) * W;
   const y = v => padT + (1 - v / maxV) * innerH;
   let rl = '', area = `M0 ${base.toFixed(1)}`;
@@ -2721,6 +2732,11 @@ function capacityChart(d, opt) {
   area += ` L${W} ${base.toFixed(1)} Z`;
   let sl2 = '';
   for (let i = 0; i < n; i++) sl2 += (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(d.stillUse[i]).toFixed(1) + ' ';
+  let ll = '', larea = `M0 ${base.toFixed(1)}`;
+  if (large) {
+    for (let i = 0; i < n; i++) { const px = x(i).toFixed(1), py = y(d.largeUse[i]).toFixed(1); ll += (i ? 'L' : 'M') + px + ' ' + py + ' '; larea += ` L${px} ${py}`; }
+    larea += ` L${W} ${base.toFixed(1)} Z`;
+  }
   const capY = y(1).toFixed(1);
   const capLine = `<line class="cap-100" x1="0" y1="${capY}" x2="${W}" y2="${capY}"/>`
     + `<text class="sl-ax cap-100-lbl" x="4" y="${(+capY - 3).toFixed(1)}" text-anchor="start">capacity 100%</text>`;
@@ -2742,10 +2758,12 @@ function capacityChart(d, opt) {
   for (let i = 0; i < n; i++) {
     hits += `<rect class="sl-hit" x="${(x(i) - hw / 2).toFixed(1)}" y="0" width="${hw.toFixed(1)}" height="${H}" fill="transparent"`
       + ` data-kind="cap" data-w="${i + 1}" data-pallet="${Math.round(d.pallet[i])}" data-racking="${Math.round(d.racking[i])}"`
-      + ` data-stillage="${Math.round(d.stillage[i])}" data-ruse="${(d.rackUse[i] * 100).toFixed(0)}" data-suse="${(d.stillUse[i] * 100).toFixed(0)}"></rect>`;
+      + ` data-stillage="${Math.round(d.stillage[i])}" data-ruse="${(d.rackUse[i] * 100).toFixed(0)}" data-suse="${(d.stillUse[i] * 100).toFixed(0)}"`
+      + ` data-large="${Math.round((d.largePallet || [])[i] || 0)}" data-luse="${large ? (d.largeUse[i] * 100).toFixed(0) : ''}"></rect>`;
   }
+  const largeSvg = large ? `<path class="sl-large-area" d="${larea}"/><path class="sl-large" d="${ll}"/>` : '';
   return `<svg class="saleschart" viewBox="0 0 ${W} ${H}">${grid}${capLine}<path class="sl-area" d="${area}"/>`
-    + `<path class="sl-line" d="${rl}"/><path class="sl-stock" d="${sl2}"/>${curLine}${pinLine}${axis}${hits}</svg>`;
+    + `<path class="sl-line" d="${rl}"/>${largeSvg}<path class="sl-stock" d="${sl2}"/>${curLine}${pinLine}${axis}${hits}</svg>`;
 }
 // ---- product selection: each leaderboard has its own search over code / name / supplier ----
 function whHolds(sku) { return sku.fpq > 0 && !!sku.pallet_type; }   // takes warehouse space at all
@@ -2779,14 +2797,15 @@ function whSelectedIds() {
 // Weekly space series for a subset (null = all). Mirrors the computeAll maths exactly,
 // so the unfiltered result equals AGG.g.
 function whSeries(ids) {
-  const pallet = zeros(), racking = zeros(), stillage = zeros();
+  const pallet = zeros(), racking = zeros(), stillage = zeros(), largePallet = zeros();
   let products = 0;
   for (const sku of M.skus) {
     if (!whHolds(sku)) continue;
     if (ids && !ids.has(sku.id)) continue;
     const r = RES.get(sku.id); if (!r) continue;
     products++;
-    const tgt = sku.pallet_type === 'Stillage' ? stillage : sku.pallet_type === 'Racking' ? racking : pallet;
+    const tgt = sku.pallet_type === 'Stillage' ? stillage : sku.pallet_type === 'Racking' ? racking
+              : sku.pallet_type === 'Large Pallet' ? largePallet : pallet;
     for (let w = 0; w < WEEKS; w++) tgt[w] += Math.ceil(r.stock[w] / sku.fpq);
   }
   const cap = SETTINGS.capacities || {};
@@ -2794,10 +2813,13 @@ function whSeries(ids) {
   const stillTotal = (+cap.stillage_websa || 0) + (+cap.stillage_lough || 0) + (+cap.stillage_express || 0) + (+cap.stillage_free || 0);
   const rackUse = pallet.map((p, w) => rackTotal > 0 ? (p + racking[w]) / rackTotal : 0);
   const stillUse = stillage.map(v => stillTotal > 0 ? v / stillTotal : 0);
-  const peakRack = Math.max(...rackUse), peakStill = Math.max(...stillUse);
-  return { pallet, racking, stillage, rackUse, stillUse, rackTotal, stillTotal, products,
+  const largeTotal = +cap.large_pallet || 0;
+  const largeUse = largePallet.map(v => largeTotal > 0 ? v / largeTotal : 0);
+  const peakRack = Math.max(...rackUse), peakStill = Math.max(...stillUse), peakLarge = Math.max(...largeUse);
+  return { pallet, racking, stillage, largePallet, rackUse, stillUse, largeUse, rackTotal, stillTotal, largeTotal, products,
            peakRack, peakRackWk: rackUse.indexOf(peakRack) + 1,
-           peakStill, peakStillWk: stillUse.indexOf(peakStill) + 1 };
+           peakStill, peakStillWk: stillUse.indexOf(peakStill) + 1,
+           peakLarge, peakLargeWk: largeUse.indexOf(peakLarge) + 1 };
 }
 // Ranked products for one side in one week, honouring that side's search.
 function whRank(week, side) {
@@ -2819,7 +2841,7 @@ function whRowsHtml(arr, cls, searching) {
   let html = top.map(r => `<div class="wh-row">`
     + `<div class="wh-bar-wrap"><div class="wh-bar ${cls}" style="width:${(r.spaces / max * 100).toFixed(1)}%"></div>`
     + `<span class="wh-code">${esc(r.code)}</span><span class="wh-nm" title="${esc(r.supplier)}">${esc(r.name)}</span></div>`
-    + `<span class="wh-sp"><b>${fmtU(r.spaces)}</b> ${r.type === 'Racking' ? 'rack' : 'sp'}</span></div>`).join('');
+    + `<span class="wh-sp"><b>${fmtU(r.spaces)}</b> ${r.type === 'Racking' ? 'rack' : r.type === 'Large Pallet' ? 'LP' : 'sp'}</span></div>`).join('');
   if (!arr.length) html = `<div class="wh-row wh-none"><div class="muted-note">${searching ? 'Nothing matching this search holds stock in this week.' : 'No stock held in this week.'}</div></div>`;
   const filled = arr.length ? top.length : 1;
   for (let i = filled; i < WH_TOP; i++)
@@ -2840,7 +2862,7 @@ function whColShell(side, title, ph) {
 function renderWarehouse() {
   const cap = SETTINGS.capacities || {};
   const g = AGG.g;
-  const combo = g.pallet.map((p, w) => p + g.racking[w] + g.stillage[w]);
+  const combo = g.pallet.map((p, w) => p + g.racking[w] + g.stillage[w] + g.largePallet[w]);
   const peakW = combo.indexOf(Math.max(...combo)) + 1;
   const defW = (WH_WEEK >= 1 && WH_WEEK <= WEEKS) ? WH_WEEK : (highlightWeek() || peakW);
   WH_WEEK = defW;
@@ -2848,6 +2870,7 @@ function renderWarehouse() {
     `<option value="${i + 1}"${i + 1 === defW ? ' selected' : ''}>Week ${i + 1} · w/c ${weekDate(i + 1)}</option>`).join('');
   const legend = `<div class="sum-legend">
     <span class="lg-line">Pallets &amp; racking (% of capacity)</span>
+    <span class="lg-large">Large pallets (% of capacity)${(+cap.large_pallet || 0) > 0 ? '' : ' — set the capacity in Settings to plot'}</span>
     <span class="lg-stock">Stillages (% of capacity)</span>
     <span class="lg-cap">100% capacity</span>
     ${highlightWeek() ? '<span class="lg-cur">Current week</span>' : ''}
@@ -2866,9 +2889,10 @@ function renderWarehouse() {
       <span class="wh-follow" id="wh-follow"></span>
       <label class="wh-npd" title="Show only products tagged NPD for ${YEAR}"><input type="checkbox" id="wh-npd"${WH_NPD ? ' checked' : ''}> <b>NPD</b> only</label>
       <label class="wh-wk">Week <select id="wh-week">${weekOpts}</select></label>
+      <button type="button" id="wh-export-cartons" class="wh-export" title="Export every product's carton sizes, storage type and maximum load quantity to Excel">Export carton data</button>
     </div>
     <div id="wh-lists" class="wh-lists">
-      ${whColShell('pal', 'Pallets &amp; racking', 'search code / product / supplier…')}
+      ${whColShell('pal', 'Pallets, large pallets &amp; racking', 'search code / product / supplier…')}
       ${whColShell('still', 'Stillages', 'search code / product / supplier…')}
     </div>
     <h2 class="sect" id="wh-table-title">Weekly capacity totals — ${YEAR}</h2>
@@ -2881,15 +2905,17 @@ function renderWarehouse() {
     const ids = whSelectedIds();
     const s = whSeries(ids);
     document.getElementById('wh-chart').innerHTML = capacityChart(
-      { rackUse: s.rackUse, stillUse: s.stillUse, pallet: s.pallet, racking: s.racking, stillage: s.stillage },
+      { rackUse: s.rackUse, stillUse: s.stillUse, pallet: s.pallet, racking: s.racking, stillage: s.stillage,
+        largePallet: s.largePallet, largeUse: s.largeUse, largeTotal: s.largeTotal },
       { h: 150, pin: WH_PIN });
     document.getElementById('wh-cards').innerHTML = [
       [(s.peakRack * 100).toFixed(0) + '%', 'Peak pallet/racking use (W' + s.peakRackWk + ')'],
+      [s.largeTotal > 0 ? (s.peakLarge * 100).toFixed(0) + '%' : '—', s.largeTotal > 0 ? 'Peak large pallet use (W' + s.peakLargeWk + ')' : 'Large pallet use (no capacity set)'],
       [(s.peakStill * 100).toFixed(0) + '%', 'Peak stillage use (W' + s.peakStillWk + ')'],
-      [Math.round(Math.max(0, ...s.pallet)).toLocaleString(), 'Peak pallet spaces'],
-      [Math.round(Math.max(0, ...s.stillage)).toLocaleString(), 'Peak stillage spaces'],
-      [Math.round(s.rackTotal).toLocaleString(), 'Racking capacity'],
-      [Math.round(s.stillTotal).toLocaleString(), 'Stillage capacity'],
+      // peak spaces with the capacity alongside — six cards keep to one row
+      [Math.round(Math.max(0, ...s.pallet)).toLocaleString(), `Peak pallet spaces · of ${Math.round(s.rackTotal).toLocaleString()} racking`],
+      [Math.round(Math.max(0, ...s.largePallet)).toLocaleString(), s.largeTotal > 0 ? `Peak large pallet spaces · of ${Math.round(s.largeTotal).toLocaleString()}` : 'Peak large pallet spaces · capacity not set'],
+      [Math.round(Math.max(0, ...s.stillage)).toLocaleString(), `Peak stillage spaces · of ${Math.round(s.stillTotal).toLocaleString()}`],
     ].map(([v, l]) => `<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
     const terms = ['pal', 'still'].filter(k => whQuery(k)).map(k => `“${esc(WH_FIND[k].trim())}”`);
     if (WH_NPD) terms.unshift(`<b>NPD ${YEAR}</b>`);
@@ -2906,8 +2932,10 @@ function renderWarehouse() {
     document.getElementById('wh-table').innerHTML = weeklyTable([
       ['Pallet spaces', s.pallet, fmtU],
       ['Racking spaces', s.racking, fmtU],
+      ['Large pallet spaces', s.largePallet, fmtU],
       ['Stillage spaces', s.stillage, fmtU],
       ['Pallet/racking use', s.rackUse, fmtPct],
+      ['Large pallet use', s.largeUse, fmtPct],
       ['Stillage use', s.stillUse, fmtPct],
     ]);
     const clr = document.getElementById('wh-sel-clear');
@@ -2962,6 +2990,7 @@ function renderWarehouse() {
       drawView(); drawRows();
     });
   }
+  document.getElementById('wh-export-cartons').addEventListener('click', exportCartons);
   document.getElementById('wh-npd').addEventListener('change', e => {
     WH_NPD = e.target.checked;
     drawView(); drawRows();
@@ -3179,7 +3208,7 @@ const IMPORT_DEFS = [
   { id: 'asp',    label: 'Sales / ASP',    input: 'asp-file',        when: () => (SETTINGS && SETTINGS.asp_updated_at) || null },
   { id: 'landed', label: 'Landed Costs',   input: 'landed-file',     when: () => (SETTINGS && SETTINGS.landed_updated_at) || null },
   { id: 'duty',   label: 'Duty Rates',     input: 'duty-file',       when: () => (SETTINGS && SETTINGS.duty_updated_at) || null },
-  { id: 'chanidx', label: 'Channel Index', input: 'chanidx-file',   when: () => (CHANNEL_INDEX && CHANNEL_INDEX.importedAt) || null },
+  { id: 'chanidx', label: 'Sales by Account', input: 'chanidx-file', when: () => (SETTINGS && SETTINGS.sba_updated_at) || (CHANNEL_INDEX && CHANNEL_INDEX.importedAt) || null },
   { id: 'cartons', label: 'Carton Sizes',  input: 'cartons-file',   when: () => (SETTINGS && SETTINGS.cartons_updated_at) || null },
 ];
 const IMPORT_DEF = Object.fromEntries(IMPORT_DEFS.map(d => [d.id, d]));
@@ -3286,6 +3315,8 @@ function openSettings() {
   }
   { const P = palletDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) el.value = P[k]; }); }
   { const S = stillageDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('sd-' + k); if (el) el.value = S[k]; }); }
+  { const L = largePalletDims(); ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('lp-' + k); if (el) el.value = L[k]; }); }
+  { const el = document.getElementById('cap-large_pallet'); if (el) el.value = +SETTINGS.capacities.large_pallet || 0; }
   coverDraft = (SETTINGS.cover_bands || defaultCoverBands()).map(b => ({ max: b.max, bg: b.bg }));
   if (!coverDraft.length || coverDraft[coverDraft.length - 1].max !== null)
     coverDraft.push({ max: null, bg: '#c27ba0' });   // ensure a catch-all exists
@@ -3428,6 +3459,8 @@ function applySettings() {
   }
   { const pd = SETTINGS.pallet_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('pd-' + k); if (el) pd[k] = parseFloat(el.value) || PALLET_DEFAULT[k]; }); SETTINGS.pallet_dims = pd; }
   { const sd = SETTINGS.stillage_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('sd-' + k); if (el) sd[k] = parseFloat(el.value) || STILLAGE_DEFAULT[k]; }); SETTINGS.stillage_dims = sd; }
+  { const ld = SETTINGS.large_pallet_dims || {}; ['l', 'w', 'h', 'maxKg'].forEach(k => { const el = document.getElementById('lp-' + k); if (el) ld[k] = parseFloat(el.value) || LARGE_PALLET_DEFAULT[k]; }); SETTINGS.large_pallet_dims = ld; }
+  { const el = document.getElementById('cap-large_pallet'); if (el) SETTINGS.capacities.large_pallet = parseFloat(el.value) || 0; }
   // normalise cover bands: finite thresholds sorted ascending, single catch-all last
   const cat = coverDraft.find(b => b.max === null || b.max === undefined || b.max === '');
   const finite = coverDraft.filter(b => !(b.max === null || b.max === undefined || b.max === ''))
@@ -3486,6 +3519,69 @@ function applySettings() {
   // are LEFT ALONE (just flagged stale) — only "Run rebuy" may rebuild them.
   if (PROPOSED && PROPOSED.size) REBUY_STALE = true;
   applySeasonality();
+}
+/* ---- recalculate every product's storage type + max load qty from its cartons ----
+   Runs the carton fit (pallet → large pallet → stillage, smallest that takes it) for every
+   product with carton sizes, in every plan year, against the dimensions on screen. Products
+   too big for every space keep their hand-entered figure. One revertable change. */
+async function recalcStorageFromCartons() {
+  applySettings();                                   // use the dimensions as typed in the form
+  const status = document.getElementById('save-status');
+  status.textContent = 'Recalculating storage…';
+  const plan = {}, tally = { withCartons: 0, oversize: 0, toLarge: 0, typeChanged: 0, qtyChanged: 0, manualReplaced: 0 };
+  const byType = {};
+  for (const y of YEARS) {
+    let skus;
+    if (String(y) === String(YEAR)) skus = M.skus;
+    else {
+      try { const d = await (await fetch('/api/data?year=' + encodeURIComponent(y))).json(); skus = (d.master && d.master.skus) || []; }
+      catch { continue; }
+    }
+    const items = [];
+    for (const sku of skus) {
+      const cartons = cartonList(sku).filter(c => +c.l > 0 && +c.w > 0 && +c.h > 0);
+      if (!cartons.length) continue;
+      tally.withCartons++;
+      const m = cartonMetrics(cartons, sku.pack_size || 1);
+      if (m.oversize) { tally.oversize++; continue; }          // needs a hand-entered qty — leave it
+      const type = cartonStorageType(m, sku), qty = cartonLoadQty(m, sku.load_basis !== 'volume');
+      if (String(y) === String(YEAR)) byType[type] = (byType[type] || 0) + 1;
+      const typeCh = type !== (sku.pallet_type || ''), qtyCh = Math.round(+sku.fpq || 0) !== qty;
+      if (!typeCh && !qtyCh && sku.fpq_src === 'calc') continue;
+      if (typeCh) tally.typeChanged++;
+      if (typeCh && type === 'Large Pallet') tally.toLarge++;
+      if (qtyCh) tally.qtyChanged++;
+      if (sku.fpq_src === 'manual') tally.manualReplaced++;
+      items.push({ code: sku.code, palletType: type, fpq: qty });
+    }
+    if (items.length) plan[y] = items;
+  }
+  const yrs = Object.keys(plan), total = yrs.reduce((a, y) => a + plan[y].length, 0);
+  status.textContent = '';
+  if (!total) { alert(`Every product with carton sizes already matches its calculated storage type and loading quantity (${tally.withCartons} checked).`); return; }
+  const mix = Object.entries(byType).map(([t, n]) => `${n} ${t}`).join(', ');
+  if (!confirm(`Recalculate storage from carton sizes?\n\n`
+      + `${tally.withCartons} product-years have carton sizes. ${total} will change, across ${yrs.join(', ')}:\n`
+      + `• ${tally.typeChanged} change storage type (${tally.toLarge} move to Large Pallet)\n`
+      + `• ${tally.qtyChanged} change max load quantity\n`
+      + (tally.manualReplaced ? `• ${tally.manualReplaced} replace a hand-entered quantity\n` : '')
+      + (tally.oversize ? `• ${tally.oversize} are too big for every space and keep their hand-entered figure\n` : '')
+      + (mix ? `\n${YEAR} with cartons after this: ${mix}.\n` : '')
+      + `\nProducts without carton sizes are not touched. You can undo this from History.`)) return;
+  status.textContent = 'Saving storage types…';
+  try {
+    const r = await fetch('/api/apply-storage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ years: plan }) });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Recalculation failed: ' + (j.error || 'unknown')); return; }
+    const mine = plan[String(YEAR)] || [];
+    const byCode = new Map(mine.map(it => [it.code, it]));
+    for (const s of M.skus) {
+      const it = byCode.get(s.code); if (!it) continue;
+      s.pallet_type = it.palletType; s.fpq = it.fpq; s.fpq_src = 'calc';
+    }
+    computeAll(); setView(currentView);
+    status.textContent = `Storage recalculated — ${total} product-years updated`;
+  } catch (e) { status.textContent = ''; alert('Recalculation error: ' + e.message); }
 }
 async function restoreImportedOrders() {
   if (!confirm(`Replace ALL ${YEAR} order quantities with the ones imported from the Excel file? Your edits will be lost.`)) return;
@@ -4338,7 +4434,7 @@ function openCartonsImportDialog() {
     if (rec.pack > 1) packs++;
     const m = cartonMetrics(rec.cartons, rec.pack);
     const excel = +s.fpq || 0;
-    if (m.needsStillage) { nofit++; continue; }
+    if (m.beyondPallet) { nofit++; continue; }
     if (!excel) { noFpq++; continue; }
     const d = Math.abs(m.volumeQty - excel) / excel;
     if (d <= 0.05) agree++; else if (m.volumeQty > excel) higher++; else lower++;
@@ -4357,7 +4453,7 @@ function openCartonsImportDialog() {
     + `<div class="ci-cell"><b>${agree}</b><span>agree (±5%)</span></div>`
     + `<div class="ci-cell"><b>${higher}</b><span>calculated higher</span></div>`
     + `<div class="ci-cell"><b>${lower}</b><span>calculated lower</span></div>`
-    + `<div class="ci-cell"><b>${nofit}</b><span>wouldn't fit → Stillage</span></div>`
+    + `<div class="ci-cell"><b>${nofit}</b><span>wouldn't fit a pallet → large pallet / stillage</span></div>`
     + (noFpq ? `<div class="ci-cell"><b>${noFpq}</b><span>no qty in the app</span></div>` : '')
     + `</div>`;
   document.getElementById('cartons-apply').disabled = matched.length === 0;
@@ -4417,8 +4513,19 @@ async function wksalesFileChosen(e) {
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Could not read the file: ' + (j.error || 'unknown')); return; }
     const mWk = /wk\s*0?(\d{1,2})/i.exec(file.name);   // "WK28 Sales.xlsx" → 28
-    const week = mWk ? +mWk[1] : (+M.data_week || SETTINGS.current_week || 1);
-    WKSALES_PARSED = { map: j.sales || {}, fileRows: j.fileRows, fname: file.name, week };
+    // "Sales by Account 09-11-26.xlsx" is run on a Monday for the week just gone → that week
+    const mDt = /(\d{1,2})[-.](\d{1,2})[-.](\d{2,4})/.exec(file.name);
+    let week = mWk ? +mWk[1] : 0;
+    if (!week && mDt && M.week1_start) {
+      const yy = +mDt[3] < 100 ? 2000 + +mDt[3] : +mDt[3];
+      const [y1, m1, d1] = M.week1_start.split('-').map(Number);
+      const days = Math.round((Date.UTC(yy, +mDt[2] - 1, +mDt[1]) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+      const wk = Math.floor(days / 7);                   // the plan week BEFORE the file's date
+      if (wk >= 1 && wk <= WEEKS) week = wk;
+    }
+    if (!week) week = +M.data_week || SETTINGS.current_week || 1;
+    WKSALES_PARSED = { map: j.sales || {}, fileRows: j.fileRows, fname: file.name, week,
+      layout: j.layout || 'weekly', byCust: j.byCust || {}, customers: j.customers || {} };
     status.textContent = '';
     openWksalesDialog();
   } catch (err) { status.textContent = ''; alert('Read error: ' + err.message); }
@@ -4450,7 +4557,12 @@ function openWksalesDialog() {
   document.getElementById('wksales-summary').innerHTML =
     `<p>From <b>${esc(p.fname)}</b>: <b>${matched}</b> of ${YEAR}'s ${M.skus.length} products matched `
     + `(${p.fileRows} rows in the file) · <b>${Math.round(totalQty).toLocaleString('en-GB')}</b> units / <b>${fmtGBP(totalVal)}</b> to apply to <b>${esc(YEAR)}</b>.</p>`
-    + `<p class="muted-note">Units come straight from the file's <b>Qty TY</b>; each seller's weekly ASP (Sales ÷ Qty) is stamped `
+    + (p.layout === 'account'
+        ? `<p class="muted-note"><b>Sales by Account</b>: each product's units are the sum across its customers `
+          + `(${Object.keys(p.customers).length} accounts in the file). The week's sales by customer are also saved to the `
+          + `<b>channel history</b>, and every product's channel split is rebuilt from its last 52 weeks.</p>`
+        : '')
+    + `<p class="muted-note">Units come straight from the file's <b>${p.layout === 'account' ? 'Quantity' : 'Qty TY'}</b>; each seller's weekly ASP (Sales ÷ Qty) is stamped `
     + `on its ASP chip. Each product's closing stock for the week is chained as <b>previous week's closing + arrivals − sales</b> `
     + `(re-uploading a past week re-chains every later week too). Products not in the file keep their existing sales for the `
     + `chosen week (0 for a new week).</p>`
@@ -4475,15 +4587,22 @@ async function applyWksalesUpdates() {
   const status = document.getElementById('save-status'); status.textContent = 'Saving weekly sales…';
   try {
     const r = await fetch('/api/apply-wksales?year=' + encodeURIComponent(YEAR),
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week, units, wkasp }) });
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ week, units, wkasp,
+          channel: p.layout === 'account' ? { byCust: p.byCust, customers: p.customers } : undefined }) });
     const j = await r.json();
     if (!j.ok) { status.textContent = ''; alert('Update failed: ' + (j.error || 'unknown')); return; }
+    if (p.layout === 'account') {             // the channel index was rebuilt from the history
+      try { CHANNEL_INDEX = (await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json()).channelIndex || CHANNEL_INDEX; } catch {}
+      SETTINGS.sba_updated_at = new Date().toISOString();
+    }
     applyWksalesToMemory(units, wkasp, week, j.dataWeek, j.closedThrough);
     SETTINGS.wksales_updated_at = new Date().toISOString(); markDirty(); renderUploadAges();
     document.getElementById('wksales-dialog').close();
     document.getElementById('settings-dialog').close();
     status.textContent = `Week ${week} actual sales saved (${YEAR})`;
-    alert(`Week ${week} actual sales saved for ${YEAR}.\n\n${j.applied} products updated · actuals boundary now week ${j.dataWeek}.`);
+    alert(`Week ${week} actual sales saved for ${YEAR}.\n\n${j.applied} products updated · actuals boundary now week ${j.dataWeek}.`
+      + (j.channelRows != null ? `\nChannel history updated · channel split rebuilt from the last 52 weeks (${j.channelRows} customer shares).` : ''));
     WKSALES_PARSED = null;
   } catch (err) { status.textContent = ''; alert('Update error: ' + err.message); }
 }
@@ -4666,19 +4785,19 @@ function openSkuDialog(id) {
   document.getElementById('sku-f-space').innerHTML =
     skuNumField('cbm', 'Item CBM (m³)', sku.cbm, '0.0001', `<small>${srcPill(sku.cbm_src)}</small>`)
     + skuNumField('pack_size', 'Pack size', sku.pack_size || 1, '1', '<small>order-qty multiples</small>')
-    + skuNumField('fpq', `<span id="sku-fpq-lbl">Units per ${sku.pallet_type === 'Stillage' ? 'stillage' : 'pallet'}</span>`,
+    + skuNumField('fpq', `<span id="sku-fpq-lbl">Units per ${storageUnit(sku.pallet_type)}</span>`,
         sku.fpq, '1', `<small>${srcPill(sku.fpq_src)}</small>`)
-    + skuSelField('pallet_type', 'Pallet type', sku.pallet_type || 'Pallet', ['Pallet', 'Stillage', 'Racking']);
+    + skuSelField('pallet_type', 'Storage type', sku.pallet_type || 'Pallet', ['Pallet', 'Large Pallet', 'Stillage', 'Racking']);
   const cm = nC ? cartonMetrics(cartonList(sku), sku.pack_size || 1) : null;
   document.getElementById('sku-space-note').innerHTML =
     (nC ? `<b>${nC}</b> carton${nC > 1 ? 's' : ''} on file: ${cartonList(sku).map(c => `${c.l}×${c.w}×${c.h}${c.kg ? ` @${c.kg}kg` : ''}`).join(', ')} cm`
-        + (cm ? ` → calculated CBM <b>${cm.cbm.toFixed(4)}</b>${cm.needsStillage
-          ? (cm.oversize ? ' · <b>too big for a pallet or a stillage</b>'
-             : ` · too big for a pallet → <b>${cm.stillQty}</b>/stillage by volume${cm.hasWeight ? `, <b>${cm.stillEffQty}</b> weight-limited` : ''}`)
+        + (cm ? ` → calculated CBM <b>${cm.cbm.toFixed(4)}</b>${cm.beyondPallet
+          ? (cm.oversize ? ' · <b>too big for a pallet, large pallet or stillage</b>'
+             : ` · too big for a pallet → <b>${cm.bigQty}</b>/${storageUnit(cm.storage)} by volume${cm.hasWeight ? `, <b>${cm.bigEffQty}</b> weight-limited` : ''}`)
           : ` · <b>${cm.volumeQty}</b>/pallet by volume${cm.hasWeight ? `, <b>${cm.effWeightQty}</b> weight-limited` : ''}`}` : '')
         : 'No carton dimensions on file.')
     + ` <button type="button" id="sku-cartons-btn">Edit carton sizes…</button>`
-    + `<div class="muted-note">Warehouse space uses <b>units per ${sku.pallet_type === 'Stillage' ? 'stillage' : 'pallet'}</b> above, not the CBM.</div>`;
+    + `<div class="muted-note">Warehouse space uses <b>units per ${storageUnit(sku.pallet_type)}</b> above, not the CBM.</div>`;
 
   // --- stock + measured stats ---
   document.getElementById('sku-f-stock').innerHTML =
@@ -4711,7 +4830,9 @@ function openSkuDialog(id) {
     + (mode === 'seasonality' ? ` at <b>${(seasonStrengthFor(YEAR) * 100).toFixed(0)}%</b> strength` : '')
     + `, so the <i>displayed</i> forecast is re-modelled from this baseline rather than shown as typed.`
     + ` The numbers below still set the level the model anchors on — for a brand-new product they drive it entirely.`
-    + ` Set ${YEAR} to <b>Original</b> in Settings → Forecast to plan these weeks literally.</div>`;
+    + ` Tick below to keep <i>this</i> product exactly as typed, or set ${YEAR} to <b>Original</b> in Settings → Forecast to plan every product literally.`
+    + `<label class="sku-pin"><input type="checkbox" id="sku-fc-pin"${sku.fc_pinned ? ' checked' : ''}>`
+    + ` <b>Use these weekly numbers as typed</b> — pin this product's forecast so the ${mode === 'target' ? 'Target sales' : 'Seasonality'} model (season curve${mode === 'seasonality' ? ', growth %' : ''}) leaves it alone</label></div>`;
   document.getElementById('sku-years').innerHTML = YEARS.slice().sort().map(y =>
     `<label class="asp-yr"><input type="checkbox" value="${y}"${y === String(YEAR) ? ' checked' : ''}> ${y}</label>`).join('');
   document.getElementById('sku-msg').textContent = '';
@@ -4723,7 +4844,7 @@ function openSkuDialog(id) {
       ? myTags.map(id => `<span class="tag-chip tg-${TAG_DEF[id].sev}" title="${esc(TAG_DEF[id].desc)}">${esc(TAG_DEF[id].label)}</span>`).join(' ')
       : 'none'],
     ['Season / category', `${esc(sku.season || '—')} · ${esc(sku.category || '—')}`],
-    ['Weekly forecast', srcPill(sku.base_forecast_src || 'orig')],
+    ['Weekly forecast', srcPill(sku.base_forecast_src || 'orig', sku.fc_pinned ? 'pinned' : '')],
     ['Stock readings', (() => {
       const w = (sku.stock_snap || []).map((v, i) => v != null ? i + 1 : 0).filter(Boolean);
       if (!w.length) return 'none yet — weekly stock is chained from arrivals and sales, not measured';
@@ -4745,7 +4866,7 @@ function openSkuDialog(id) {
   });
   document.getElementById('sku-pallet_type').addEventListener('change', e => {
     const lbl = document.getElementById('sku-fpq-lbl');
-    if (lbl) lbl.textContent = `Units per ${e.target.value === 'Stillage' ? 'stillage' : 'pallet'}`;
+    if (lbl) lbl.textContent = `Units per ${storageUnit(e.target.value)}`;
   });
   document.getElementById('sku-code').addEventListener('input', skuCodeWarn);
   document.getElementById('sku-dialog').showModal();
@@ -4842,6 +4963,8 @@ async function submitSkuDetails() {
   setIf('image', txt('image') || null, sku.image);
   setIf('pallet_type', txt('pallet_type'), sku.pallet_type);
   for (const k of ['fob', 'landed', 'asp', 'duty_rate', 'cbm', 'pack_size', 'fpq', 'stock_now']) setIf(k, nOf(k), sku[k]);
+  const pin = document.getElementById('sku-fc-pin');   // only shown when the year re-models forecasts
+  if (pin && pin.checked !== !!sku.fc_pinned) fields.fc_pinned = pin.checked;
   const wChanged = SKU_EDIT.weekly.some((v, w) => Math.abs(v - SKU_EDIT.weekly0[w]) > 0.0005);
   const newCode = skuCodeChange(msg);        // '' = unchanged, null = rejected/cancelled
   if (newCode === null) return;
@@ -4869,6 +4992,7 @@ function applySkuToMemory(code, fields, weekly, years, newCode) {
   for (const s of M.skus) {
     if (s.code !== code) continue;
     for (const k in fields) {
+      if (k === 'fc_pinned' && !fields[k]) { delete s.fc_pinned; continue; }
       s[k] = fields[k];
       const tag = { fob: 'fob_src', landed: 'landed_src', asp: 'asp_src', cbm: 'cbm_src', fpq: 'fpq_src' }[k];
       if (tag) s[tag] = 'manual';
@@ -4885,10 +5009,12 @@ function applySkuToMemory(code, fields, weekly, years, newCode) {
   rerenderKeepingPlace();       // stay on the product just edited, not back at the top
 }
 
-/* ---- carton dimensions → item CBM + pallet/stillage loading ----
-   Item CBM = (Σ carton L×W×H ÷ 1,000,000) ÷ pack size. Pallet loading = cartons that
-   fit per layer (best footprint orientation) × layers under the max stack height,
-   scaled to items. A carton that can't sit on the pallet ⇒ Stillage (manual qty). */
+/* ---- carton dimensions → item CBM + storage type + loading ----
+   Item CBM = (Σ carton L×W×H ÷ 1,000,000) ÷ pack size. Loading = cartons that fit per
+   layer (best footprint orientation) × layers under the max stack height, scaled to
+   items, capped by the weight limit. A product goes in the SMALLEST space it fits —
+   pallet, then large pallet, then stillage — so the bigger spaces are kept for the
+   lines that need them. Too big for all three ⇒ a hand-entered qty. */
 const PALLET_DEFAULT = { l: 120, w: 100, h: 180, maxKg: 1000 };   // cm + max load weight (kg)
 function palletDims() { const p = SETTINGS.pallet_dims || {}; return { l: +p.l || PALLET_DEFAULT.l, w: +p.w || PALLET_DEFAULT.w, h: +p.h || PALLET_DEFAULT.h, maxKg: +p.maxKg || PALLET_DEFAULT.maxKg }; }
 // Stillage loading space, from the supplied spec. Loading uses the INTERNAL clear space
@@ -4898,8 +5024,15 @@ function palletDims() { const p = SETTINGS.pallet_dims || {}; return { l: +p.l |
 // placeholder to confirm; the settings panel says so.
 const STILLAGE_DEFAULT = { l: 178, w: 103.5, h: 168, maxKg: 1000 };
 function stillageDims() { const p = SETTINGS.stillage_dims || {}; return { l: +p.l || STILLAGE_DEFAULT.l, w: +p.w || STILLAGE_DEFAULT.w, h: +p.h || STILLAGE_DEFAULT.h, maxKg: +p.maxKg || STILLAGE_DEFAULT.maxKg }; }
+// Large pallet: 120 x 150 cm footprint, 160 cm stack, 1000 kg — between a pallet and a stillage.
+const LARGE_PALLET_DEFAULT = { l: 120, w: 150, h: 160, maxKg: 1000 };
+function largePalletDims() { const p = SETTINGS.large_pallet_dims || {}; return { l: +p.l || LARGE_PALLET_DEFAULT.l, w: +p.w || LARGE_PALLET_DEFAULT.w, h: +p.h || LARGE_PALLET_DEFAULT.h, maxKg: +p.maxKg || LARGE_PALLET_DEFAULT.maxKg }; }
+// The storage spaces a carton is tested against, smallest first.
+function storageSpaces() { return [['Pallet', palletDims()], ['Large Pallet', largePalletDims()], ['Stillage', stillageDims()]]; }
+// "units per pallet / large pallet / stillage / rack space" for a storage type
+function storageUnit(t) { return { 'Large Pallet': 'large pallet', Stillage: 'stillage', Racking: 'rack space' }[t] || 'pallet'; }
 // How many units of a carton set fit a space of the given dimensions, by volume and by
-// its weight cap. One routine for both pallet and stillage, so the two can never drift.
+// its weight cap. One routine for every storage type, so they can never drift apart.
 function spaceFit(rep, S, pack, N, kgPerItem) {
   let perUnit = 0, fits = false;
   if (rep) {
@@ -4927,28 +5060,37 @@ function cartonMetrics(cartons, packSize) {
   const kgPerItem = packKg > 0 ? packKg / pack : 0;                    // kg per single item
   let rep = null, area = -1;                                            // largest-footprint carton drives the fit
   for (const c of valid) { const a = (+c.l) * (+c.w); if (a > area) { area = a; rep = c; } }
-  const pal = spaceFit(rep, P, pack, N, kgPerItem);
-  const needsStillage = N > 0 && !pal.fits;
-  // too big for a pallet → try the stillage, with exactly the same rules
-  const st = needsStillage ? spaceFit(rep, stillageDims(), pack, N, kgPerItem) : null;
+  // a space takes the product when its cartons fit and one item isn't over the weight limit
+  const takes = f => f.fits && !(kgPerItem > 0 && f.weightQty === 0);
+  let storage = null, big = null, bigDims = null, pal = null;
+  for (const [name, S] of storageSpaces()) {
+    const f = spaceFit(rep, S, pack, N, kgPerItem);
+    if (name === 'Pallet') pal = f;
+    if (N > 0 && !storage && takes(f)) { storage = name; if (name !== 'Pallet') { big = f; bigDims = S; } }
+  }
+  const beyondPallet = N > 0 && storage !== 'Pallet';
   return { cbm, fits: pal.fits, palletQty: pal.volumeQty, volumeQty: pal.volumeQty,
            weightQty: pal.weightQty, effWeightQty: pal.effWeightQty, volWeight: pal.volWeight, kgPerItem,
            overweightPct: pal.overweightPct, maxKg: pal.maxKg, hasWeight: kgPerItem > 0,
-           needsStillage, cartons: N, pack,
-           // stillage estimate — only meaningful when needsStillage
-           fitsStillage: !!(st && st.fits), stillQty: st ? st.volumeQty : 0,
-           stillEffQty: st ? st.effWeightQty : 0, stillWeight: st ? st.volWeight : 0,
-           stillOverPct: st ? st.overweightPct : 0, stillMaxKg: st ? st.maxKg : 0,
-           // too big even for a stillage: the only case that still needs a hand-entered qty
-           oversize: needsStillage && !(st && st.fits) };
+           storage, beyondPallet, cartons: N, pack,
+           // the bigger space it moved to (large pallet or stillage) — only when beyondPallet
+           bigName: big ? storage : null, bigDims, bigQty: big ? big.volumeQty : 0,
+           bigEffQty: big ? big.effWeightQty : 0, bigWeight: big ? big.volWeight : 0,
+           bigOverPct: big ? big.overweightPct : 0, bigMaxKg: big ? big.maxKg : 0,
+           // too big for every space: the only case that still needs a hand-entered qty
+           oversize: N > 0 && !storage };
 }
 // The loading qty to use for warehouse spacing, given the weight-limit toggle.
 function cartonLoadQty(m, weightLimited) {
-  if (m.needsStillage) {
-    if (!m.fitsStillage) return null;                                  // too big even for a stillage → manual
-    return (weightLimited && m.hasWeight) ? m.stillEffQty : m.stillQty;
-  }
+  if (!m.storage) return null;                                         // too big for every space → manual
+  if (m.beyondPallet) return (weightLimited && m.hasWeight) ? m.bigEffQty : m.bigQty;
   return (weightLimited && m.hasWeight) ? m.effWeightQty : m.volumeQty;
+}
+// The storage type to save for a product: what its cartons fit, except a line already
+// kept in racking stays there when it fits a pallet (racking holds pallet-sized loads).
+function cartonStorageType(m, sku) {
+  if (!m.storage) return 'Stillage';                                   // oversize: hand-entered stillage qty
+  return (m.storage === 'Pallet' && sku && sku.pallet_type === 'Racking') ? 'Racking' : m.storage;
 }
 // CBM chip — clickable like the cost chips; opens the carton editor. Provenance:
 // 'calc' (from carton sizes), 'manual' (hand-set), else 'import'.
@@ -4959,7 +5101,7 @@ function cbmChip(sku) {
   const cc = src === 'calc' ? 'cc-calc' : src === 'manual' ? 'cc-manual' : 'cc-orig';
   const nC = cartonList(sku).length;
   const extra = nC ? ` · ${nC} carton${nC > 1 ? 's' : ''}${(+sku.pack_size > 1) ? ` · pack ${sku.pack_size}` : ''}` : '';
-  const still = sku.pallet_type === 'Stillage' ? ' · Stillage' : '';
+  const still = (sku.pallet_type === 'Stillage' || sku.pallet_type === 'Large Pallet') ? ' · ' + sku.pallet_type : '';
   return `<button class="cost-chip cbm-chip ${cc}" data-cbm-sku="${esc(sku.id)}" title="Item CBM (m³) — ${lbl}${extra}. Click to edit carton sizes &amp; pack.">CBM ${sku.cbm ? (+sku.cbm).toFixed(3) : '—'}${still}</button>`;
 }
 // ---- carton editor dialog ----
@@ -5018,32 +5160,34 @@ function cartonRecalc() {
     wrap.hidden = true; wlWrap.hidden = true; return;
   }
   const cbmLine = `<div class="carton-cbm">Item CBM: <b>${m.cbm.toFixed(4)}</b> m³${m.hasWeight ? ` · item weight <b>${m.kgPerItem.toFixed(2)}</b> kg` : ''}</div>`;
-  if (m.needsStillage) {
-    const SD = stillageDims();
+  if (m.beyondPallet) {
+    const SD = stillageDims(), LD = largePalletDims();
     if (m.oversize) {
-      out.innerHTML = `<div class="carton-flag stillage">⚠ Too large for a pallet <b>and</b> for the ${SD.l}×${SD.w}×${SD.h} cm stillage — needs a hand-entered loading qty.</div>` + cbmLine;
+      out.innerHTML = `<div class="carton-flag stillage">⚠ Too large for a pallet, the ${LD.l}×${LD.w}×${LD.h} cm large pallet <b>and</b> the ${SD.l}×${SD.w}×${SD.h} cm stillage — needs a hand-entered loading qty.</div>` + cbmLine;
       lbl.textContent = 'Stillage loading qty (units) *'; wrap.hidden = false; qty.placeholder = 'units per stillage'; wlWrap.hidden = true;
       return;
     }
-    let sl = `<div class="carton-flag stillage">Too large for a pallet → flagged <b>Stillage</b>.</div>` + cbmLine
-      + `<div class="carton-cbm">By volume: <b>${m.stillQty.toLocaleString()}</b> units/stillage`;
+    const unit = storageUnit(m.storage);
+    const why = m.storage === 'Large Pallet' ? 'Too large for a pallet' : 'Too large for a pallet or a large pallet';
+    let sl = `<div class="carton-flag stillage">${why} → flagged <b>${m.storage}</b>.</div>` + cbmLine
+      + `<div class="carton-cbm">By volume: <b>${m.bigQty.toLocaleString()}</b> units/${unit}`;
     if (m.hasWeight) {
-      sl += ` — weighs <b>${Math.round(m.stillWeight).toLocaleString()}</b> kg`;
-      sl += m.stillOverPct > 0.5 ? ` <span class="carton-flag">(${m.stillOverPct.toFixed(0)}% over the ${m.stillMaxKg} kg limit)</span>` : ` (within the ${m.stillMaxKg} kg limit)`;
-      sl += `</div><div class="carton-cbm">By weight limit: <b>${m.stillEffQty.toLocaleString()}</b> units/stillage</div>`;
+      sl += ` — weighs <b>${Math.round(m.bigWeight).toLocaleString()}</b> kg`;
+      sl += m.bigOverPct > 0.5 ? ` <span class="carton-flag">(${m.bigOverPct.toFixed(0)}% over the ${m.bigMaxKg} kg limit)</span>` : ` (within the ${m.bigMaxKg} kg limit)`;
+      sl += `</div><div class="carton-cbm">By weight limit: <b>${m.bigEffQty.toLocaleString()}</b> units/${unit}</div>`;
     } else {
-      sl += `</div><div class="muted-note">Add carton weights to also cap loading by the stillage weight limit.</div>`;
+      sl += `</div><div class="muted-note">Add carton weights to also cap loading by the ${unit} weight limit.</div>`;
     }
     const usedS = cartonLoadQty(m, weightLimited);
-    sl += `<div class="carton-used">Used for spacing: <b>${usedS.toLocaleString()}</b> units/stillage <span class="carton-basis">(${weightLimited && m.hasWeight ? 'weight-limited' : 'by volume'})</span></div>`;
+    sl += `<div class="carton-used">Used for spacing: <b>${usedS.toLocaleString()}</b> units/${unit} <span class="carton-basis">(${weightLimited && m.hasWeight ? 'weight-limited' : 'by volume'})</span></div>`;
     const skuS = skuById.get(CARTON_EDIT.id);
     const liveS = skuS && +skuS.fpq > 0 ? Math.round(skuS.fpq) : null;
     if (liveS && skuS.fpq_src !== 'calc') {
       const diff = usedS > 0 ? Math.round((usedS / liveS - 1) * 100) : 0;
-      sl += `<div class="carton-live">In use now: <b>${liveS.toLocaleString()}</b> units/stillage `
+      sl += `<div class="carton-live">In use now: <b>${liveS.toLocaleString()}</b> units/${storageUnit(skuS.pallet_type)} `
         + `<span class="carton-basis">(from the ${skuS.fpq_src === 'manual' ? 'manual entry' : 'Excel import'})</span>`
         + (Math.abs(diff) >= 5 ? ` · calculated is <b>${diff > 0 ? '+' : ''}${diff}%</b>` : ` · calculated agrees`)
-        + ` <button type="button" id="carton-keep" class="carton-keeplink" title="Keep ${liveS.toLocaleString()} units/stillage — saves the carton sizes without changing warehouse spacing">keep ${liveS.toLocaleString()}</button></div>`;
+        + ` <button type="button" id="carton-keep" class="carton-keeplink" title="Keep ${liveS.toLocaleString()} units — saves the carton sizes without changing warehouse spacing">keep ${liveS.toLocaleString()}</button></div>`;
     }
     out.innerHTML = sl;
     { const kb = document.getElementById('carton-keep');
@@ -5092,10 +5236,10 @@ async function submitCartons() {
   const raw = (document.getElementById('carton-qty').value || '').trim();
   const override = raw ? Math.max(1, Math.round(parseFloat(raw))) : null;
   const loadingQty = override != null ? override : cartonLoadQty(m, weightLimited);
-  if (m.needsStillage && loadingQty == null) { msg.textContent = 'Enter the stillage loading qty.'; return; }
+  if (m.oversize && loadingQty == null) { msg.textContent = 'Enter the stillage loading qty.'; return; }
   const years = manualAspYears();
   const payload = { code: sku.code, cartons, packSize: CARTON_EDIT.pack, cbm: m.cbm,
-    palletType: m.needsStillage ? 'Stillage' : (sku.pallet_type === 'Racking' ? 'Racking' : 'Pallet'),
+    palletType: cartonStorageType(m, sku),
     fpq: loadingQty, fpqSrc: override != null ? 'manual' : 'calc', loadBasis: weightLimited ? 'weight' : 'volume', years };
   msg.textContent = 'Saving…';
   try {
@@ -5379,27 +5523,27 @@ function apCartonRecalc() {
     return;
   }
   if (!AP_CBM_MANUAL) document.getElementById('ap-cbm').value = m.cbm.toFixed(4);   // auto-fill CBM (still editable)
-  if (m.needsStillage) {
-    if (!AP_PALLET_MANUAL) palEl.value = 'Stillage';
+  if (m.beyondPallet) {
+    if (!AP_PALLET_MANUAL) palEl.value = m.storage || 'Stillage';
     palNote.textContent = 'auto: too big for a pallet';
-    const PD = palletDims(), SD = stillageDims();
-    if (m.oversize) {                        // too big even for a stillage → a figure has to be typed
+    const PD = palletDims(), LD = largePalletDims(), SD = stillageDims();
+    if (m.oversize) {                        // too big for every space → a figure has to be typed
       fpqLbl.textContent = 'Units per stillage *';
-      fpqNote.textContent = 'enter this — too big for the stillage to calculate';
+      fpqNote.textContent = 'enter this — too big for any space to calculate';
       fpqEl.placeholder = 'units per stillage';
       fpqEl.classList.toggle('ap-need', !(parseFloat(fpqEl.value) > 0));
-      out.innerHTML = `<span class="carton-flag">⚠ ${m.cartons > 1 ? 'A carton is' : 'The carton is'} too big for the ${PD.l}×${PD.w}×${PD.h} cm pallet <b>and</b> the ${SD.l}×${SD.w}×${SD.h} cm stillage. Enter how many units fit.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
+      out.innerHTML = `<span class="carton-flag">⚠ ${m.cartons > 1 ? 'A carton is' : 'The carton is'} too big for the ${PD.l}×${PD.w}×${PD.h} cm pallet, the ${LD.l}×${LD.w}×${LD.h} cm large pallet <b>and</b> the ${SD.l}×${SD.w}×${SD.h} cm stillage. Enter how many units fit.</span> · CBM <b>${m.cbm.toFixed(4)}</b>`;
       return;
     }
-    const usedS = cartonLoadQty(m, weightLimited);
-    fpqLbl.textContent = 'Units per stillage';
+    const usedS = cartonLoadQty(m, weightLimited), unit = storageUnit(m.storage);
+    fpqLbl.textContent = `Units per ${unit}`;
     fpqNote.textContent = AP_FPQ_MANUAL ? 'your figure — clear it to go back to auto' : 'auto from cartons — editable';
     fpqEl.classList.remove('ap-need');
     fpqEl.placeholder = String(usedS);
     if (!AP_FPQ_MANUAL) fpqEl.value = usedS;
-    let ss = `Too big for a pallet → <b>Stillage</b> · CBM <b>${m.cbm.toFixed(4)}</b> m³ · volume <b>${m.stillQty}</b>/stillage`;
-    if (m.hasWeight) ss += ` (${Math.round(m.stillWeight)} kg${m.stillOverPct > 0.5 ? `, <span class="carton-flag">${m.stillOverPct.toFixed(0)}% over</span>` : ''}) · weight-limit <b>${m.stillEffQty}</b>/stillage`;
-    ss += ` · using <b>${usedS}</b>/stillage`;
+    let ss = `Too big for a pallet → <b>${m.storage}</b> · CBM <b>${m.cbm.toFixed(4)}</b> m³ · volume <b>${m.bigQty}</b>/${unit}`;
+    if (m.hasWeight) ss += ` (${Math.round(m.bigWeight)} kg${m.bigOverPct > 0.5 ? `, <span class="carton-flag">${m.bigOverPct.toFixed(0)}% over</span>` : ''}) · weight-limit <b>${m.bigEffQty}</b>/${unit}`;
+    ss += ` · using <b>${usedS}</b>/${unit}`;
     out.innerHTML = ss;
     return;
   }
@@ -5484,7 +5628,7 @@ async function submitAddProduct() {
     // weekly split of the annual figure, shaped by the product's season (flat for continuity)
     baseForecast: apSpreadForecast(numv('ap-forecast') || 0, val('ap-season'), val('ap-category')),
     fpq: numv('ap-fpq') != null ? numv('ap-fpq') : (cm ? cartonLoadQty(cm, weightLimited) : null),
-    palletType: val('ap-pallet') || (cm ? (cm.needsStillage ? 'Stillage' : 'Pallet') : ''),
+    palletType: val('ap-pallet') || (cm ? cartonStorageType(cm, null) : ''),
     image: val('ap-image'),
     cartons, packSize: pack, loadBasis: weightLimited ? 'weight' : 'volume',
     npd: document.getElementById('ap-npd').checked,   // tags its first plan year
@@ -5688,6 +5832,46 @@ function fcExportSeries(sku, mode) {
 // Weekly stock level per product (SKU + W1..W53), plus two counts of weeks at zero.
 // Uses the same stock series the plan's "Stock Closing" row shows: measured history up
 // to the current week, the plan's projection from there on.
+// Carton data per product (Warehouse tab): the carton sizes and the storage type + maximum
+// load quantity the plan uses for warehouse spacing, plus what the carton sizes work out to
+// against the current pallet / stillage dimensions — so a figure that's drifted shows up.
+// Every product in the year (delisted Graveyard lines excepted), not just those in stock.
+async function exportCartons() {
+  const rows = M.skus.filter(s => !isRemoved(s)).map(sku => {
+    const cartons = cartonList(sku).filter(c => +c.l > 0 && +c.w > 0 && +c.h > 0)
+      .map(c => ({ l: +c.l, w: +c.w, h: +c.h, kg: +c.kg || null }));
+    const pack = Math.max(1, Math.round(+sku.pack_size || 1));
+    const weightLimited = sku.load_basis !== 'volume';          // the carton editor's default
+    let calcType = '', calcQty = null, kgItem = null;
+    if (cartons.length) {
+      const m = cartonMetrics(cartons, pack);
+      calcType = m.oversize ? 'Too big for a stillage' : cartonStorageType(m, sku);
+      calcQty = cartonLoadQty(m, weightLimited);
+      kgItem = m.hasWeight ? +m.kgPerItem.toFixed(3) : null;
+    }
+    return { code: sku.code, name: sku.name || '', supplier: sku.supplier || '', status: sku.status || '',
+      category: sku.category || '', pack, cartons, cbm: +sku.cbm || null, cbmSrc: cbmSrcTag(sku), kgItem,
+      loadBasis: !cartons.length ? '' : !weightLimited ? 'Carton volume' : (kgItem ? 'Weight-limited' : 'Carton volume (no weights)'),
+      storage: sku.pallet_type || '', maxQty: +sku.fpq || null,
+      maxQtySrc: sku.fpq_src === 'calc' ? 'from cartons' : sku.fpq_src === 'manual' ? 'manual' : (+sku.fpq ? 'import' : ''),
+      calcType, calcQty };
+  });
+  const status = document.getElementById('save-status');
+  status.textContent = 'Building carton workbook…';
+  try {
+    const r = await fetch('/api/export-cartons?year=' + encodeURIComponent(YEAR),
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows, pallet: palletDims(), stillage: stillageDims() }) });
+    if (!r.ok) throw new Error('server ' + r.status);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${YEAR} Carton Data.xlsx`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    status.textContent = `Exported carton data (${rows.length} products)`;
+  } catch (e) { status.textContent = 'Export failed!'; alert('Carton export failed: ' + e.message); }
+}
 async function exportStock() {
   const rows = M.skus.map(sku => ({ code: sku.code, status: sku.status || '',
     stock: (RES.get(sku.id) || {}).stock || [] }));
@@ -7486,7 +7670,9 @@ async function init() {
   document.getElementById('cartons-file').addEventListener('change', cartonsFileChosen);
   document.getElementById('cartons-cancel').addEventListener('click', () => document.getElementById('cartons-dialog').close());
   document.getElementById('cartons-apply').addEventListener('click', applyCartonsImport);
-  document.getElementById('chanidx-file').addEventListener('change', chanFileChosen);
+  // Sales by Account runs through the weekly-sales flow: it banks the week's actual units AND
+  // that week's sales by customer (channel history → the 52-week channel index)
+  document.getElementById('chanidx-file').addEventListener('change', wksalesFileChosen);
   document.getElementById('channel-close').addEventListener('click', () => document.getElementById('channel-dialog').close());
   document.getElementById('wksales-file').addEventListener('change', wksalesFileChosen);
   document.getElementById('wksales-cancel').addEventListener('click', () => document.getElementById('wksales-dialog').close());
@@ -7529,6 +7715,7 @@ async function init() {
   document.getElementById('btn-export').addEventListener('click', exportCsv);
   document.getElementById('btn-export-forecast').addEventListener('click', openForecastExportDialog);
   document.getElementById('btn-export-stock').addEventListener('click', exportStock);
+  document.getElementById('btn-recalc-storage').addEventListener('click', recalcStorageFromCartons);
   document.getElementById('fcexp-go').addEventListener('click', () => {
     const mode = (document.querySelector('input[name="fcexp-mode"]:checked') || {}).value || 'demand';
     SETTINGS.fc_export_mode = mode; markDirty();     // remember the last choice

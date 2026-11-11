@@ -659,6 +659,120 @@ def export_stock(rows, year=None, week1=None, current_week=None):
     return bio
 
 
+def export_cartons(rows, year=None, pallet=None, stillage=None):
+    """Carton data per product (Warehouse tab): SKU, carton sizes, and the storage type +
+    maximum load quantity the plan uses to count warehouse spaces (spaces = stock ÷ max
+    load qty). Each carton gets its own L / W / H / kg columns so they filter and sort.
+
+    The two "from cartons" columns re-work the storage type and load qty from the carton
+    sizes against today's pallet / stillage dimensions (shown in the header), and "Check"
+    flags any product whose saved figure no longer matches — e.g. an imported or hand-set
+    quantity, or dimensions changed since the cartons were entered.
+    `rows` = [{code, name, supplier, status, category, pack, cartons: [{l, w, h, kg}], cbm,
+    cbmSrc, kgItem, loadBasis, storage, maxQty, maxQtySrc, calcType, calcQty}]."""
+    NL = chr(10)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Carton Data"
+    hdr, sub = _fill(C_REF_HDR), _fill(C_SUBHDR)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center")
+
+    def put(r, c, val, bold=False, fill=None, align=center, fmt=None, colour=None):
+        cell = ws.cell(row=r, column=c, value=val)
+        cell.font = Font(name=FONT, size=9, bold=bold, color=colour)
+        cell.alignment = align
+        cell.border = BORDER
+        if fill:
+            cell.fill = fill
+        if fmt:
+            cell.number_format = fmt
+        return cell
+
+    def dims(d, label):
+        d = d or {}
+        try:
+            return (f"{label} {_num(d.get('l')):g} × {_num(d.get('w')):g} cm, {_num(d.get('h')):g} cm high, "
+                    f"max {_num(d.get('maxKg')):g} kg")
+        except (TypeError, ValueError):
+            return ""
+
+    ws.cell(row=1, column=1, value=f"{year or ''} carton data, storage type and maximum load quantity".strip()).font = \
+        Font(name=FONT, size=13, bold=True)
+    ws.cell(row=2, column=1, value=(
+        "Max load qty = units per pallet / stillage space the plan uses for warehouse spacing (spaces = stock ÷ max load qty). "
+        "'From cartons' columns are re-worked from the carton sizes against today's " + dims(pallet, "pallet") + "; "
+        + dims(stillage, "stillage") + ".")).font = Font(name=FONT, size=9, italic=True, color="FF808080")
+
+    n_cart = max([len(r.get("cartons") or []) for r in rows] + [1])
+    lead = [("SKU", 20, left), ("Product", 34, left), ("Supplier", 26, left), ("Status", 9, center), ("Category", 18, left),
+            ("Pack size" + NL + "(items)", 8, center), ("Cartons" + NL + "per pack", 8, center)]
+    carton_cols = []
+    for i in range(n_cart):
+        for lab in ("L (cm)", "W (cm)", "H (cm)", "kg"):
+            carton_cols.append((f"Carton {i + 1}" + NL + lab, 8, center))
+    tail = [("Item CBM" + NL + "(m³)", 9, center), ("CBM" + NL + "source", 10, center), ("Item weight" + NL + "(kg)", 9, center),
+            ("Load basis", 12, center), ("Storage" + NL + "type", 10, center), ("Max load" + NL + "qty", 9, center),
+            ("Max qty" + NL + "source", 11, center), ("Storage type" + NL + "from cartons", 13, center),
+            ("Max qty" + NL + "from cartons", 10, center), ("Check", 22, left)]
+    cols = lead + carton_cols + tail
+    HR = 4
+    for c, (lab, width, _) in enumerate(cols, start=1):
+        is_carton = len(lead) < c <= len(lead) + len(carton_cols)
+        is_plan = c in (len(lead) + len(carton_cols) + 5, len(lead) + len(carton_cols) + 6)
+        put(HR, c, lab, bold=True, fill=_fill(C_INPUT_HDR) if is_plan else (sub if is_carton else hdr))
+        ws.column_dimensions[get_column_letter(c)].width = width
+
+    def check(r):
+        if not (r.get("cartons") or []):
+            return "No carton data"
+        msgs = []
+        st, ct = r.get("storage") or "", r.get("calcType") or ""
+        mq, cq = r.get("maxQty"), r.get("calcQty")
+        if ct.startswith("Too big"):
+            return "Too big for a stillage — max qty must be set by hand"
+        if ct and st and ct != st and not (ct == "Pallet" and st == "Racking"):
+            msgs.append(f"type: plan {st}, cartons {ct}")
+        if mq and cq and abs(mq - cq) >= 0.5:
+            msgs.append(f"qty: plan {mq:g}, cartons {cq:g}")
+        elif not mq and cq:
+            msgs.append("no max qty saved")
+        return "; ".join(msgs) or "OK"
+
+    rows = sorted(rows, key=lambda r: ((r.get("supplier") or "").lower(), r.get("code") or ""))
+    r = HR + 1
+    for row in rows:
+        cartons = row.get("cartons") or []
+        vals = [row.get("code", ""), row.get("name", ""), row.get("supplier", ""), row.get("status", ""),
+                row.get("category", ""), row.get("pack") or 1, len(cartons) or None]
+        for i in range(n_cart):
+            c = cartons[i] if i < len(cartons) else {}
+            vals += [c.get("l"), c.get("w"), c.get("h"), c.get("kg")]
+        verdict = check(row)
+        vals += [row.get("cbm"), {"calc": "from cartons", "manual": "manual", "import": "import"}.get(row.get("cbmSrc"), ""),
+                 row.get("kgItem"), row.get("loadBasis") or "", row.get("storage") or "", row.get("maxQty"),
+                 row.get("maxQtySrc") or "", row.get("calcType") or "", row.get("calcQty"), verdict]
+        for c, v in enumerate(vals, start=1):
+            _, _, al = cols[c - 1]
+            label = cols[c - 1][0]
+            fmt = (FMT_CBM if label.startswith("Item CBM") else
+                   "0.0##" if (label.endswith("kg") or label.startswith("Item weight")) else
+                   "0.#" if "(cm)" in label else (FMT_QTY_T if isinstance(v, (int, float)) else None))
+            flag = c == len(cols) and verdict not in ("OK", "No carton data")
+            put(r, c, v, align=al, fmt=fmt, fill=_fill(C_SKU) if c == 1 else (_fill("FFFDE9E7") if flag else None),
+                colour="FFB23B2C" if flag else ("FF808080" if c == len(cols) and verdict == "No carton data" else None),
+                bold=c in (len(lead) + len(carton_cols) + 5, len(lead) + len(carton_cols) + 6))
+        r += 1
+
+    ws.freeze_panes = ws.cell(row=HR + 1, column=2)
+    ws.row_dimensions[HR].height = 30
+    ws.auto_filter.ref = f"A{HR}:{get_column_letter(len(cols))}{max(r - 1, HR)}"
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def export_search(payload):
     """Flat workbook of the products behind the current sidebar search — one row per
     product with supplier, category and the figures a promo/marketing plan needs

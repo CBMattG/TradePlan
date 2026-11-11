@@ -121,6 +121,45 @@ def graveyard_restore(s):
     return True
 
 
+# ---- channel sales history (per plan week, per product, per customer) ----
+# data/channel_sales.json = {"weeks": {"2026|45": {code: {cust: [units, sales £]}}},
+#                            "customers": {cust: name}, "updatedAt": iso}
+# Seeded from the daily sales-by-channel exports, then one week per Sales by Account upload.
+# The channel index the screens use (each product's share by customer) is rebuilt from it.
+CHANNEL_SALES = "channel_sales.json"
+CHANNEL_WINDOW = 52          # weeks of history behind each product's channel mix
+
+
+def week_key_sort(k):
+    y, w = str(k).split("|")
+    return int(y), int(w)
+
+
+def rebuild_channel_index(hist, window=CHANNEL_WINDOW):
+    """Channel index from the last `window` weeks of history: per product, each customer's
+    net units over the window (weight r) and sales £ / units (price p). Customers with no
+    net units are left out; a product with none at all has no rows (→ outside the split)."""
+    keys = sorted((hist.get("weeks") or {}).keys(), key=week_key_sort)[-window:]
+    tot = {}
+    for k in keys:
+        for code, custs in hist["weeks"][k].items():
+            for cust, (q, v) in custs.items():
+                e = tot.setdefault(code, {}).setdefault(cust, [0.0, 0.0])
+                e[0] += q
+                e[1] += v
+    skus, rows = {}, 0
+    for code, custs in tot.items():
+        for cust, (q, v) in custs.items():
+            if q <= 0:
+                continue
+            skus.setdefault(code, []).append({"c": cust, "r": round(q, 4),
+                                              "p": round(v / q, 4) if v > 0 else None})
+            rows += 1
+    span = (f"{keys[0].replace('|', ' W')} – {keys[-1].replace('|', ' W')}") if keys else ""
+    return {"skus": skus, "customers": dict(hist.get("customers") or {}), "basis": "52wk", "window": span,
+            "importedAt": datetime.now().isoformat(timespec="seconds")}, rows
+
+
 def safe_filename(name):
     return re.sub(r'[\\/:*?"<>|]+', " ", str(name)).strip() or "supplier"
 
@@ -576,6 +615,29 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def export_cartons(self, qs):
+        """Return an .xlsx of every product's carton sizes, storage type and maximum load
+        quantity (Warehouse tab), from the client's rows."""
+        ydir, year = year_dir(qs)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        try:
+            data = supplier_form.export_cartons(body.get("rows") or [], year=year, pallet=body.get("pallet"),
+                                                stillage=body.get("stillage")).getvalue()
+        except Exception as exc:
+            self.send_json({"error": f"export failed: {exc}"}, 500)
+            return
+        fname = f"{year} Carton Data.xlsx"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def export_stock(self, qs):
         """Return an .xlsx of the client-computed weekly stock level (SKU in col A,
         W1..W53 across), with two counts of weeks at zero at the far right: the full
@@ -660,6 +722,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.export_forecast(parse_qs(parsed.query))
         elif parsed.path == "/api/export-stock":
             self.export_stock(parse_qs(parsed.query))
+        elif parsed.path == "/api/export-cartons":
+            self.export_cartons(parse_qs(parsed.query))
         elif parsed.path == "/api/export-arrivals":
             self.export_arrivals()
         elif parsed.path == "/api/export-search":
@@ -680,6 +744,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.add_product(parse_qs(parsed.query))
         elif parsed.path == "/api/apply-cartons":
             self.apply_cartons(parse_qs(parsed.query))
+        elif parsed.path == "/api/apply-storage":
+            self.apply_storage(parse_qs(parsed.query))
         elif parsed.path == "/api/parse-buying":
             self.parse_buying()
         elif parsed.path == "/api/apply-buying":
@@ -1314,6 +1380,54 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
+    def apply_storage(self, qs):
+        """Bulk storage recalculation from cartons (Settings → Capacity & weeks). Body:
+        {"years": {"2026": [{code, palletType, fpq}], ...}} — the client has already worked
+        out each product's storage type and max load qty from its carton sizes. Writes
+        pallet_type + fpq (fpq_src = "calc") by code; one revertable change for all years."""
+        ALLOWED = {"Pallet", "Large Pallet", "Stillage", "Racking"}
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            b = json.loads(self.rfile.read(length)) if length else {}
+            plan = b.get("years") or {}
+            yrs, _ = years_index()
+            targets = [str(y) for y in plan if str(y) in yrs and plan[y]]
+            if not targets:
+                self.send_json({"ok": False, "error": "Nothing to update."}, 400)
+                return
+            for y in targets:
+                for it in plan[y]:
+                    if str(it.get("palletType")) not in ALLOWED:
+                        self.send_json({"ok": False, "error": f"Unknown storage type '{it.get('palletType')}'."}, 400)
+                        return
+            n_items = sum(len(plan[y]) for y in targets)
+            record_change("edit", "Recalculate storage from cartons", f"{n_items} product-years · " + ", ".join(targets),
+                          [f"{y}/master.json" for y in targets])
+            applied = {}
+            for y in targets:
+                mpath = DATA / y / "master.json"
+                master = read_json(mpath, None)
+                if not master:
+                    continue
+                want = {str(it.get("code") or "").strip(): it for it in plan[y]}
+                n = 0
+                for s in master["skus"]:
+                    it = want.get(str(s.get("code", "")).strip())
+                    if not it:
+                        continue
+                    s["pallet_type"] = str(it["palletType"])
+                    try:
+                        s["fpq"] = float(it["fpq"])
+                    except (TypeError, ValueError):
+                        continue
+                    s["fpq_src"] = "calc"
+                    n += 1
+                write_atomic(mpath, json.dumps(master))
+                applied[y] = n
+            self.send_json({"ok": True, "applied": applied})
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 500)
+
     def apply_sku(self, qs):
         """Hand-edited product details from the per-product Details dialog. Writes only the
         fields the client says changed into master.json for the given years, matched by
@@ -1357,6 +1471,8 @@ class Handler(SimpleHTTPRequestHandler):
                         self.send_json({"ok": False, "error": f"'{k}' cannot be negative."}, 400)
                         return
                     fields[k] = round(n, 4)
+                elif k == "fc_pinned":     # keep the typed weekly forecast out of the model
+                    fields[k] = bool(v)
             if fields.get("name") is None and "name" in fields:
                 self.send_json({"ok": False, "error": "The product name can't be empty."}, 400)
                 return
@@ -1418,6 +1534,9 @@ class Handler(SimpleHTTPRequestHandler):
                     for k, v in fields.items():
                         if k == "cbm" and v is not None and s.get("cbm") != v:
                             s["cbm_prev"] = s.get("cbm")
+                        if k == "fc_pinned" and not v:
+                            s.pop("fc_pinned", None)
+                            continue
                         s[k] = v
                         tag = SRC.get(k)
                         if tag:
@@ -2027,8 +2146,14 @@ class Handler(SimpleHTTPRequestHandler):
     # ---- weekly actual sales (the "WKnn Sales" export: Product SKU / Sales TY £ / Qty TY units) ----
     @staticmethod
     def aggregate_wksales(raw):
-        """Read a weekly sales export → {code: {"val": £, "qty": units}}. Finds the header
-        row containing 'Product SKU', 'Sales TY' and 'Qty TY'; duplicate codes are summed."""
+        """Read one week's sales → ({code: {"val": £, "qty": units}}, rows, extra).
+        Two layouts, matched by header name:
+          'weekly'  : Product SKU / Sales TY / Qty TY — the Weekly Sales export.
+          'account' : cmp_product / soh_cusndcode / Sales / Quantity — the Sales by Account
+                      export. Same totals per product, plus each customer's units + £, which
+                      `extra` carries ({"layout", "byCust": {code: {cust: [qty, £]}},
+                      "customers": {cust: name}}) for the channel history.
+        Units are net (returns/credits included), as the weekly report has them."""
         import io
         import warnings
         import openpyxl
@@ -2037,38 +2162,55 @@ class Handler(SimpleHTTPRequestHandler):
             warnings.simplefilter("ignore")
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
             ws = wb.active
-            code_c = sales_c = qty_c = hdr = None
+            code_c = sales_c = qty_c = cust_c = name_c = hdr = None
+            layout = None
+            by_cust, customers = {}, {}
             for i, row in enumerate(ws.iter_rows(values_only=True)):
                 if hdr is None:
                     lower = [str(c or "").strip().lower() for c in row]
                     if "product sku" in lower and "sales ty" in lower and "qty ty" in lower:
-                        hdr = i
+                        hdr, layout = i, "weekly"
                         code_c, sales_c, qty_c = lower.index("product sku"), lower.index("sales ty"), lower.index("qty ty")
+                    elif "cmp_product" in lower and "soh_cusndcode" in lower and "quantity" in lower and "sales" in lower:
+                        hdr, layout = i, "account"
+                        code_c, sales_c, qty_c = lower.index("cmp_product"), lower.index("sales"), lower.index("quantity")
+                        cust_c = lower.index("soh_cusndcode")
+                        name_c = lower.index("[soh source acc name]") if "[soh source acc name]" in lower else None
                     continue
                 code = str(row[code_c] or "").strip() if len(row) > code_c else ""
                 val = row[sales_c] if len(row) > sales_c else None
                 qty = row[qty_c] if len(row) > qty_c else None
                 if not code or not isinstance(qty, (int, float)):
                     continue
+                v = float(val) if isinstance(val, (int, float)) else 0.0
                 rec = out.setdefault(code, {"val": 0.0, "qty": 0.0})
                 rec["qty"] += float(qty)
-                if isinstance(val, (int, float)):
-                    rec["val"] += float(val)
+                rec["val"] += v
+                if layout == "account":
+                    cust = str(row[cust_c] or "").strip() if len(row) > cust_c else ""
+                    if cust:
+                        e = by_cust.setdefault(code, {}).setdefault(cust, [0.0, 0.0])
+                        e[0] += float(qty)
+                        e[1] += v
+                        if name_c is not None and len(row) > name_c and row[name_c]:
+                            customers.setdefault(cust, str(row[name_c]).strip())
                 n += 1
             if hdr is None:
-                raise ValueError("Couldn't find a header row with 'Product SKU', 'Sales TY' and 'Qty TY'.")
-        return out, n
+                raise ValueError("Couldn't find a weekly sales header — expected 'Product SKU' / 'Sales TY' / 'Qty TY' "
+                                 "(Weekly Sales) or 'cmp_product' / 'soh_cusndcode' / 'Sales' / 'Quantity' (Sales by Account).")
+        return out, n, {"layout": layout, "byCust": by_cust, "customers": customers}
 
     def parse_wksales(self):
         """Parse an uploaded weekly sales export and return per-SKU sales £. Nothing
         changes yet — the client previews (converting £ → units by ASP) then applies."""
         try:
             length = int(self.headers.get("Content-Length", 0))
-            sales, count = self.aggregate_wksales(self.rfile.read(length))
+            sales, count, extra = self.aggregate_wksales(self.rfile.read(length))
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 400)
             return
-        self.send_json({"ok": True, "sales": sales, "fileRows": count})
+        self.send_json({"ok": True, "sales": sales, "fileRows": count, "layout": extra["layout"],
+                        "byCust": extra["byCust"], "customers": extra["customers"]})
 
     def apply_wksales(self, qs):
         """Write one week's actual sales units (file's 'Qty TY') into the year's
@@ -2078,7 +2220,11 @@ class Handler(SimpleHTTPRequestHandler):
         through the last actualised week: running_stock[w] = previous week's closing
         + committed arrivals − actual units sold, re-anchored on any Buying Report
         stock reading held for a week (see rechain_running_stock). Re-applying a past
-        week simply re-chains it and every later actualised week."""
+        week simply re-chains it and every later actualised week.
+
+        A Sales by Account upload also sends `channel` = {"byCust": {code: {cust: [qty, £]}},
+        "customers": {...}}: that week's slot in the channel history is replaced with it and
+        the channel index is rebuilt from the last 52 weeks."""
         try:
             ydir, year = year_dir(qs)
             length = int(self.headers.get("Content-Length", 0))
@@ -2116,10 +2262,24 @@ class Handler(SimpleHTTPRequestHandler):
             rechain_running_stock(master, orders, week, closed_through)
             new_dw = max(old_dw, week + 1)
             master["data_week"] = new_dw
-            record_change("upload", f"Weekly sales · week {week}", f"{n} products · {year}", [f"{year}/master.json"])
+            channel = body.get("channel") or None
+            files = [f"{year}/master.json"] + ([CHANNEL_SALES, "channel_index.json"] if channel else [])
+            label = f"Sales by Account · week {week}" if channel else f"Weekly sales · week {week}"
+            record_change("upload", label, f"{n} products · {year}", files)
             write_atomic(mpath, json.dumps(master))
+            idx_rows = None
+            if channel:
+                hist = read_json(DATA / CHANNEL_SALES, None) or {"weeks": {}, "customers": {}}
+                hist.setdefault("weeks", {})[f"{year}|{week}"] = {
+                    code: {c: [round(float(q), 4), round(float(v), 2)] for c, (q, v) in custs.items()}
+                    for code, custs in (channel.get("byCust") or {}).items()}
+                hist.setdefault("customers", {}).update(channel.get("customers") or {})
+                hist["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+                write_atomic(DATA / CHANNEL_SALES, json.dumps(hist, separators=(",", ":")))
+                index, idx_rows = rebuild_channel_index(hist)
+                write_atomic(DATA / "channel_index.json", json.dumps(index))
             self.send_json({"ok": True, "applied": n, "week": week, "dataWeek": new_dw,
-                            "year": year, "closedThrough": closed_through})
+                            "year": year, "closedThrough": closed_through, "channelRows": idx_rows})
         except Exception as exc:
             self.send_json({"ok": False, "error": str(exc)}, 500)
 
