@@ -7,6 +7,7 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 
 ## Stack (no build step; only external dep is openpyxl)
 - `server.py` — Python stdlib `ThreadingHTTPServer` on **:8765**; all `/api/*` routes; upload parsing via openpyxl; change log + revert; stock re-chaining.
+- `Tradeplan.pyw` — **desktop app** (what the user launches): runs `server.py`'s `Handler` on :8765 in a background thread and opens a pywebview (Edge WebView2) window on it; single-instance (named mutex → re-launch focuses the window `Tradeplan`); on close it flushes the page's pending autosave (`saveTimer`/`saveNow`) before exiting, which stops the server. Exports go through a Save-as dialog (`ALLOW_DOWNLOADS`); localStorage lives in `%LOCALAPPDATA%\Tradeplan\webview`, log in `%LOCALAPPDATA%\Tradeplan\tradeplan.log`. If :8765 is already serving Tradeplan (run.bat), the window just uses it. `TRADEPLAN_PORT` env overrides the port (testing a copy only). Needs `pip install pywebview`. `create_shortcuts.ps1` (re)makes the Desktop/Start-menu shortcuts with `tradeplan.ico` + the AppUserModelID `CharlesBentley.Tradeplan`.
 - `supplier_form.py` — every xlsx export builder (supplier Scheduling form, forecast, stock, arrivals, search) + the supplier-form import parser. Imported by `server.py`.
 - `import_data.py` — seeds a year (2025/2026 layouts) from its Excel workbook. **Destructive**: overwrites that year's `master.json`.
 - `static/app.js` — one large (~7.3k-line) vanilla-JS calc engine (mirrors the Excel formulas) + all UI. No framework/bundler.
@@ -16,12 +17,13 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 - **Channel history:** `channel_sales.json` (server-side only, ~6 MB) = units + £ per plan week (`"2026|45"`) × product × customer, seeded from the daily sales-by-channel exports (1 Dec 2025 – 6 Nov 2026) and extended by each **Sales by Account** upload (the File Imports tile, id `chanidx`, which runs the weekly-sales flow: `aggregate_wksales` detects the `cmp_product`/`soh_cusndcode` layout and `apply-wksales` also replaces that week's history slot). `channel_index.json` is then **rebuilt from the last 52 weeks** (`rebuild_channel_index`, basis `52wk`) — don't hand-edit it; the legacy `/api/parse-channelindex` snapshot import still exists but has no tile.
 
 ## Run
-    python server.py                     # or run.bat → http://localhost:8765
+    Tradeplan desktop shortcut           # = pythonw Tradeplan.pyw → its own window (the normal way)
+    python server.py                     # or run.bat → http://localhost:8765 in the browser (fallback)
     python import_data.py --year 2026    # DESTRUCTIVE: replaces data/2026/master.json (all app-side imports lost; orders.json kept). Prompts + backs up to *.pre-import-<ts>; refuses years with no workbook (2027+) unless given a path. Never run it to "test"
 
 ## Editing conventions (important)
 - **Bump the cache-bust `?v=N`** on `app.js`/`style.css` in `index.html` for every edit, or the browser runs stale code.
-- **Restart `server.py`** for server changes; a browser reload suffices for JS/CSS/HTML.
+- **Restart `server.py`** for server changes (desktop app: close the window and reopen it); a reload (F5 in the app window) suffices for JS/CSS/HTML.
 - **No `node`** on this machine: syntax-check the server with `python -m py_compile server.py`; validate JS by bracket-balancing the changed block + replaying parser logic in a throwaway Python script against the real source files.
 - Read source `.xlsx` with **Python/openpyxl** (PowerShell file-open trips AMSI antivirus). Wrap reads in `warnings.catch_warnings()` — some sheets carry junk date serials that spam warnings.
 
@@ -35,7 +37,7 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 - Offline server tests: import `server`, point `S.DATA` / `S.CHANGELOG_PATH` / `S.SNAP_DIR` at a scratch **copy** of `data/`, and call `Handler.method(fake_self, qs)` with a fake exposing `send_json`, `headers`, `rfile`.
 
 ## Working style
-- **Don't start the preview / restart the user's server to verify unless asked** — they run their own server on :8765 and restarting disrupts their session. Rely on code review + offline checks by default.
+- **Don't start the preview / restart the user's server to verify unless asked** — they run their own server on :8765 (normally inside the desktop app) and restarting disrupts their session. Rely on code review + offline checks by default.
 
 ## Version control (git)
 - Repo initialised; **code + docs are tracked, `data/` is gitignored** (see `.gitignore`). Git must never touch live plan data — branch switches/checkouts only move code, so the user's running server + `data/` are always safe.
@@ -46,6 +48,7 @@ effect on stock cover, sales value, FOB spend, CBM/containers, capacity, etc.
 ## Patterns (copy an existing one)
 - **Data imports** (ASP/landed/buying/duty/wksales share one shape; WEBSA/Qlik/Channel Index parse **and persist** in one call to global JSON, stamped by the file's `importedAt`): server `aggregate_X`/`parse_X` (`/api/parse-X`) + `apply_X` (`/api/apply-X`, writes `master.json` per year by code); client `XFileChosen`→`openXDialog` (preview)→`applyXUpdates`→`applyXToMemory`; state stamped in `SETTINGS.X_updated_at`. The upload button is a **tile in the "File Imports" settings tab** — register it in `IMPORT_DEFS` (`id`/`label`/`input`/`when()`); `renderUploadAges` renders all tiles into `#imports-groups`, coloured by group cadence.
 - **Editable per-product chips**: ASP/FOB/Landed follow `aspChip`/`fobChip`/`landedChip` + `editAspInline`/`editCostInline` — a pill coloured by a `*_src` tag that click-edits via `prompt()` → `apply-*`. CBM (`cbmChip`) opens the carton dialog instead.
+- **Condition tags + Alerts tab**: product conditions are `TAG_DEFS` (test gets `(sku, metrics, params, RES row)`); each has two switches in Settings → Tags & Alerts — `on` (chip/search) and `alert` (raised on the Alerts tab, independent). `buildTags` fills `TAG_CACHE` + `ALERT_TAGS`. Supplier/PO/plan alerts (rebuys to order, committed no PO, POs to book, warehouse space, stale imports, minimum £) are `PLAN_ALERT_DEFS` in `SETTINGS.alerts`. `buildAlerts()` is cached in `ALERT_CACHE` (cleared by `tagsInvalidate`); per-tag columns/impact/signature live in `ALERT_PRODUCT`. Dismissals: `SETTINGS.alerts_dismissed[key] = signature` (key `"<year>|<id>|<code>"`, or `"g|…"` for year-independent PO/import alerts) — hidden until the signature changes; cleared ones are pruned on render.
 - Client feature state persists in `SETTINGS.*` via `markDirty()` (saves `settings.json` + the year's `orders.json`/`proposed.json`, logged as an "edit" change); per-year product attributes live in `master.json`.
 
 ## Gotchas

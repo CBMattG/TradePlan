@@ -35,7 +35,7 @@ function loadPref(key, fallback) {
   catch { return fallback; }
 }
 function savePref(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
-const VIEWS = ['plan', 'summary', 'arrivals', 'warehouse', 'graveyard'];
+const VIEWS = ['alerts', 'plan', 'summary', 'arrivals', 'warehouse', 'graveyard'];
 let currentView = VIEWS.includes(loadPref('tp_view')) ? loadPref('tp_view') : 'plan';   // reopen on the last tab
 let searchTerm = typeof loadPref('tp_search') === 'string' ? loadPref('tp_search') : '';   // carries across years + restarts
 function setSearchTerm(t) { searchTerm = t; savePref('tp_search', t); }
@@ -1073,10 +1073,19 @@ function npdBadge(sku) {
    itself rather than stored on the product. Each one is a quick search term on the Plan
    page and a chip on the product header, and every threshold is configurable in
    Settings → Tags. Tags are recomputed whenever the plan is recalculated. */
+// `alert: false` = not raised on the Alerts tab by default (each tag's Alert switch in
+// Settings → Tags & Alerts overrides it). Tests get (sku, metrics, params, result row).
 const TAG_DEFS = [
-  { id: 'npd', term: 'npd', label: 'NPD', sev: 'info', chip: false, params: [],
+  { id: 'npd', term: 'npd', label: 'NPD', sev: 'info', chip: false, alert: false, params: [],
     desc: 'Entered by hand for this plan year (drops next year).',
     test: (s) => isNpd(s) },
+  { id: 'oos', term: 'oos', alias: ['out of stock'], label: 'Out of stock', sev: 'bad',
+    params: [{ k: 'demand', lbl: 'with forecast over the next 4 weeks above N units', def: 4, step: 1 }],
+    desc: 'No stock this week while the forecast still expects sales (Not Live lines excluded).',
+    test: (s, m, p) => s.status !== 'Not Live' && m.stock <= 0 && m.fcNext4 > p.demand },
+  { id: 'nlorder', term: 'nlorder', alias: ['not live on order'], label: 'Not Live on order', sev: 'bad', params: [],
+    desc: 'Marked Not Live but committed orders are still due to arrive — cancel them or set it Live.',
+    test: (s, m) => s.status === 'Not Live' && m.comFuture > 0.5 },
   { id: 'overstocked', term: 'overstocked', label: 'Overstocked', sev: 'warn',
     params: [{ k: 'cover', lbl: 'weeks cover above', def: 20, step: 1 }],
     desc: 'Holding more cover than it needs at the current week.',
@@ -1091,27 +1100,48 @@ const TAG_DEFS = [
              { k: 'demand', lbl: 'and remaining forecast above N units', def: 50, step: 10 }],
     desc: 'Projects to zero stock while the forecast still expects sales.',
     test: (s, m, p) => m.outWk > 0 && m.outWk <= SETTINGS.current_week + p.weeks && m.fcRest > p.demand },
-  { id: 'overselling', term: 'overselling', label: 'Overselling', sev: 'good',
+  { id: 'trendup', term: 'trendup', alias: ['trending up'], label: 'Trending up', sev: 'good',
+    params: [{ k: 'weeks', lbl: 'over the last N weeks', def: 6, step: 1 },
+             { k: 'pct', lbl: 'ahead of forecast by more than %', def: 30, step: 5 },
+             { k: 'units', lbl: 'and at least N units sold', def: 20, step: 5 }],
+    desc: 'Recent weeks selling well ahead of forecast — check the forecast and cover before it runs short.',
+    test: (s, m, p, r) => { const t = recentTrend(s, r, p.weeks); return !!t && t.fc > 0 && t.act >= p.units && t.pct >= p.pct; } },
+  { id: 'trenddown', term: 'trenddown', alias: ['trending down'], label: 'Trending down', sev: 'warn',
+    params: [{ k: 'weeks', lbl: 'over the last N weeks', def: 6, step: 1 },
+             { k: 'pct', lbl: 'behind forecast by more than %', def: 30, step: 5 },
+             { k: 'units', lbl: 'and at least N units forecast', def: 20, step: 5 }],
+    desc: 'Recent weeks selling well behind forecast — the forecast (and any rebuy) may be too high.',
+    test: (s, m, p, r) => { const t = recentTrend(s, r, p.weeks); return !!t && t.fc >= p.units && t.pct <= -p.pct; } },
+  { id: 'nosales', term: 'nosales', alias: ['no sales'], label: 'No recent sales', sev: 'warn',
+    params: [{ k: 'weeks', lbl: 'nothing sold in the last N weeks', def: 8, step: 1 },
+             { k: 'units', lbl: 'while holding more than N units', def: 10, step: 5 }],
+    desc: 'Holding stock but nothing has sold for weeks — dead, damaged or mis-listed stock.',
+    test: (s, m, p) => m.stock > p.units && m.ytdWeeks >= p.weeks && m.noSaleWks >= p.weeks },
+  { id: 'lowmargin', term: 'lowmargin', alias: ['low margin'], label: 'Low margin', sev: 'warn',
+    params: [{ k: 'pct', lbl: 'margin on landed cost below %', def: 25, step: 1 }],
+    desc: 'Selling price leaves little margin over the landed cost (ASP − landed) ÷ ASP.',
+    test: (s, m, p) => m.margin != null && m.margin < p.pct },
+  { id: 'overselling', term: 'overselling', label: 'Overselling', sev: 'good', alert: false,
     params: [{ k: 'pct', lbl: 'ahead of forecast by more than %', def: 15, step: 1 },
              { k: 'weeks', lbl: 'needs at least N weeks of actuals', def: 4, step: 1 }],
     desc: 'Banked sales running ahead of the plan year to date.',
     test: (s, m, p) => m.ytdWeeks >= p.weeks && m.ytdPct != null && m.ytdPct >= p.pct },
-  { id: 'underselling', term: 'underselling', label: 'Underselling', sev: 'warn',
+  { id: 'underselling', term: 'underselling', label: 'Underselling', sev: 'warn', alert: false,
     params: [{ k: 'pct', lbl: 'behind forecast by more than %', def: 15, step: 1 },
              { k: 'weeks', lbl: 'needs at least N weeks of actuals', def: 4, step: 1 }],
     desc: 'Banked sales running behind the plan year to date.',
     test: (s, m, p) => m.ytdWeeks >= p.weeks && m.ytdPct != null && m.ytdPct <= -p.pct },
-  { id: 'rebuy', term: 'rebuy', label: 'Rebuy pending', sev: 'info', params: [],
+  { id: 'rebuy', term: 'rebuy', label: 'Rebuy pending', sev: 'info', alert: false, params: [],
     desc: 'Has proposed rebuy stock that is not committed yet.',
     test: (s, m) => m.prop > 0.5 },
-  { id: 'nopo', term: 'nopo', alias: ['no po'], label: 'No PO', sev: 'bad', params: [],
+  { id: 'nopo', term: 'nopo', alias: ['no po'], label: 'No PO', sev: 'bad', alert: false, params: [],
     desc: 'Future stock arrivals with no matching PO or container booking.',
     test: (s, m) => m.noPo },
-  { id: 'rundown', term: 'rundown', label: 'Run-down', sev: 'warn',
+  { id: 'rundown', term: 'rundown', label: 'Run-down', sev: 'warn', alert: false,
     params: [{ k: 'units', lbl: 'stock still on hand above', def: 0, step: 1 }],
     desc: 'Not Live but still holding stock to sell through.',
     test: (s, m, p) => (s.status === 'Not Live') && m.stock > p.units },
-  { id: 'slow', term: 'slow', label: 'Slow mover', sev: 'info',
+  { id: 'slow', term: 'slow', label: 'Slow mover', sev: 'info', alert: false,
     params: [{ k: 'units', lbl: 'forecast units for the year below', def: 50, step: 10 }],
     desc: 'Very low forecast demand for the whole year.',
     test: (s, m, p) => m.fcYear < p.units },
@@ -1131,21 +1161,39 @@ function tagCfg() {
     const s = saved[d.id] || {};
     const p = {};
     for (const pr of d.params) p[pr.k] = Number.isFinite(+s[pr.k]) ? +s[pr.k] : pr.def;
-    out[d.id] = { on: s.on != null ? !!s.on : (d.on !== false), p };
+    out[d.id] = { on: s.on != null ? !!s.on : (d.on !== false),
+                  alert: s.alert != null ? !!s.alert : (d.alert !== false), p };
   }
   return out;
 }
 let TAG_CACHE = null;                       // sku.id -> [tag id]
 let TAG_METRICS = null;                     // sku.id -> the derived figures the tags test on
-function tagsInvalidate() { TAG_CACHE = null; TAG_METRICS = null; }
+let ALERT_TAGS = null;                      // sku.id -> [tag id] raised as alerts (own switch)
+function tagsInvalidate() { TAG_CACHE = null; TAG_METRICS = null; ALERT_TAGS = null; ALERT_CACHE = null; }
+// Last N completed weeks: banked actual units vs the forecast for the same weeks.
+function recentTrend(sku, r, n) {
+  const aw = actualWeeks();
+  n = Math.max(1, Math.round(n || 1));
+  if (!r || aw < n) return null;
+  let act = 0, fc = 0;
+  for (let w = aw - n; w < aw; w++) { act += +sku.actual[w] || 0; fc += +r.forecast[w] || 0; }
+  return { act, fc, n, pct: fc > 0 ? ((act - fc) / fc) * 100 : null };
+}
+// Completed weeks holding actuals (the current week is still trading).
+function actualWeeks() {
+  const cur = SETTINGS.current_week || 1;
+  return Math.max(0, Math.min(cur, (M && +M.data_week) || cur) - 1);
+}
 function buildTags() {
   const cfg = tagCfg(), cur = SETTINGS.current_week, aw = cur - 1;
   const ready = poDataReady(), sched = new Map();   // supplier -> PO schedule (built once each)
   TAG_CACHE = new Map();
   TAG_METRICS = new Map();
+  ALERT_TAGS = new Map();
+  const nAct = actualWeeks();
   for (const sku of M.skus) {
     const r = RES.get(sku.id);
-    if (!r || isRemoved(sku)) { TAG_CACHE.set(sku.id, []); TAG_METRICS.set(sku.id, {}); continue; }
+    if (!r || isRemoved(sku)) { TAG_CACHE.set(sku.id, []); TAG_METRICS.set(sku.id, {}); ALERT_TAGS.set(sku.id, []); continue; }
     const prop = ((PROPOSED && PROPOSED.get(sku.id)) || EMPTY53);
     const com = ORDERS[sku.id] || EMPTY53;
     let outWk = 0;
@@ -1164,25 +1212,36 @@ function buildTags() {
         }
       }
     } catch { noPo = false; }
-    const asp = +sku.asp || 0;
+    const asp = +sku.asp || 0, landed = +sku.landed || 0;
     const actual = r.value.slice(0, Math.max(0, aw)).reduce((a, b) => a + b, 0);
     const fcast = r.forecast.slice(0, Math.max(0, aw)).reduce((a, b) => a + b, 0) * asp;
+    let lastSale = 0, comFuture = 0;
+    for (let w = 0; w < nAct; w++) if ((+sku.actual[w] || 0) > 0) lastSale = w + 1;
+    for (let w = Math.max(0, cur - 1); w < WEEKS; w++) comFuture += com[w] || 0;
     const m = {
       cover: r.cover[Math.max(0, cur - 1)],
       stock: r.stock[Math.max(0, cur - 1)],
       fcRest: r.forecast.slice(Math.max(0, cur - 1)).reduce((a, b) => a + b, 0),
       fcYear: r.forecast.reduce((a, b) => a + b, 0),
       prop: prop.reduce((a, b) => a + b, 0),
-      outWk, noPo, ytdWeeks: Math.max(0, aw),
+      outWk, noPo, ytdWeeks: nAct,
       ytdPct: (aw >= 1 && fcast > 0) ? ((actual - fcast) / fcast) * 100 : null,
+      ytdAct: actual, ytdFc: fcast,
+      fcNext4: r.forecast.slice(Math.max(0, cur - 1), cur + 3).reduce((a, b) => a + b, 0),
+      comFuture, lastSale, noSaleWks: nAct - lastSale,
+      margin: (asp > 0 && landed > 0) ? ((asp - landed) / asp) * 100 : null,
     };
-    const list = [];
+    const list = [], alerts = [];
     for (const d of TAG_DEFS) {
       const c = cfg[d.id];
-      if (!c.on) continue;
-      try { if (d.test(sku, m, c.p)) list.push(d.id); } catch { /* a tag never breaks a render */ }
+      if (!c.on && !c.alert) continue;
+      let hit = false;
+      try { hit = !!d.test(sku, m, c.p, r); } catch { /* a tag never breaks a render */ }
+      if (hit && c.on) list.push(d.id);
+      if (hit && c.alert) alerts.push(d.id);
     }
     TAG_CACHE.set(sku.id, list);
+    ALERT_TAGS.set(sku.id, alerts);
     TAG_METRICS.set(sku.id, m);
   }
 }
@@ -1231,9 +1290,13 @@ function renderTagSettings() {
         <span class="tag-chip tg-${d.sev}">${esc(d.label)}</span></label>
       <div class="tsr-mid"><div class="tsr-desc">${esc(d.desc)}</div>
         <div class="tsr-params">${params || '<span class="muted-note">No threshold — it either applies or it doesn\'t.</span>'}</div></div>
-      <div class="tsr-right"><code>${esc(d.term)}</code><span class="tsr-count" data-count="${d.id}">${counts[d.id]}</span></div>
+      <div class="tsr-right"><label class="tsr-alert" title="Raise matching products on the Alerts tab (works even with the tag itself switched off)">`
+      + `<input type="checkbox" data-tag="${d.id}" data-alert="1"${c.alert ? ' checked' : ''}> Alert</label>`
+      + `<code>${esc(d.term)}</code><span class="tsr-count" data-count="${d.id}">${counts[d.id]}</span></div>
     </div>`;
-  }).join('');
+  }).join('')
+    + `<div class="tsr-sub">Order, PO &amp; plan alerts <span class="muted-note">— raised on the Alerts tab only</span></div>`
+    + planAlertSettingsHtml();
   const refresh = () => {
     tagsInvalidate();
     const n = tagCounts();
@@ -1250,6 +1313,24 @@ function renderTagSettings() {
     store(cb.dataset.tag).on = cb.checked;
     cb.closest('.tsr').classList.toggle('off', !cb.checked);
     refresh();
+  }));
+  box.querySelectorAll('input[data-alert]').forEach(cb => cb.addEventListener('change', () => {
+    store(cb.dataset.tag).alert = cb.checked;
+    refresh(); updateAlertsTab();
+  }));
+  const pstore = (id) => {
+    SETTINGS.alerts = SETTINGS.alerts || {};
+    SETTINGS.alerts[id] = SETTINGS.alerts[id] || {};
+    return SETTINGS.alerts[id];
+  };
+  box.querySelectorAll('input[data-pa-on]').forEach(cb => cb.addEventListener('change', () => {
+    pstore(cb.dataset.pa).on = cb.checked;
+    cb.closest('.tsr').classList.toggle('off', !cb.checked);
+    ALERT_CACHE = null; markDirty(); updateAlertsTab();
+  }));
+  box.querySelectorAll('input[data-pa-p]').forEach(inp => inp.addEventListener('input', () => {
+    const v = parseFloat(inp.value);
+    if (isFinite(v)) { pstore(inp.dataset.pa)[inp.dataset.paP] = v; ALERT_CACHE = null; markDirty(); updateAlertsTab(); }
   }));
   box.querySelectorAll('input[data-p]').forEach(inp => inp.addEventListener('input', () => {
     const v = parseFloat(inp.value);
@@ -4714,7 +4795,7 @@ function rerenderKeepingPlace() {
   const s = planScrollSnap();
   renderSidebar();
   if (currentView === 'plan') renderPlan(); else setView(currentView);
-  updateGraveyardTab();
+  updateGraveyardTab(); updateAlertsTab();
   planScrollRestore(s);
 }
 
@@ -7218,14 +7299,561 @@ function setView(v) {
   else if (v === 'arrivals') renderArrivals();
   else if (v === 'warehouse') renderWarehouse();
   else if (v === 'graveyard') renderGraveyard();
+  else if (v === 'alerts') renderAlerts();
   else renderSummary();
   updateGraveyardTab();
+  updateAlertsTab();
 }
 function updateGraveyardTab() {
   const el = document.getElementById('gy-count');
   if (!el || !M) return;
   const n = M.skus.filter(isRemoved).length;
   el.textContent = n ? String(n) : '';
+}
+
+/* ================= Alerts =================
+   One page gathering everything in the loaded year that needs attention, most urgent first:
+     • product alerts — every condition tag whose Alert switch is on (Settings → Tags &
+       Alerts), each with the figures that matter for it (lost sales, excess stock £, margin…);
+     • order & PO alerts — proposed rebuys / committed plan lines whose order-by date
+       (arrival week − supplier lead time) is due, and open POs still to book on a container;
+     • plan alerts — warehouse space over capacity, file imports out of date.
+   Nothing is stored but dismissals: SETTINGS.alerts_dismissed[key] = signature. A dismissed
+   alert stays hidden until its signature changes (e.g. the stock-out week moves) or it
+   clears — a cleared alert's dismissal is dropped, so if it comes back it shows again. */
+const PLAN_ALERT_DEFS = [
+  { id: 'order', label: 'Rebuys to order', sev: 'bad',
+    params: [{ k: 'weeks', lbl: 'order-by date within the next N weeks', def: 2, step: 1 }],
+    desc: 'Proposed rebuys whose order-by date (arrival week − supplier lead time) is due or already past.' },
+  { id: 'unpo', label: 'Committed, no PO', sev: 'bad',
+    params: [{ k: 'weeks', lbl: 'order-by date within the next N weeks', def: 4, step: 1 }],
+    desc: 'Committed plan orders with no matching PO or container booking, by supplier and arrival week.' },
+  { id: 'book', label: 'POs to book', sev: 'warn',
+    params: [{ k: 'days', lbl: 'book-by date within the next N days', def: 14, step: 1 }],
+    desc: 'Open WEBSA POs with no container booking yet. Book by = PO due date − the Arrivals lead time.' },
+  { id: 'space', label: 'Warehouse space', sev: 'warn',
+    params: [{ k: 'pct', lbl: 'utilisation above %', def: 100, step: 5 }],
+    desc: 'Weeks ahead where pallet & racking, large pallet or stillage space runs over capacity.' },
+  { id: 'imports', label: 'Imports out of date', sev: 'info', params: [],
+    desc: 'File imports not refreshed within their cadence (Settings → File Imports).' },
+  { id: 'minval', label: 'Minimum value', sev: 'info',
+    params: [{ k: 'gbp', lbl: 'leave out product warnings worth less than £', def: 1000, step: 100 }],
+    desc: 'Keeps the Alerts tab to what matters: product warnings (overstock, trending, no recent sales, low margin…) below this £ figure are left out. Urgent alerts always show.' },
+];
+const PLAN_ALERT_DEF = Object.fromEntries(PLAN_ALERT_DEFS.map(d => [d.id, d]));
+function planAlertCfg() {
+  const saved = (SETTINGS && SETTINGS.alerts) || {};
+  const out = {};
+  for (const d of PLAN_ALERT_DEFS) {
+    const s = saved[d.id] || {};
+    const p = {};
+    for (const pr of d.params) p[pr.k] = Number.isFinite(+s[pr.k]) ? +s[pr.k] : pr.def;
+    out[d.id] = { on: s.on != null ? !!s.on : true, p };
+  }
+  return out;
+}
+function planAlertSettingsHtml() {
+  const cfg = planAlertCfg();
+  return PLAN_ALERT_DEFS.map(d => {
+    const c = cfg[d.id];
+    const params = d.params.map(pr =>
+      `<label class="tsr-p">${esc(pr.lbl)}<input type="number" step="${pr.step}" data-pa="${d.id}" data-pa-p="${pr.k}" value="${c.p[pr.k]}"></label>`).join('');
+    return `<div class="tsr${c.on ? '' : ' off'}">
+      <label class="tsr-on"><input type="checkbox" data-pa="${d.id}" data-pa-on="1"${c.on ? ' checked' : ''}>
+        <span class="tag-chip tg-${d.sev}">${esc(d.label)}</span></label>
+      <div class="tsr-mid"><div class="tsr-desc">${esc(d.desc)}</div>
+        <div class="tsr-params">${params || '<span class="muted-note">No threshold.</span>'}</div></div>
+      <div class="tsr-right"></div>
+    </div>`;
+  }).join('');
+}
+
+const SEV_LABEL = { bad: 'Urgent', warn: 'Warning', good: 'Positive', info: 'Info' };
+let ALERT_CACHE = null;                     // { sections, byKey } — dropped by tagsInvalidate()
+let AL_FILTER = '';
+let AL_SEV = loadPref('tp_al_sev', 'all');  // all | bad | warn | other
+let AL_SHOW_DIS = false;
+let AL_OPEN = loadPref('tp_al_open', {}) || {};   // section id -> open (true) / closed (false)
+const AL_ROWS = 25;                         // rows shown per section before "Show all"
+const AL_ALL = new Set();                   // sections expanded to every row
+
+const alN = n => Math.round(+n || 0).toLocaleString('en-GB');
+const alPct = v => v == null ? '–' : (v > 0 ? '+' : '') + Math.round(v) + '%';
+const alCover = v => v == null || !isFinite(v) ? '–' : (v >= 99 ? '99+' : (+v).toFixed(1));
+// "W12 16 Mar"; a week before this plan year starts (an order-by date for an early
+// arrival) reads as its w/c date in the previous year instead of a negative week number.
+function alWk(w) {
+  if (w >= 1 && w <= WEEKS) return `W${w} <span class="al-dim">${esc(weekDate(w))}</span>`;
+  return w < 1 ? `w/c ${esc(weekDate(w))} <span class="al-dim">${+YEAR - 1}</span>` : '–';
+}
+// Plan week number of today in the LOADED year's numbering (≤ 0 before it starts, > 53 after).
+function todayPlanWeek() {
+  const base = (M && M.week1_start) || '2025-12-29';
+  const [y, m, d] = base.split('-').map(Number);
+  const n = new Date();
+  return Math.floor((Date.UTC(n.getFullYear(), n.getMonth(), n.getDate()) - Date.UTC(y, m - 1, d)) / (7 * 86400000)) + 1;
+}
+function alIsoPlusDays(days) {
+  const n = new Date();
+  const dt = new Date(Date.UTC(n.getFullYear(), n.getMonth(), n.getDate() + days));
+  return dt.toISOString().slice(0, 10);
+}
+// First stock-out at/after week index `from` (stock gone while forecast expects sales),
+// how long it lasts, the demand lost meanwhile and whether a proposed rebuy would fill it.
+function alStockGap(sku, r, from) {
+  let out = -1;
+  for (let w = Math.max(0, from); w < WEEKS; w++) if (r.stock[w] <= 0 && r.forecast[w] > 0) { out = w; break; }
+  if (out < 0) return null;
+  let back = -1, lost = 0;
+  for (let w = out; w < WEEKS; w++) { if (r.stock[w] > 0) { back = w; break; } lost += r.forecast[w] || 0; }
+  const end = back < 0 ? WEEKS : back;
+  const rc = RESC.get(sku.id);
+  let fix = 0;
+  if (rc) for (let w = out; w < end; w++) if (rc.stock[w] > 0) { fix = w + 1; break; }
+  return { out: out + 1, back: back < 0 ? 0 : back + 1, weeks: end - out, lostU: lost, lostGBP: lost * (+sku.asp || 0), fix };
+}
+function alPastDue(iso, today) {
+  const wks = Math.floor((Date.parse(today) - Date.parse(iso)) / (7 * 86400000));
+  return wks >= 8 ? `${wks} wks past due — close or chase?` : wks >= 1 ? `${wks} wk${wks === 1 ? '' : 's'} past due` : 'due date passed';
+}
+function alNextArrival(sku, from) {
+  const com = ORDERS[sku.id] || EMPTY53;
+  for (let w = Math.max(0, from); w < WEEKS; w++) if ((com[w] || 0) > 0.5) return w + 1;
+  return 0;
+}
+function alBackCell(g) {
+  if (!g) return '–';
+  const fix = g.fix ? `<div class="al-note">proposed rebuy restocks W${g.fix}</div>` : '';
+  return (g.back ? `W${g.back} <span class="al-dim">${g.weeks} wk${g.weeks === 1 ? '' : 's'} out</span>`
+                 : `<span class="al-neg">nothing due in ${YEAR}</span>`) + fix;
+}
+// Per-tag table columns ([header, cell(ctx)]), sort impact (£, biggest first), the
+// dismissal signature, and the section's headline total.
+const AL_GBP = n => fmtGBPk(Math.round(+n || 0));
+const ALERT_PRODUCT = {
+  oos: {
+    prep: c => { c.g = alStockGap(c.sku, c.r, c.cur - 1); },
+    cols: [['Stock', c => alN(c.m.stock)], ['Next 4 wks demand', c => alN(c.m.fcNext4)],
+           ['Back in stock', c => alBackCell(c.g)], ['Lost sales est.', c => c.g ? fmtGBP(c.g.lostGBP) : '–']],
+    impact: c => c.g ? c.g.lostGBP : 0, sig: c => c.g ? c.g.back : '',
+    total: t => `${AL_GBP(t)} lost sales est. until restocked` },
+  stockout: {
+    prep: c => { c.g = alStockGap(c.sku, c.r, c.cur - 1); },
+    cols: [['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)],
+           ['Runs out', c => c.g ? alWk(c.g.out) : '–'], ['Back in stock', c => alBackCell(c.g)],
+           ['Lost sales est.', c => c.g ? fmtGBP(c.g.lostGBP) : '–']],
+    impact: c => c.g ? c.g.lostGBP : 0, sig: c => c.g ? c.g.out + '>' + c.g.back : '',
+    total: t => `${AL_GBP(t)} lost sales est.` },
+  understocked: { money: true,
+    prep: c => { c.next = alNextArrival(c.sku, c.cur - 1); },
+    cols: [['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)],
+           ['Forecast to come', c => alN(c.m.fcRest)], ['Next arrival', c => c.next ? alWk(c.next) : '<span class="al-neg">none</span>']],
+    impact: c => c.m.fcRest * (+c.sku.asp || 0) },
+  overstocked: { money: true,
+    prep: c => { c.ex = c.m.cover > 0 ? c.m.stock * Math.max(0, 1 - c.p.cover / c.m.cover) : 0; },
+    cols: [['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)],
+           ['Excess units', c => alN(c.ex)], ['Excess at landed', c => fmtGBP(c.ex * (+c.sku.landed || 0))]],
+    impact: c => c.ex * (+c.sku.landed || 0),
+    total: t => `${AL_GBP(t)} excess stock at landed cost` },
+  trendup: { money: true,
+    prep: c => { c.t = recentTrend(c.sku, c.r, c.p.weeks); },
+    cols: [['Sold', c => alN(c.t && c.t.act)], ['Forecast', c => alN(c.t && c.t.fc)],
+           ['Vs forecast', c => `<span class="al-pos">${alPct(c.t && c.t.pct)}</span>`],
+           ['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)]],
+    head: c => `Last ${c.p.weeks} wks`,
+    impact: c => c.t ? Math.abs(c.t.act - c.t.fc) * (+c.sku.asp || 0) : 0 },
+  trenddown: { money: true,
+    prep: c => { c.t = recentTrend(c.sku, c.r, c.p.weeks); },
+    cols: [['Sold', c => alN(c.t && c.t.act)], ['Forecast', c => alN(c.t && c.t.fc)],
+           ['Vs forecast', c => `<span class="al-neg">${alPct(c.t && c.t.pct)}</span>`],
+           ['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)]],
+    head: c => `Last ${c.p.weeks} wks`,
+    impact: c => c.t ? Math.abs(c.t.act - c.t.fc) * (+c.sku.asp || 0) : 0 },
+  overselling: { money: true,
+    cols: [['Sales YTD', c => fmtGBP(c.m.ytdAct)], ['Forecast YTD', c => fmtGBP(c.m.ytdFc)],
+           ['Vs forecast', c => `<span class="al-pos">${alPct(c.m.ytdPct)}</span>`]],
+    impact: c => Math.abs((c.m.ytdAct || 0) - (c.m.ytdFc || 0)) },
+  underselling: { money: true,
+    cols: [['Sales YTD', c => fmtGBP(c.m.ytdAct)], ['Forecast YTD', c => fmtGBP(c.m.ytdFc)],
+           ['Vs forecast', c => `<span class="al-neg">${alPct(c.m.ytdPct)}</span>`]],
+    impact: c => Math.abs((c.m.ytdAct || 0) - (c.m.ytdFc || 0)),
+    total: t => `${AL_GBP(t)} behind forecast YTD` },
+  nosales: { money: true,
+    cols: [['Stock', c => alN(c.m.stock)], ['Stock at landed', c => fmtGBP(c.m.stock * (+c.sku.landed || 0))],
+           ['Last sale', c => c.m.lastSale ? alWk(c.m.lastSale) : `none in ${YEAR}`], ['Status', c => statusBadge(c.sku.status)]],
+    impact: c => c.m.stock * (+c.sku.landed || +c.sku.asp || 0),
+    total: t => `${AL_GBP(t)} stock not moving` },
+  nlorder: {
+    prep: c => { c.next = alNextArrival(c.sku, c.cur - 1); },
+    cols: [['On order', c => alN(c.m.comFuture)], ['First arrival', c => alWk(c.next)],
+           ['FOB value', c => fmtGBP(c.m.comFuture * (+c.sku.fob || 0))], ['Stock', c => alN(c.m.stock)]],
+    impact: c => c.m.comFuture * (+c.sku.fob || 0),
+    total: t => `${AL_GBP(t)} FOB still on order` },
+  lowmargin: { money: true,
+    cols: [['ASP', c => fmtGBP2(c.sku.asp)], ['Landed', c => fmtGBP2(c.sku.landed)],
+           ['Margin', c => `<span class="${c.m.margin < 0 ? 'al-neg' : ''}">${(+c.m.margin).toFixed(1)}%</span>`],
+           ['Forecast to come', c => fmtGBP(c.m.fcRest * (+c.sku.asp || 0))]],
+    impact: c => c.m.fcRest * (+c.sku.asp || 0), sig: c => Math.round(c.m.margin) },
+  rundown: { money: true,
+    cols: [['Stock', c => alN(c.m.stock)], ['Stock at landed', c => fmtGBP(c.m.stock * (+c.sku.landed || 0))],
+           ['Left at year end', c => alN(c.r.stock[WEEKS - 1])]],
+    impact: c => c.m.stock * (+c.sku.landed || 0) },
+  slow: { money: true,
+    cols: [['Year forecast', c => alN(c.m.fcYear)], ['Stock', c => alN(c.m.stock)], ['Status', c => statusBadge(c.sku.status)]],
+    impact: c => c.m.stock * (+c.sku.landed || 0) },
+  nocost: {
+    cols: [['Missing', c => ['fob', 'landed', 'asp'].filter(k => !(+c.sku[k] > 0)).map(k => k === 'asp' ? 'ASP' : k === 'fob' ? 'FOB' : 'Landed').join(', ')]],
+    impact: c => c.m.fcRest },
+  nospace: {
+    cols: [['Missing', c => [!(+c.sku.fpq > 0) ? 'units per pallet' : '', !c.sku.pallet_type ? 'storage type' : ''].filter(Boolean).join(', ')],
+           ['Stock', c => alN(c.m.stock)]],
+    impact: c => c.m.stock },
+};
+const ALERT_PRODUCT_DEFAULT = {
+  cols: [['Stock', c => alN(c.m.stock)], ['Cover', c => alCover(c.m.cover)], ['Forecast to come', c => alN(c.m.fcRest)]],
+  impact: c => c.m.fcRest * (+c.sku.asp || 0) };
+function fmtGBP2(n) { return +n > 0 ? '£' + (+n).toFixed(2) : '–'; }
+
+// Section groups, in page order; each lists its sections (tag ids or plan-alert ids).
+const ALERT_GROUPS = [
+  { name: 'Orders & POs', ids: ['order', 'unpo', 'book', 'nlorder'] },
+  { name: 'Stock', ids: ['oos', 'stockout', 'understocked', 'overstocked', 'nosales', 'rundown', 'rebuy', 'nopo'] },
+  { name: 'Sales vs forecast', ids: ['trenddown', 'underselling', 'trendup', 'overselling', 'slow'] },
+  { name: 'Warehouse & data', ids: ['space', 'imports', 'lowmargin', 'nocost', 'nospace', 'npd'] },
+];
+
+function buildAlerts() {
+  if (ALERT_CACHE) return ALERT_CACHE;
+  const sections = new Map();
+  if (!M || !M.skus || !RES) return (ALERT_CACHE = { sections, byKey: new Map() });
+  if (!ALERT_TAGS) buildTags();
+  const cur = SETTINGS.current_week || 1, tcfg = tagCfg(), pcfg = planAlertCfg();
+  const minGbp = pcfg.minval.on ? Math.max(0, +pcfg.minval.p.gbp || 0) : 0;
+  const sec = (id, def, extra) => {
+    if (!sections.has(id)) sections.set(id, Object.assign({ id, label: def.label, sev: def.sev, desc: def.desc, items: [] }, extra || {}));
+    return sections.get(id);
+  };
+  // ---- product alerts (tags with their Alert switch on) ----
+  for (const sku of M.skus) {
+    const ids = ALERT_TAGS.get(sku.id);
+    if (!ids || !ids.length) continue;
+    const r = RES.get(sku.id), m = TAG_METRICS.get(sku.id) || {};
+    for (const id of ids) {
+      if (id === 'stockout' && ids.includes('oos')) continue;     // already out — one alert is enough
+      if (id === 'underselling' && ids.includes('trenddown')) continue;
+      if (id === 'overselling' && ids.includes('trendup')) continue;
+      const def = TAG_DEF[id], spec = ALERT_PRODUCT[id] || ALERT_PRODUCT_DEFAULT;
+      const c = { sku, r, m, p: tcfg[id].p, cur };
+      try {
+        if (spec.prep) spec.prep(c);
+        if (minGbp > 0 && spec.money && def.sev !== 'bad' && (+spec.impact(c) || 0) < minGbp) continue;
+        const s = sec(id, def, { kind: 'product', term: def.term, spec, params: tcfg[id].p });
+        s.items.push({ key: `${YEAR}|${id}|${sku.code}`, sig: String(spec.sig ? spec.sig(c) : ''), sev: def.sev,
+          sku, supplier: sku.supplier, find: `${sku.code} ${sku.name || ''} ${sku.supplier || ''}`.toLowerCase(),
+          impact: +spec.impact(c) || 0, cells: spec.cols.map(([, f]) => f(c)) });
+      } catch { /* one bad product never takes the page down */ }
+    }
+  }
+  // ---- rebuys to order / committed with no PO (from the plan-side arrivals) ----
+  const tw = todayPlanWeek();
+  for (const kind of ['order', 'unpo']) {
+    if (!pcfg[kind].on) continue;
+    sec(kind, PLAN_ALERT_DEF[kind], { kind: 'supply' });
+  }
+  if (pcfg.order.on || pcfg.unpo.on) {
+    let evs = [];
+    try { evs = buildPlanArrivals(); } catch { evs = []; }
+    for (const ev of evs) {
+      const id = ev.kind === 'proposed' ? 'order' : 'unpo';
+      if (!pcfg[id].on) continue;
+      if (id === 'unpo' && !poDataReady()) continue;            // can't tell "no PO" without the PO files
+      const lead = leadWeeks(supByName.get(ev.supplier));
+      const by = ev.week - lead;
+      if (by > tw + pcfg[id].p.weeks) continue;
+      const units = ev.lines.reduce((a, l) => a + l.qty, 0);
+      const fob = ev.lines.reduce((a, l) => a + l.qty * (+(l.sku && l.sku.fob) || 0), 0);
+      const late = tw - by;
+      const byTxt = late > 0 ? `${alWk(by)}<div class="al-neg">${late} wk${late === 1 ? '' : 's'} overdue</div>`
+                  : late === 0 ? `${alWk(by)}<div class="al-warn">this week</div>`
+                  : `${alWk(by)}<div class="al-dim">in ${-late} wk${late === -1 ? '' : 's'}</div>`;
+      const codes = ev.lines.map(l => l.code);
+      sections.get(id).items.push({ key: `${YEAR}|${id}|${ev.supplier}|${ev.week}`, sig: String(Math.round(units)),
+        sev: late > 0 ? 'bad' : 'warn', supplier: ev.supplier, week: ev.week,
+        find: `${ev.supplier} ${codes.join(' ')}`.toLowerCase(), impact: fob,
+        cells: [`<a data-sup="${esc(ev.supplier)}" data-wk="${ev.week}">${esc(titleCase(ev.supplier))}</a>`,
+                alWk(ev.week), byTxt, `<span class="al-dim">${lead} wks</span>`, alN(units), ev.cbm.toFixed(1),
+                ev.containers.toFixed(2), fmtGBP(fob),
+                `<span class="al-codes" title="${esc(codes.join(', '))}">${esc(codes.slice(0, 3).join(', '))}${codes.length > 3 ? ` +${codes.length - 3}` : ''}</span>`] });
+    }
+  }
+  // ---- open POs still to book ----
+  if (pcfg.book.on && poDataReady()) {
+    const s = sec('book', PLAN_ALERT_DEF.book, { kind: 'po' });
+    let ev = { awaiting: [] };
+    try { ev = buildArrivalEvents(); } catch { /* PO files unreadable */ }
+    const today = arrTodayIso(), horizon = alIsoPlusDays(pcfg.book.p.days);
+    for (const a of ev.awaiting) {
+      if (!a.date) continue;
+      const by = arrBookDate(a.date);
+      if (by > horizon) continue;
+      const units = a.lines.reduce((x, l) => x + l.qty, 0);
+      const fob = a.lines.reduce((x, l) => x + l.qty * (+(l.sku && l.sku.fob) || 0), 0);
+      const sevI = (a.overdue || by < today) ? 'bad' : 'warn';
+      s.items.push({ key: `g|book|${a.po}`, sig: a.date, sev: sevI, supplier: a.supplier, global: true,
+        find: `${a.po} ${a.supplier} ${a.lines.map(l => l.code).join(' ')}`.toLowerCase(), impact: fob,
+        cells: [`<b>${esc(a.po)}</b>`, `<a data-sup="${esc(a.supplier)}">${esc(titleCase(a.supplier))}</a>`,
+                fmtDate(a.date) + (a.overdue ? `<div class="al-neg">${alPastDue(a.date, today)}</div>` : ''),
+                fmtDate(by) + (by < today && !a.overdue ? '<div class="al-neg">late to book</div>' : ''),
+                alN(units), String(a.lines.length), fmtGBP(fob)] });
+    }
+  }
+  // ---- warehouse space over capacity (current week onwards) ----
+  if (pcfg.space.on) {
+    const s = sec('space', PLAN_ALERT_DEF.space, { kind: 'plan' });
+    try {
+      const d = whSeries(null), lim = pcfg.space.p.pct / 100;
+      const sides = [['Pallets & racking', d.rackUse, d.rackTotal], ['Large pallets', d.largeUse, d.largeTotal], ['Stillages', d.stillUse, d.stillTotal]];
+      for (const [name, use, total] of sides) {
+        if (!(total > 0)) continue;
+        let first = 0, n = 0, peak = 0, peakW = 0;
+        for (let w = Math.max(0, cur - 1); w < WEEKS; w++) {
+          if (use[w] > lim) { n++; if (!first) first = w + 1; }
+          if (use[w] > peak) { peak = use[w]; peakW = w + 1; }
+        }
+        if (!n) continue;
+        s.items.push({ key: `${YEAR}|space|${name}`, sig: String(first), sev: peak > 1 ? 'bad' : 'warn', find: name.toLowerCase(),
+          impact: peak, cells: [`<a data-view="warehouse">${esc(name)}</a>`, String(n), alWk(first),
+            `${Math.round(peak * 100)}% <span class="al-dim">W${peakW}</span>`, alN(total)] });
+      }
+    } catch { /* capacity settings incomplete */ }
+  }
+  // ---- imports out of date ----
+  if (pcfg.imports.on) {
+    const s = sec('imports', PLAN_ALERT_DEF.imports, { kind: 'plan' });
+    for (const g of importGroups()) for (const id of g.items) {
+      const def = IMPORT_DEF[id]; if (!def) continue;
+      const iso = def.when(), f = importFreshness(iso, g.cadence);
+      if (f.cls !== 'if-old') continue;
+      s.items.push({ key: `g|imp|${id}`, sig: String(iso || ''), sev: g.cadence === 'weekly' ? 'warn' : 'info', global: true,
+        find: def.label.toLowerCase(), impact: g.cadence === 'weekly' ? 1 : 0,
+        cells: [`<a data-imports="1">${esc(def.label)}</a>`, esc(g.cadence), iso ? esc(fmtUpDate(iso)) : 'never', esc(f.t)] });
+    }
+  }
+  const byKey = new Map();
+  for (const s of sections.values()) {
+    s.items.sort((a, b) => (a.sev === b.sev ? 0 : a.sev === 'bad' ? -1 : b.sev === 'bad' ? 1 : 0) || b.impact - a.impact
+      || String(a.sku ? a.sku.code : a.key).localeCompare(String(b.sku ? b.sku.code : b.key)));
+    for (const it of s.items) byKey.set(it.key, it);
+  }
+  return (ALERT_CACHE = { sections, byKey });
+}
+const ALERT_HEADS = {
+  order: ['Supplier', 'Arrives', 'Order by', 'Lead', 'Units', 'CBM', 'Containers', 'FOB', 'Products'],
+  unpo: ['Supplier', 'Arrives', 'Order by', 'Lead', 'Units', 'CBM', 'Containers', 'FOB', 'Products'],
+  book: ['PO', 'Supplier', 'Due', 'Book by', 'Units', 'Lines', 'FOB'],
+  space: ['Storage', 'Weeks over', 'First week over', 'Peak', 'Capacity'],
+  imports: ['Import', 'Cadence', 'Last updated', 'Status'],
+};
+function alDismissed() { SETTINGS.alerts_dismissed = SETTINGS.alerts_dismissed || {}; return SETTINGS.alerts_dismissed; }
+function alIsDismissed(it) { const d = (SETTINGS && SETTINGS.alerts_dismissed) || {}; return d[it.key] != null && d[it.key] === it.sig; }
+// Forget dismissals that no longer apply (the alert cleared, or its signature moved on) —
+// only for this year's keys and the global ones, never another year's.
+function alPruneDismissed() {
+  const d = (SETTINGS && SETTINGS.alerts_dismissed) || {};
+  const { byKey } = buildAlerts();
+  let changed = false;
+  for (const k of Object.keys(d)) {
+    if (!(k.startsWith(YEAR + '|') || k.startsWith('g|'))) continue;
+    const it = byKey.get(k);
+    if (!it || it.sig !== d[k]) { delete d[k]; changed = true; }
+  }
+  if (changed) { labelNextSave('Alerts: cleared dismissals'); markDirty(); }
+}
+function alVisible(it) {
+  if (AL_SEV === 'bad' && it.sev !== 'bad') return false;
+  if (AL_SEV === 'warn' && it.sev !== 'warn') return false;
+  if (AL_SEV === 'other' && (it.sev === 'bad' || it.sev === 'warn')) return false;
+  if (AL_FILTER && !it.find.includes(AL_FILTER.trim().toLowerCase())) return false;
+  return true;
+}
+function alertCounts() {
+  const { sections } = buildAlerts();
+  const n = { bad: 0, warn: 0, good: 0, info: 0, dismissed: 0 };
+  for (const s of sections.values()) for (const it of s.items) {
+    if (alIsDismissed(it)) n.dismissed++; else n[it.sev]++;
+  }
+  return n;
+}
+function updateAlertsTab() {
+  const el = document.getElementById('al-count');
+  if (!el || !M) return;
+  let n = 0;
+  try { n = alertCounts().bad; } catch { n = 0; }
+  el.textContent = n ? String(n) : '';
+  el.title = n ? `${n} urgent alert${n === 1 ? '' : 's'}` : '';
+}
+
+function renderAlerts() {
+  alPruneDismissed();
+  const main = document.getElementById('main');
+  const cur = SETTINGS.current_week || 1;
+  main.innerHTML = `<div class="arr-wrap al-wrap"><div class="arr-top"><h2>Alerts</h2>`
+    + `<span class="al-when">${YEAR} · week ${cur} <span class="al-dim">w/c ${esc(weekDate(cur))}</span></span>`
+    + `<input type="search" id="al-filter" placeholder="Filter code / product / supplier / PO" value="${esc(AL_FILTER)}" autocomplete="off">`
+    + `<div class="al-seg" id="al-seg"></div>`
+    + `<label class="al-dis"><input type="checkbox" id="al-show-dis"${AL_SHOW_DIS ? ' checked' : ''}> Show dismissed <span id="al-dis-n"></span></label>`
+    + `<button type="button" id="al-settings" title="Choose which tags raise alerts and set every threshold">Alert settings</button></div>`
+    + `<div id="al-kpis" class="al-kpis"></div><div id="al-jump" class="al-jump"></div><div id="al-body"></div></div>`;
+  document.getElementById('al-filter').addEventListener('input', e => { AL_FILTER = e.target.value; drawAlerts(); });
+  document.getElementById('al-show-dis').addEventListener('change', e => { AL_SHOW_DIS = e.target.checked; drawAlerts(); });
+  document.getElementById('al-settings').addEventListener('click', () => { openSettings(); setSettingsTab('tags'); });
+  document.getElementById('al-seg').addEventListener('click', e => {
+    const b = e.target.closest('[data-sev]'); if (!b) return;
+    AL_SEV = b.dataset.sev; savePref('tp_al_sev', AL_SEV); drawAlerts();
+  });
+  document.getElementById('al-jump').addEventListener('click', e => {
+    const b = e.target.closest('[data-jump]'); if (!b) return;
+    AL_OPEN[b.dataset.jump] = true; savePref('tp_al_open', AL_OPEN); drawAlerts();
+    const t = document.getElementById('al-sec-' + b.dataset.jump);
+    if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  const body = document.getElementById('al-body');
+  body.addEventListener('click', e => {
+    const head = e.target.closest('.al-sec-head');
+    if (head && !e.target.closest('button, a')) {
+      const id = head.dataset.sec, open = !head.parentElement.classList.contains('open');
+      AL_OPEN[id] = open; savePref('tp_al_open', AL_OPEN);
+      head.parentElement.classList.toggle('open', open);
+      return;
+    }
+    const a = e.target.closest('a[data-sku]');
+    if (a) { alertGotoSku(a.dataset.sku); return; }
+    const sa = e.target.closest('a[data-sup]');
+    if (sa) {
+      currentSupplier = sa.dataset.sup; savePref('tp_supplier', currentSupplier);
+      if (searchTerm) { setSearchTerm(''); const inp = document.getElementById('search'); if (inp) inp.value = ''; }
+      renderSidebar(); setView('plan');
+      if (sa.dataset.wk) flashWeek(+sa.dataset.wk);
+      return;
+    }
+    if (e.target.closest('a[data-view]')) { setView(e.target.closest('a[data-view]').dataset.view); return; }
+    if (e.target.closest('a[data-imports]')) { openSettings(); setSettingsTab('imports'); return; }
+    if (e.target.closest('a[data-settings]')) { openSettings(); setSettingsTab('tags'); return; }
+    const det = e.target.closest('button[data-det]');
+    if (det) { openSkuDialog(det.dataset.det); return; }
+    const tag = e.target.closest('button[data-term]');
+    if (tag) {
+      setSearchTerm(tag.dataset.term); const inp = document.getElementById('search'); if (inp) inp.value = tag.dataset.term;
+      const first = M.skus.find(k => skuMatchesTerm(k, tag.dataset.term));
+      if (first) { currentSupplier = first.supplier; savePref('tp_supplier', currentSupplier); }
+      renderSidebar(); setView('plan');
+      return;
+    }
+    const all = e.target.closest('button[data-all]');
+    if (all) { AL_ALL.add(all.dataset.all); drawAlerts(); return; }
+    const dis = e.target.closest('button[data-dismiss]');
+    if (dis) {
+      const it = buildAlerts().byKey.get(dis.dataset.dismiss); if (!it) return;
+      const d = alDismissed();
+      if (d[it.key] === it.sig) { delete d[it.key]; labelNextSave('Alert restored'); }
+      else { d[it.key] = it.sig; labelNextSave('Alert dismissed'); }
+      markDirty(); drawAlerts(); updateAlertsTab();
+    }
+  });
+  drawAlerts();
+}
+function alertGotoSku(id) {
+  const sku = M.skus.find(s => String(s.id) === String(id)); if (!sku) return;
+  currentSupplier = sku.supplier; savePref('tp_supplier', currentSupplier);
+  setSearchTerm(sku.code);
+  const inp = document.getElementById('search'); if (inp) inp.value = sku.code;
+  renderSidebar(); setView('plan');
+}
+function drawAlerts() {
+  const { sections } = buildAlerts();
+  const n = alertCounts();
+  const other = n.good + n.info;
+  document.getElementById('al-seg').innerHTML = [['all', 'All', n.bad + n.warn + other], ['bad', 'Urgent', n.bad],
+    ['warn', 'Warning', n.warn], ['other', 'Info', other]]
+    .map(([k, l, c]) => `<button type="button" data-sev="${k}" class="${AL_SEV === k ? 'on' : ''} sev-${k}">${l} <b>${c}</b></button>`).join('');
+  document.getElementById('al-dis-n').textContent = n.dismissed ? `(${n.dismissed})` : '';
+  // headline figures
+  const sumImp = (id, onlyBad) => { const s = sections.get(id); if (!s) return 0;
+    return s.items.filter(it => !alIsDismissed(it) && (!onlyBad || it.sev === 'bad')).reduce((a, it) => a + it.impact, 0); };
+  const cnt = (id, sv) => { const s = sections.get(id); return s ? s.items.filter(it => !alIsDismissed(it) && (!sv || it.sev === sv)).length : 0; };
+  const kpi = (v, l, s, cls) => `<div class="al-kpi ${cls || ''}"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+  document.getElementById('al-kpis').innerHTML =
+      kpi(n.bad, 'Urgent', `${n.warn} warning${n.warn === 1 ? '' : 's'} · ${other} info`, n.bad ? 'k-bad' : '')
+    + kpi(cnt('oos') + cnt('stockout'), 'Out of stock / running out', `${AL_GBP(sumImp('oos') + sumImp('stockout'))} lost sales est.`, cnt('oos') ? 'k-bad' : '')
+    + kpi(cnt('order', 'bad') + cnt('unpo', 'bad'), 'Orders overdue to place', `${cnt('order') + cnt('unpo')} due within the window`, (cnt('order', 'bad') + cnt('unpo', 'bad')) ? 'k-bad' : '')
+    + kpi(cnt('book'), 'POs to book', `${cnt('book', 'bad')} late`, cnt('book', 'bad') ? 'k-warn' : '')
+    + kpi(AL_GBP(sumImp('overstocked')), `Stock above ${tagCfg().overstocked.p.cover} wks cover`, `at landed cost · ${cnt('overstocked')} overstocked products`, '');
+  // section jump chips + the sections themselves, in group order
+  const order = ALERT_GROUPS.flatMap(g => g.ids);
+  const known = new Set(order);
+  for (const id of sections.keys()) if (!known.has(id)) order.push(id);
+  const vis = id => {
+    const s = sections.get(id); if (!s) return [];
+    return s.items.filter(it => alVisible(it) && (AL_SHOW_DIS || !alIsDismissed(it)));
+  };
+  document.getElementById('al-jump').innerHTML = order.filter(id => vis(id).length).map(id => {
+    const s = sections.get(id), k = vis(id);
+    const sv = k.some(it => it.sev === 'bad') ? 'bad' : s.sev;
+    return `<button type="button" class="tq-chip tg-${sv}" data-jump="${id}" title="${esc(s.desc || '')}">${esc(s.label)} <b>${k.length}</b></button>`;
+  }).join('');
+  let html = '';
+  for (const g of ALERT_GROUPS) {
+    const ids = g.ids.filter(id => vis(id).length);
+    if (!ids.length) continue;
+    html += `<div class="al-group">${esc(g.name)}</div>` + ids.map(id => alSectionHtml(sections.get(id), vis(id))).join('');
+  }
+  const extra = order.filter(id => !ALERT_GROUPS.some(g => g.ids.includes(id)) && vis(id).length);
+  if (extra.length) html += `<div class="al-group">Other</div>` + extra.map(id => alSectionHtml(sections.get(id), vis(id))).join('');
+  if (!html) {
+    const filtering = AL_FILTER || AL_SEV !== 'all';
+    html = `<div class="empty">${filtering ? 'No alerts match the filter.' : `Nothing needs attention in ${YEAR} right now.`}</div>`;
+  }
+  const pc = planAlertCfg();
+  if (pc.minval.on && +pc.minval.p.gbp > 0)
+    html += `<p class="muted-note al-foot">Product warnings worth less than <b>£${alN(pc.minval.p.gbp)}</b> are left out — change it, or switch alerts on and off, in <a data-settings="1">Alert settings</a>.</p>`;
+  document.getElementById('al-body').innerHTML = html;
+}
+function alSectionHtml(s, items) {
+  const open = AL_OPEN[s.id] != null ? AL_OPEN[s.id] : (s.sev === 'bad' || s.sev === 'warn');
+  const live = items.filter(it => !alIsDismissed(it));
+  const tot = live.reduce((a, it) => a + it.impact, 0);
+  const totTxt = s.spec && s.spec.total && tot > 0 ? `<span class="al-tot">${s.spec.total(tot)}</span>` : '';
+  const shown = AL_ALL.has(s.id) || AL_FILTER ? items : items.slice(0, AL_ROWS);
+  const product = s.kind === 'product';
+  let heads;
+  if (product) {
+    const sub = s.spec.head ? s.spec.head({ p: s.params }) : '';
+    heads = ['Code', 'Product', 'Supplier', ...s.spec.cols.map(([h]) => h + (sub && ['Sold', 'Forecast'].includes(h) ? ` <span class="al-dim">${esc(sub)}</span>` : ''))];
+  } else heads = ALERT_HEADS[s.id] || [];
+  const LEFT = new Set(['Code', 'Product', 'Supplier', 'PO', 'Storage', 'Import', 'Products', 'Cadence', 'Status', 'Missing']);
+  const left = heads.map(h => LEFT.has(String(h).replace(/<[^>]*>/g, '').trim()));
+  const off = product ? 3 : 0;                  // product rows lead with their own code / name / supplier cells
+  const rows = shown.map(it => {
+    const dis = alIsDismissed(it);
+    const lead = product
+      ? `<td class="al-code"><a data-sku="${esc(it.sku.id)}" title="Open ${esc(it.sku.code)} in the Plan">${esc(it.sku.code)}</a></td>`
+        + `<td class="al-name" title="${esc(it.sku.name || '')}">${esc(it.sku.name || '')}</td>`
+        + `<td class="al-sup"><a data-sup="${esc(it.sku.supplier)}">${esc(titleCase(it.sku.supplier || ''))}</a></td>`
+      : '';
+    const acts = (product ? `<button type="button" class="al-btn" data-det="${esc(it.sku.id)}" title="Product details">Details</button>` : '')
+      + `<button type="button" class="al-btn al-x" data-dismiss="${esc(it.key)}" title="${dis ? 'Restore this alert' : 'Dismiss — hidden until it changes or clears'}">${dis ? 'Restore' : '✕'}</button>`;
+    return `<tr class="al-row sv-${it.sev}${dis ? ' al-dismissed' : ''}"><td class="al-sev"><i></i></td>${lead}`
+      + it.cells.map((c, i) => `<td${left[i + off] ? ' class="l"' : ''}>${c}</td>`).join('') + `<td class="al-acts">${acts}</td></tr>`;
+  }).join('');
+  const more = shown.length < items.length
+    ? `<div class="al-more"><button type="button" data-all="${s.id}">Show all ${items.length}</button></div>` : '';
+  const tagBtn = product && tagCfg()[s.id] && tagCfg()[s.id].on
+    ? `<button type="button" class="al-btn" data-term="${esc(s.term)}" title="Search the Plan for “${esc(s.term)}”">Show in Plan</button>` : '';
+  return `<section class="al-sec${open ? ' open' : ''}" id="al-sec-${s.id}">`
+    + `<div class="al-sec-head" data-sec="${s.id}"><span class="al-chev">▸</span><span class="tag-chip tg-${s.sev}">${esc(s.label)}</span>`
+    + `<b class="al-n">${live.length}</b><span class="al-desc">${esc(s.desc || '')}</span>${totTxt}${tagBtn}</div>`
+    + `<div class="al-sec-body"><table class="flat al-table"><thead><tr><th></th>${heads.map((h, i) => `<th${left[i] ? ' class="l"' : ''}>${h}</th>`).join('')}<th></th></tr></thead>`
+    + `<tbody>${rows}</tbody></table>${more}</div></section>`;
 }
 
 /* ---------------- Graveyard (delisted products off the Buying Report) ---------------- */

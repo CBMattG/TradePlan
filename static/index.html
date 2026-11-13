@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=134">
+<link rel="stylesheet" href="style.css?v=136">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -16,10 +16,11 @@
   <select id="year-select" title="Plan year"></select>
   <button id="btn-build-year" title="Build next-year forecast">+ year</button>
   <nav id="tabs">
+    <button class="tab" data-view="alerts" title="Alerts — stock-outs, orders due, POs to book, sales running off forecast and more, most urgent first">Alerts <span id="al-count" class="tab-count al-urgent"></span></button>
     <button class="tab active" data-view="plan">Plan</button>
     <button class="tab" data-view="summary">Summary</button>
     <button class="tab" data-view="arrivals" title="Upcoming container arrivals — Qlik bookings joined to WEBSA open PO balances">Arrivals</button>
-    <button class="tab" data-view="warehouse" title="Warehouse space capacity — pallet &amp; stillage utilisation through the year">Warehouse Capacity</button>
+    <button class="tab" data-view="warehouse" title="Warehouse space capacity — pallet &amp; stillage utilisation through the year">Warehouse<span class="tab-long"> Capacity</span></button>
     <button class="tab" data-view="graveyard" title="Graveyard — delisted products that dropped off the Buying Report, kept out of the main screens">Graveyard <span id="gy-count" class="tab-count"></span></button>
   </nav>
   <div id="topbar-right">
@@ -65,7 +66,7 @@
         <button type="button" class="stab active" data-tab="forecast">Forecast</button>
         <button type="button" class="stab" data-tab="capacity">Capacity &amp; weeks</button>
         <button type="button" class="stab" data-tab="cover">Weeks Cover</button>
-        <button type="button" class="stab" data-tab="tags">Tags</button>
+        <button type="button" class="stab" data-tab="tags">Tags &amp; Alerts</button>
         <button type="button" class="stab" data-tab="rebuy">Rebuy</button>
         <button type="button" class="stab" data-tab="supplier">Supplier forms</button>
         <button type="button" class="stab" data-tab="imports">File Imports</button>
@@ -215,7 +216,7 @@
     <!-- WEEKS COVER -->
     <!-- TAGS -->
     <div class="stab-panel hidden" data-panel="tags">
-      <p class="ex-sub">Tags are worked out live from the plan &mdash; nothing is stored on the product. Each enabled tag becomes a <b>quick search term</b> on the Plan page (type it in the search box, or click its chip under the search), and a chip on the product's header. Set the thresholds to match how you buy; the count on the right updates as you change them.</p>
+      <p class="ex-sub">Tags are worked out live from the plan &mdash; nothing is stored on the product. Tick <b>Alert</b> to also raise a tag's products on the <b>Alerts</b> tab (an alert works even with its tag switched off). Each enabled tag becomes a <b>quick search term</b> on the Plan page (type it in the search box, or click its chip under the search), and a chip on the product's header. Set the thresholds to match how you buy; the count on the right updates as you change them.</p>
       <div id="tag-settings"></div>
       <p class="muted-note">Untick a tag to hide it everywhere (chip, quick filter and search). <b>Missing cost</b> and <b>Missing space data</b> start off &mdash; they are for data clean-ups rather than day-to-day buying. Changes here save and take effect immediately, without waiting for Apply.</p>
     </div>
@@ -736,6 +737,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=185"></script>
+<script src="app.js?v=187"></script>
 </body>
 </html>
