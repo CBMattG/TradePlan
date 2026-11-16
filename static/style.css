@@ -1996,3 +1996,13 @@ a.gy-link:hover { color: var(--accent); }
 #bud-flag { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; cursor: pointer;
   background: #7a4fd0 !important; border-color: #7a4fd0 !important; color: #fff !important; white-space: nowrap; }
 #bud-flag[hidden], #btn-build-year[hidden] { display: none; }
+
+/* ---------------- DIALOGS: buttons always on screen ----------------
+   Every dialog's button row (Save / Cancel / Apply…) is pinned to the dialog's bottom edge
+   while its content scrolls above it — the same as Settings — so a long dialog (product
+   Details, Add product, Buying Report preview…) never pushes its buttons off screen. */
+dialog .dialog-actions { position: sticky; bottom: -18px; z-index: 5; background: #fff;
+  margin: 14px 0 -18px; padding: 10px 0 14px; border-top: 1px solid var(--glass-brd); flex-wrap: wrap; row-gap: 6px; }
+[data-theme="dark"] dialog .dialog-actions { background: #18222e; }
+dialog { max-height: calc(100vh - 24px); max-width: calc(100vw - 24px); overscroll-behavior: contain; }
+
