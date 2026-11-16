@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>2026 Tradeplan</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="style.css?v=136">
+<link rel="stylesheet" href="style.css?v=138">
 <script>
   // Apply the saved colour theme before first paint to avoid a flash of the wrong theme.
   try { var t = localStorage.getItem('tp-theme'); if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); } catch (e) {}
@@ -15,6 +15,7 @@
   <div id="brand">Tradeplan</div>
   <select id="year-select" title="Plan year"></select>
   <button id="btn-build-year" title="Build next-year forecast">+ year</button>
+  <button id="bud-flag" type="button" hidden>Budget</button>
   <nav id="tabs">
     <button class="tab" data-view="alerts" title="Alerts — stock-outs, orders due, POs to book, sales running off forecast and more, most urgent first">Alerts <span id="al-count" class="tab-count al-urgent"></span></button>
     <button class="tab active" data-view="plan">Plan</button>
@@ -305,6 +306,7 @@
       <input type="file" id="landed-file" accept=".xlsx" hidden>
       <input type="file" id="buying-file" accept=".xlsx" hidden>
       <input type="file" id="duty-file" accept=".xlsx" hidden>
+      <input type="file" id="budget-file" accept=".xlsx" hidden>
       <input type="file" id="wksales-file" accept=".xlsx" hidden>
       <input type="file" id="chanidx-file" accept=".xlsx" hidden>
       <input type="file" id="cartons-file" accept=".xlsx" hidden>
@@ -737,6 +739,6 @@
   <div class="dialog-actions"><span class="spacer"></span><button type="button" id="revert-cancel">Cancel</button></div>
 </dialog>
 
-<script src="app.js?v=187"></script>
+<script src="app.js?v=190"></script>
 </body>
 </html>

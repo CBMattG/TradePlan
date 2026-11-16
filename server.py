@@ -127,6 +127,7 @@ def graveyard_restore(s):
 # Seeded from the daily sales-by-channel exports, then one week per Sales by Account upload.
 # The channel index the screens use (each product's share by customer) is rebuilt from it.
 CHANNEL_SALES = "channel_sales.json"
+BUDGET_UNITS = "budget_units.json"   # weekly budget units per product (global — spans plan years by date)
 CHANNEL_WINDOW = 52          # weeks of history behind each product's channel mix
 
 
@@ -468,6 +469,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "poWebsa": with_imported_at(DATA / "po_websa.json"),
                 "poContainers": with_imported_at(DATA / "po_containers.json"),
                 "channelIndex": with_imported_at(DATA / "channel_index.json"),
+                # budget forecast units by w/c date (the Plan's "Budget units" toggle)
+                "budgetUnits": read_json(DATA / BUDGET_UNITS, None),
             })
         elif parsed.path == "/api/imported-orders":
             ydir, _ = year_dir(qs)
@@ -774,6 +777,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.parse_po()
         elif parsed.path == "/api/parse-containers":
             self.parse_containers()
+        elif parsed.path == "/api/parse-budget":
+            self.parse_budget()
         elif parsed.path == "/api/save-config":
             self.save_config(parse_qs(parsed.query))
         elif parsed.path == "/api/load-config":
@@ -2464,6 +2469,69 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": False, "error": str(exc)}, 400)
             return
         self.send_json({"ok": True, "poCount": len(data["pos"]), "codes": len(data["codes"]), "rows": data["rows"]})
+
+    @staticmethod
+    def parse_budget_units(raw):
+        """Read a budget forecast workbook's 'Units' tab → {"weeks": [w/c Monday ISO dates],
+        "skus": {code: [units per week]}, "rows", "total"}. The tab has a row of w/c dates
+        above a header row starting 'SKU'; then one row per product code with that week's
+        units under each date. Columns without a date (#N/A padding) are ignored; duplicate
+        codes are summed. Non-product rows (e.g. 'Forecast Adjustment') are kept as-is —
+        they simply match no plan product."""
+        import io
+        import warnings
+        import openpyxl
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        if "Units" not in wb.sheetnames:
+            raise ValueError("No 'Units' tab in this workbook — expected the budget forecast file with a 'Units' sheet.")
+        ws = wb["Units"]
+        date_cols, in_body, blank = None, False, 0
+        skus, rows = {}, 0
+        for row in ws.iter_rows(values_only=True):
+            if date_cols is None:
+                dc = [(c, v) for c, v in enumerate(row or ()) if isinstance(v, datetime)]
+                if len(dc) >= 4:
+                    date_cols = dc
+                continue
+            if not in_body:
+                if row and str(row[0] or "").strip().lower() == "sku":
+                    in_body = True
+                continue
+            code = str(row[0] or "").strip() if row else ""
+            if not code:
+                blank += 1
+                if blank > 200:          # the sheet's used range runs to ~1m empty rows
+                    break
+                continue
+            blank = 0
+            vals = [float(row[c]) if c < len(row) and isinstance(row[c], (int, float)) else 0.0 for c, _ in date_cols]
+            prev = skus.get(code)
+            skus[code] = [round(a + b, 3) for a, b in zip(prev, vals)] if prev else [round(v, 3) for v in vals]
+            rows += 1
+        if not date_cols:
+            raise ValueError("Couldn't find the row of week-commencing dates on the 'Units' tab.")
+        if not in_body:
+            raise ValueError("Couldn't find the 'SKU' header row on the 'Units' tab.")
+        return {"weeks": [d.date().isoformat() for _, d in date_cols], "skus": skus, "rows": rows,
+                "total": round(sum(sum(v) for v in skus.values()), 1)}
+
+    def parse_budget(self):
+        """Parse + persist the budget forecast units (global, mapped to plan years by date)."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            data = self.parse_budget_units(self.rfile.read(length))
+            data["importedAt"] = datetime.now().isoformat(timespec="seconds")
+            w = data["weeks"]
+            record_change("upload", "Budget units",
+                          f"{len(data['skus'])} products · {len(w)} weeks (w/c {w[0]} – {w[-1]})", [BUDGET_UNITS])
+            write_atomic(DATA / BUDGET_UNITS, json.dumps(data, separators=(",", ":")))
+        except Exception as exc:
+            self.send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        self.send_json({"ok": True, "products": len(data["skus"]), "weeks": len(data["weeks"]),
+                        "first": data["weeks"][0], "last": data["weeks"][-1], "total": data["total"]})
 
     def parse_containers(self):
         """Parse + persist the Qlik Container export (global, shared across years)."""

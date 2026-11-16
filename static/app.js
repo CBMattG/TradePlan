@@ -11,6 +11,8 @@ let IMPORTED = {};       // snapshot of Excel-imported orders (for "changed" mar
 let PO_WEBSA = null;     // { pos:{PO#:{supplier,lines:[{code,ordered,delivered,outstanding,due}]}}, codes, rows }
 let PO_CONTAINERS = null;// { dates:{PO#:[{deliveryCB,etaPort,etd,status,container,shipment,supplier}]}, unparsed, truncated, rows }
 let CHANNEL_INDEX = null; // { skus:{code:[{c,r,p}]}, customers:{no:name}, importedAt } — Channel Sales import (global)
+let BUDGET = null;        // { weeks:[w/c ISO], skus:{code:[units per week]}, importedAt } — Budget Units import (global)
+let BUDGET_ON = (() => { try { return JSON.parse(localStorage.getItem('tp_budget_on')) === true; } catch { return false; } })();
 let CHANGELOG = [];       // change-log entries (newest first), fetched from /api/changelog
 let CHANGE_LABEL = null;  // one-shot label for the next data-edit save (else "Manual edits")
 function labelNextSave(lbl) { CHANGE_LABEL = lbl; }   // tag the next autosave with a semantic action name
@@ -197,6 +199,82 @@ function coverCellStyle(arr, w) {
 }
 
 /* ---------------- calculation engine (mirror of the Excel formulas) ---------------- */
+/* ---- Budget units: the Plan's "Budget units" switch ----
+   The budget workbook's weekly units (File Imports → Budget Units) are stored once, by
+   week-commencing date, and mapped onto whichever plan year is open by matching each plan
+   week's w/c date — so one file covers the end of 2026, all of 2027 and the start of 2028.
+   With the switch on, computeSku uses the budget units as the Sales Forecast for every week
+   the budget covers (weeks outside it, and products not in the budget, keep the plan
+   forecast), so stock, cover, stock-outs, sales £, warehouse space and alerts all show the
+   plan's orders against the budget. A view only: nothing is saved, and a forecast year's
+   opening stock is re-chained on the same basis while it's on. */
+let BUDGET_MAP = null;      // { key, idx:[53] budget column per plan week (-1 = not covered), n, first, last }
+function budgetMap() {
+  if (!BUDGET || !Array.isArray(BUDGET.weeks) || !BUDGET.skus || !M) return null;
+  const key = (M.week1_start || '') + '|' + (BUDGET.importedAt || '');
+  if (BUDGET_MAP && BUDGET_MAP.key === key) return BUDGET_MAP;
+  const pos = new Map(BUDGET.weeks.map((d, i) => [d, i]));
+  const idx = [];
+  for (let w = 1; w <= WEEKS; w++) { const d = weekIso(w); idx.push(pos.has(d) ? pos.get(d) : -1); }
+  const n = idx.filter(i => i >= 0).length;
+  const first = idx.findIndex(i => i >= 0) + 1, last = WEEKS - idx.slice().reverse().findIndex(i => i >= 0);
+  return (BUDGET_MAP = { key, idx, n, first, last });
+}
+function budgetAvailable() { const b = budgetMap(); return !!(b && b.n); }
+function budgetActive() { return BUDGET_ON && budgetAvailable(); }
+// [53] budget units per plan week (null = week the budget doesn't cover), or null if the product isn't in it.
+function budgetSeries(sku) {
+  const b = budgetMap(), row = b && BUDGET.skus[sku.code];
+  if (!row) return null;
+  return b.idx.map(i => i >= 0 ? (+row[i] || 0) : null);
+}
+function budgetFlagUpdate() {
+  const f = document.getElementById('bud-flag');
+  if (!f) return;
+  const on = budgetActive(), b = on && budgetMap();
+  f.hidden = !on;
+  const by = document.getElementById('btn-build-year');   // the flag takes "+ year"'s place (blocked meanwhile)
+  if (by) by.hidden = on;
+  if (on) f.title = `The ${YEAR} forecast is the budget file's units for W${b.first}–W${b.last} — click to switch back to the plan forecast`;
+}
+async function toggleBudget() {
+  if (saveTimer) await saveNow();
+  BUDGET_ON = !BUDGET_ON;
+  savePref('tp_budget_on', BUDGET_ON);
+  const st = document.getElementById('save-status');
+  if (st) st.textContent = BUDGET_ON ? 'Switching to budget units…' : 'Switching to the plan forecast…';
+  const keep = planScrollSnap();
+  await loadYear(YEAR);          // re-chains a forecast year's opening stock on the same basis
+  if (currentView === 'plan') planScrollRestore(keep);
+  if (st) st.textContent = BUDGET_ON ? 'Budget on' : 'Plan forecast';
+}
+async function budgetFileChosen(e) {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  const status = document.getElementById('save-status');
+  status.textContent = 'Reading ' + file.name + '…';
+  try {
+    const r = await fetch('/api/parse-budget', { method: 'POST', body: await file.arrayBuffer() });
+    const j = await r.json();
+    if (!j.ok) { status.textContent = ''; alert('Could not read the budget file: ' + (j.error || 'unknown')); return; }
+    BUDGET = (await (await fetch('/api/data?year=' + encodeURIComponent(YEAR))).json()).budgetUnits || null;
+    BUDGET_MAP = null;
+    renderUploadAges();
+    const b = budgetMap();
+    const inB = M.skus.filter(k => !isRemoved(k) && BUDGET && BUDGET.skus[k.code]).length;
+    const live = M.skus.filter(k => !isRemoved(k)).length;
+    status.textContent = 'Budget units saved';
+    alert(`Budget units saved: ${j.products} products · ${j.weeks} weeks (w/c ${fmtUpDate(j.first)} – ${fmtUpDate(j.last)}) · ${Math.round(j.total).toLocaleString('en-GB')} units.
+
+`
+      + (b && b.n ? `${YEAR}: weeks ${b.first}–${b.last} covered · ${inB} of ${live} products are in the budget.` : `${YEAR}: none of its weeks are in this budget.`)
+      + `
+
+Use the “Budget units” switch on the Plan page to see the plan against it.`);
+    if (BUDGET_ON) await loadYear(YEAR); else if (currentView === 'plan') renderPlan();
+  } catch (err) { status.textContent = ''; alert('Budget upload error: ' + err.message); }
+}
 function computeSku(sku, orderOverride) {
   const mult = SETTINGS.multiplier, cur = SETTINGS.current_week;
   const ord = orderOverride || ORDERS[sku.id] || new Array(WEEKS).fill(0);
@@ -207,6 +285,10 @@ function computeSku(sku, orderOverride) {
   for (let w = 0; w < WEEKS; w++) {
     const bf = (mod && (w + 1) >= cur) ? mod[w] : sku.base_forecast[w];
     fc[w] = Math.round(bf * mult);
+  }
+  if (BUDGET_ON) {                   // "Budget units" switch: the budget replaces the forecast where it has weeks
+    const bs = budgetActive() ? budgetSeries(sku) : null;
+    if (bs) for (let w = 0; w < WEEKS; w++) if (bs[w] != null) fc[w] = Math.round(bs[w]);
   }
   for (let w = 0; w < WEEKS; w++) {
     const wk = w + 1;
@@ -1083,6 +1165,13 @@ const TAG_DEFS = [
     params: [{ k: 'demand', lbl: 'with forecast over the next 4 weeks above N units', def: 4, step: 1 }],
     desc: 'No stock this week while the forecast still expects sales (Not Live lines excluded).',
     test: (s, m, p) => s.status !== 'Not Live' && m.stock <= 0 && m.fcNext4 > p.demand },
+  { id: 'reorder', term: 'reorder', alias: ['needs ordering', 'order now'], label: 'Needs ordering', sev: 'bad',
+    params: [{ k: 'buffer', lbl: 'stock (+ on order) runs out within lead time + N weeks', def: 4, step: 1 },
+             { k: 'weeks', lbl: 'selling rate from the last N weeks of sales', def: 6, step: 1 },
+             { k: 'rate', lbl: 'only if demand when it would land is at least N units / week', def: 2, step: 1 },
+             { k: 'cover', lbl: 'suggested qty covers N weeks after arrival', def: 12, step: 1 }],
+    desc: 'Live line whose stock plus everything on order runs out before a new order could land (at the higher of the forecast and the recent selling rate), with demand still there when it would arrive.',
+    test: (s, m, p, r) => !!reorderInfo(s, m, p, r) },
   { id: 'nlorder', term: 'nlorder', alias: ['not live on order'], label: 'Not Live on order', sev: 'bad', params: [],
     desc: 'Marked Not Live but committed orders are still due to arrive — cancel them or set it Live.',
     test: (s, m) => s.status === 'Not Live' && m.comFuture > 0.5 },
@@ -1170,6 +1259,82 @@ let TAG_CACHE = null;                       // sku.id -> [tag id]
 let TAG_METRICS = null;                     // sku.id -> the derived figures the tags test on
 let ALERT_TAGS = null;                      // sku.id -> [tag id] raised as alerts (own switch)
 function tagsInvalidate() { TAG_CACHE = null; TAG_METRICS = null; ALERT_TAGS = null; ALERT_CACHE = null; }
+/* ---- "Needs ordering": the reorder point, independent of the Rebuy planner ----
+   Weekly demand from now = the higher of the plan's forecast and the recent selling rate
+   (last N weeks of actual sales), the latter following the planner's seasonal shape
+   (base forecast that week ÷ base forecast over the recent weeks, capped at 1) — so a line
+   whose forecast is stale (sells 26/wk against 5/wk) trips, while a seasonal line winding
+   down follows its curve. Past year end it reads next year's forecast (or this year's same
+   week). Supply = stock this week + everything on order over the horizon (plan committed +
+   proposed, this year and into next, or the Buying Report's outstanding purchases if
+   larger). It fires when supply runs out within lead time + buffer weeks AND there is
+   still real demand after an order placed now could land (avg ≥ the min rate) — so a
+   Christmas line selling out in December doesn't ask for stock arriving in February. */
+let NEXT_ORD = null;                        // { year, byCode: Map code -> { com, prop, fc } } for YEAR + 1
+async function loadNextYearOrders() {
+  const ny = String(+YEAR + 1), forYear = YEAR;
+  NEXT_ORD = null;
+  if (!YEARS.includes(ny)) return;
+  try {
+    const d = await (await fetch('/api/data?year=' + encodeURIComponent(ny))).json();
+    if (forYear !== YEAR || !d || !d.master) return;          // the user moved on meanwhile
+    const prop = d.proposed || {}, ord = d.orders || {}, byCode = new Map();
+    const mult = +d.master.multiplier || 1;
+    for (const k of d.master.skus || []) byCode.set(k.code, { com: ord[k.id] || null, prop: prop[k.id] || null,
+      fc: (k.base_forecast || []).map(v => Math.round((+v || 0) * mult)) });
+    NEXT_ORD = { year: ny, byCode };
+    tagsInvalidate();
+    updateAlertsTab();
+    if (currentView === 'alerts') drawAlerts();
+  } catch { /* next year unreadable — this year's orders still count */ }
+}
+function reorderInfo(s, m, p, r) {
+  if (!r || s.status === 'Not Live' || isRemoved(s)) return null;
+  const cur = SETTINGS.current_week || 1, i0 = Math.max(0, cur - 1);
+  const mult = SETTINGS.multiplier || 1, base = s.base_forecast || EMPTY53;
+  const nx = NEXT_ORD && NEXT_ORD.byCode.get(s.code);
+  const lead = leadWeeks(supByName.get(s.supplier)), H = lead + Math.max(0, p.buffer), C = Math.max(1, p.cover);
+  // recent selling rate + the planner's base forecast for the same weeks
+  const n = Math.max(1, Math.round(p.weeks || 6)), aw = actualWeeks();
+  let recent = 0, baseRecent = 0;
+  if (aw >= n) for (let w = aw - n; w < aw; w++) { recent += +s.actual[w] || 0; baseRecent += (+base[w] || 0) * mult; }
+  recent /= n; baseRecent /= n;
+  const fcAt = i => i < WEEKS ? (r.forecast[i] || 0) : nx && nx.fc.length ? (nx.fc[i - WEEKS] || 0) : (r.forecast[i - WEEKS] || 0);
+  const baseAt = i => i < WEEKS ? (+base[i] || 0) * mult : nx && nx.fc.length ? (nx.fc[i - WEEKS] || 0) : (+base[i - WEEKS] || 0) * mult;
+  const dem = i => {
+    const f = fcAt(i);
+    if (!(recent > 0)) return f;
+    const shape = baseRecent > 0 ? Math.min(1, baseAt(i) / baseRecent) : 1;
+    return Math.max(f, recent * shape);
+  };
+  // demand after an order placed now could land — is there any point ordering?
+  let post = 0;
+  for (let i = i0 + lead; i < i0 + lead + C; i++) post += dem(i);
+  if (!(post / C >= Math.max(0.01, p.rate))) return null;
+  // what's on order over the horizon
+  const com = ORDERS[s.id] || EMPTY53, prop = (PROPOSED && PROPOSED.get(s.id)) || EMPTY53;
+  let planOn = 0;
+  for (let i = i0 + 1; i <= i0 + H; i++) {
+    if (i < WEEKS) planOn += (com[i] || 0) + (prop[i] || 0);
+    else if (nx) planOn += ((nx.com && nx.com[i - WEEKS]) || 0) + ((nx.prop && nx.prop[i - WEEKS]) || 0);
+  }
+  const onOrder = Math.max(planOn, +s.os_purchases || 0);
+  const stock = Math.max(0, m.stock || 0), supply = stock + onOrder;
+  // walk demand forward until supply is used up
+  let left = 0, rem = supply;
+  for (let i = i0; i < i0 + H; i++) {
+    const d = dem(i);
+    if (rem >= d) { rem -= d; left++; continue; }
+    left += d > 0 ? rem / d : 0; rem = -1; break;
+  }
+  if (rem >= 0) return null;                                   // lasts the whole horizon
+  let need = 0;
+  for (let i = i0; i < i0 + H + C; i++) need += dem(i);
+  const rate = dem(i0), fc0 = fcAt(i0);
+  return { rate, fc0, stale: rate > fc0 * 1.15 + 0.5, lead, H, stock, onOrder, left,
+           runOut: cur + Math.floor(left), orderBy: cur + Math.floor(left) - lead,
+           qty: Math.max(0, Math.ceil(need - supply)) };
+}
 // Last N completed weeks: banked actual units vs the forecast for the same weeks.
 function recentTrend(sku, r, n) {
   const aw = actualWeeks();
@@ -1424,7 +1589,7 @@ function skuRowsHtml(sku, idx) {
   for (const def of ROWDEFS) {
     if (!visible.has(def.key)) continue;
     const src = def.key === 'orders' ? committed : def.key === 'proposed' ? proposed : r[def.key];
-    h += `${rowOpen}<td class="lbl">${def.label}</td>`;
+    h += `${rowOpen}<td class="lbl">${def.key === 'forecast' && budgetActive() ? '<span class="bud-lbl" title="Budget units for the weeks the budget covers (plan forecast elsewhere)">Budget Units</span>' : def.label}</td>`;
     let tot = 0;
     for (let w = 0; w < WEEKS; w++) {
       const v = src[w]; tot += v;
@@ -2146,7 +2311,16 @@ function renderPlan() {
     fcLabel = `🌦️ Seasonality ${Math.round(seasonStrengthFor(YEAR) * 100)}%${gp ? ` · ${gp > 0 ? '+' : ''}${gp}%` : ''}`;
   } else fcLabel = '📈 Original forecast';
   const fcBody = fcQuickHtml(mode, se);
-  const forecastDD = `<details class="dd fc-dd fc-${mode}" id="dd-forecast"><summary title="How the ${YEAR} Sales Forecast is built — click for details">${fcLabel} ▾</summary><div class="dd-pop fc-pop">${fcBody}</div></details>`;
+  const bm = budgetMap();
+  let budBtn = '';
+  if (bm && bm.n) {
+    const inB = M.skus.filter(k => !isRemoved(k) && BUDGET.skus[k.code]).length, all = M.skus.filter(k => !isRemoved(k)).length;
+    budBtn = `<button type="button" id="btn-budget" class="bud-tog${BUDGET_ON ? ' on' : ''}" title="${BUDGET_ON
+      ? `Using the budget file's weekly units as the ${YEAR} forecast for W${bm.first}–W${bm.last} (${inB} of ${all} products are in it; the rest, and other weeks, keep the plan forecast). Click to switch back.`
+      : `Switch the ${YEAR} forecast to the budget file's weekly units (W${bm.first}–W${bm.last}, ${inB} of ${all} products) to check planned arrivals against it. Nothing is saved — switch back any time.`}">`
+      + `📊 Budget units <b>${BUDGET_ON ? 'On' : 'Off'}</b></button>`;
+  }
+  const forecastDD = `<details class="dd fc-dd fc-${mode}${budgetActive() ? ' fc-overridden' : ''}" id="dd-forecast"><summary title="How the ${YEAR} Sales Forecast is built — click for details">${fcLabel} ▾</summary><div class="dd-pop fc-pop">${fcBody}</div></details>`;
   const allOpen = skus.length > 0 && skus.every(k => accForceOpen || openSkus.has(k.id));
   const rebuyDD = `<details class="dd" id="dd-rebuy"><summary>⟳ Rebuy: <b>${rbMode === 'full' ? `Full ${CC}` : 'Partial'}</b> · ${rebuyScope === 'sup' ? 'supplier' : 'year'} ▾</summary><div class="dd-pop">`
     + `<div class="dd-sec">Container basket</div>`
@@ -2166,7 +2340,7 @@ function renderPlan() {
   main.innerHTML = `
     <div id="totals-band">${totalsHtml()}</div>
     <div id="plan-toolbar">
-      <div class="ptb-row1"><h1>${esc(sup.name)}</h1>${forecastDD}<div class="meta">${meta}</div><span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span></div>
+      <div class="ptb-row1"><h1>${esc(sup.name)}</h1>${forecastDD}${budBtn}<div class="meta">${meta}</div><span class="rb-bar-sum">${sumLbl}: <b>${scopeProd}</b> products · <b>${(scoped.cbm / CC).toFixed(1)}</b> containers · <b>${fmtGBPk(scoped.fob)}</b> FOB proposed</span></div>
       <div class="ptb-row2">
         ${sortSeg}
         ${statusDD}
@@ -2245,6 +2419,7 @@ function renderPlan() {
     renderPlan();
   });
   document.getElementById('btn-export-sup').addEventListener('click', () => exportSupplier(sup.name));
+  { const bb = document.getElementById('btn-budget'); if (bb) bb.addEventListener('click', toggleBudget); }
   document.getElementById('btn-export-multi').addEventListener('click', openExportDialog);
   document.getElementById('btn-import-sup').addEventListener('click', () => document.getElementById('import-file').click());
   document.getElementById('btn-revert-orders').addEventListener('click', openRevertDialog);
@@ -3291,6 +3466,7 @@ const IMPORT_DEFS = [
   { id: 'duty',   label: 'Duty Rates',     input: 'duty-file',       when: () => (SETTINGS && SETTINGS.duty_updated_at) || null },
   { id: 'chanidx', label: 'Sales by Account', input: 'chanidx-file', when: () => (SETTINGS && SETTINGS.sba_updated_at) || (CHANNEL_INDEX && CHANNEL_INDEX.importedAt) || null },
   { id: 'cartons', label: 'Carton Sizes',  input: 'cartons-file',   when: () => (SETTINGS && SETTINGS.cartons_updated_at) || null },
+  { id: 'budget', label: 'Budget Units',   input: 'budget-file',     cadence: 'monthly', noAlert: true, when: () => (BUDGET && BUDGET.importedAt) || null },
 ];
 const IMPORT_DEF = Object.fromEntries(IMPORT_DEFS.map(d => [d.id, d]));
 const DEFAULT_IMPORT_GROUPS = [
@@ -3306,7 +3482,13 @@ function importGroups() {
   const seen = new Set();
   for (const g of groups) g.items = g.items.filter(id => !seen.has(id) && seen.add(id));
   const missing = IMPORT_DEFS.map(d => d.id).filter(id => !seen.has(id));
-  if (missing.length) { if (!groups.length) groups.push({ name: 'Weekly', cadence: 'weekly', items: [] }); groups[0].items.push(...missing); }
+  if (missing.length) {
+    if (!groups.length) groups.push({ name: 'Weekly', cadence: 'weekly', items: [] });
+    for (const id of missing) {                 // a new import joins the group of its own cadence
+      const g = groups.find(x => x.cadence === (IMPORT_DEF[id].cadence || 'weekly')) || groups[0];
+      g.items.push(id);
+    }
+  }
   return groups;
 }
 function saveImportGroups(groups) {
@@ -6605,6 +6787,7 @@ function nextBuildYear() { return Math.max(...YEARS.map(Number)) + 1; }
 async function buildForecastYearAction() {
   const newYear = nextBuildYear(), baseYear = newYear - 1;
   if (YEARS.includes(String(newYear))) return;   // can't happen — the button is always the next new year
+  if (budgetActive()) { alert('Switch “Budget units” off on the Plan page first — a new year is built from the plan forecast, not the budget.'); return; }
   if (!confirm(`Add ${newYear} as a new forecast year?\n\nIt is built from ${baseYear}: every ${baseYear} product, its forecasted weekly sales carried into ${newYear}, and its projected ${baseYear} closing stock (committed + proposed orders) as the starting stock.\n\n${baseYear} and every other existing year are left exactly as they are. ${newYear} starts with no orders — run its own rebuy plan once it's open.`)) return;
   const status = document.getElementById('save-status');
   status.textContent = `Building ${newYear}…`;
@@ -7373,9 +7556,7 @@ let ALERT_CACHE = null;                     // { sections, byKey } — dropped b
 let AL_FILTER = '';
 let AL_SEV = loadPref('tp_al_sev', 'all');  // all | bad | warn | other
 let AL_SHOW_DIS = false;
-let AL_OPEN = loadPref('tp_al_open', {}) || {};   // section id -> open (true) / closed (false)
-const AL_ROWS = 25;                         // rows shown per section before "Show all"
-const AL_ALL = new Set();                   // sections expanded to every row
+let AL_DETAIL = null;                       // alert type opened from its tile (null = the tile overview)
 
 const alN = n => Math.round(+n || 0).toLocaleString('en-GB');
 const alPct = v => v == null ? '–' : (v > 0 ? '+' : '') + Math.round(v) + '%';
@@ -7384,6 +7565,7 @@ const alCover = v => v == null || !isFinite(v) ? '–' : (v >= 99 ? '99+' : (+v)
 // arrival) reads as its w/c date in the previous year instead of a negative week number.
 function alWk(w) {
   if (w >= 1 && w <= WEEKS) return `W${w} <span class="al-dim">${esc(weekDate(w))}</span>`;
+  if (w > WEEKS) return `w/c ${esc(weekDate(w))} <span class="al-dim">${+YEAR + 1}</span>`;
   return w < 1 ? `w/c ${esc(weekDate(w))} <span class="al-dim">${+YEAR - 1}</span>` : '–';
 }
 // Plan week number of today in the LOADED year's numbering (≤ 0 before it starts, > 53 after).
@@ -7431,6 +7613,20 @@ function alBackCell(g) {
 // dismissal signature, and the section's headline total.
 const AL_GBP = n => fmtGBPk(Math.round(+n || 0));
 const ALERT_PRODUCT = {
+  reorder: {
+    prep: c => { c.ro = reorderInfo(c.sku, c.m, c.p, c.r); },
+    sev: c => c.ro && c.ro.orderBy <= todayPlanWeek() ? 'bad' : 'warn',
+    cols: [['Stock', c => alN(c.ro.stock)], ['On order', c => c.ro.onOrder ? alN(c.ro.onOrder) : '<span class="al-neg">none</span>'],
+           ['Selling / wk', c => `${(+c.ro.rate).toFixed(1)}` + (c.ro.stale
+             ? `<div class="al-warn">forecast only ${(+c.ro.fc0).toFixed(1)} / wk</div>` : '')],
+           ['Runs out', c => c.ro.left < 0.5 ? '<span class="al-neg">now</span>' : `${alWk(c.ro.runOut)}<div class="al-dim">${(+c.ro.left).toFixed(1)} wks</div>`],
+           ['Order by', c => { const late = todayPlanWeek() - c.ro.orderBy;
+             if (late > 0) return `<span class="al-neg">now</span><div class="al-dim">was due ${c.ro.orderBy >= 1 && c.ro.orderBy <= WEEKS ? 'W' + c.ro.orderBy : 'w/c ' + esc(weekDate(c.ro.orderBy))} · ${c.ro.lead} wk lead</div>`;
+             return `${alWk(c.ro.orderBy)}<div class="${late === 0 ? 'al-warn' : 'al-dim'}">${late === 0 ? 'this week' : `in ${-late} wk${late === -1 ? '' : 's'}`} · ${c.ro.lead} wk lead</div>`; }],
+           ['Suggested qty', c => `${alN(c.ro.qty)}<div class="al-dim">≈ ${c.p.cover} wks after arrival</div>`],
+           ['FOB', c => fmtGBP(c.ro.qty * (+c.sku.fob || 0))]],
+    impact: c => c.ro ? c.ro.qty * (+c.sku.asp || 0) : 0, sig: c => c.ro ? c.ro.orderBy : '',
+    total: t => `${AL_GBP(t)} sales value to reorder` },
   oos: {
     prep: c => { c.g = alStockGap(c.sku, c.r, c.cur - 1); },
     cols: [['Stock', c => alN(c.m.stock)], ['Next 4 wks demand', c => alN(c.m.fcNext4)],
@@ -7516,7 +7712,7 @@ function fmtGBP2(n) { return +n > 0 ? '£' + (+n).toFixed(2) : '–'; }
 
 // Section groups, in page order; each lists its sections (tag ids or plan-alert ids).
 const ALERT_GROUPS = [
-  { name: 'Orders & POs', ids: ['order', 'unpo', 'book', 'nlorder'] },
+  { name: 'Orders & POs', ids: ['reorder', 'order', 'unpo', 'book', 'nlorder'] },
   { name: 'Stock', ids: ['oos', 'stockout', 'understocked', 'overstocked', 'nosales', 'rundown', 'rebuy', 'nopo'] },
   { name: 'Sales vs forecast', ids: ['trenddown', 'underselling', 'trendup', 'overselling', 'slow'] },
   { name: 'Warehouse & data', ids: ['space', 'imports', 'lowmargin', 'nocost', 'nospace', 'npd'] },
@@ -7548,7 +7744,7 @@ function buildAlerts() {
         if (spec.prep) spec.prep(c);
         if (minGbp > 0 && spec.money && def.sev !== 'bad' && (+spec.impact(c) || 0) < minGbp) continue;
         const s = sec(id, def, { kind: 'product', term: def.term, spec, params: tcfg[id].p });
-        s.items.push({ key: `${YEAR}|${id}|${sku.code}`, sig: String(spec.sig ? spec.sig(c) : ''), sev: def.sev,
+        s.items.push({ key: `${YEAR}|${id}|${sku.code}`, sig: String(spec.sig ? spec.sig(c) : ''), sev: spec.sev ? spec.sev(c) : def.sev,
           sku, supplier: sku.supplier, find: `${sku.code} ${sku.name || ''} ${sku.supplier || ''}`.toLowerCase(),
           impact: +spec.impact(c) || 0, cells: spec.cols.map(([, f]) => f(c)) });
       } catch { /* one bad product never takes the page down */ }
@@ -7631,7 +7827,7 @@ function buildAlerts() {
   if (pcfg.imports.on) {
     const s = sec('imports', PLAN_ALERT_DEF.imports, { kind: 'plan' });
     for (const g of importGroups()) for (const id of g.items) {
-      const def = IMPORT_DEF[id]; if (!def) continue;
+      const def = IMPORT_DEF[id]; if (!def || def.noAlert) continue;
       const iso = def.when(), f = importFreshness(iso, g.cadence);
       if (f.cls !== 'if-old') continue;
       s.items.push({ key: `g|imp|${id}`, sig: String(iso || ''), sev: g.cadence === 'weekly' ? 'warn' : 'info', global: true,
@@ -7703,7 +7899,7 @@ function renderAlerts() {
     + `<div class="al-seg" id="al-seg"></div>`
     + `<label class="al-dis"><input type="checkbox" id="al-show-dis"${AL_SHOW_DIS ? ' checked' : ''}> Show dismissed <span id="al-dis-n"></span></label>`
     + `<button type="button" id="al-settings" title="Choose which tags raise alerts and set every threshold">Alert settings</button></div>`
-    + `<div id="al-kpis" class="al-kpis"></div><div id="al-jump" class="al-jump"></div><div id="al-body"></div></div>`;
+    + `<div id="al-body"></div></div>`;
   document.getElementById('al-filter').addEventListener('input', e => { AL_FILTER = e.target.value; drawAlerts(); });
   document.getElementById('al-show-dis').addEventListener('change', e => { AL_SHOW_DIS = e.target.checked; drawAlerts(); });
   document.getElementById('al-settings').addEventListener('click', () => { openSettings(); setSettingsTab('tags'); });
@@ -7711,21 +7907,12 @@ function renderAlerts() {
     const b = e.target.closest('[data-sev]'); if (!b) return;
     AL_SEV = b.dataset.sev; savePref('tp_al_sev', AL_SEV); drawAlerts();
   });
-  document.getElementById('al-jump').addEventListener('click', e => {
-    const b = e.target.closest('[data-jump]'); if (!b) return;
-    AL_OPEN[b.dataset.jump] = true; savePref('tp_al_open', AL_OPEN); drawAlerts();
-    const t = document.getElementById('al-sec-' + b.dataset.jump);
-    if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
   const body = document.getElementById('al-body');
+  const scrollTop = () => { const m = document.getElementById('main'); if (m) m.scrollTop = 0; };
   body.addEventListener('click', e => {
-    const head = e.target.closest('.al-sec-head');
-    if (head && !e.target.closest('button, a')) {
-      const id = head.dataset.sec, open = !head.parentElement.classList.contains('open');
-      AL_OPEN[id] = open; savePref('tp_al_open', AL_OPEN);
-      head.parentElement.classList.toggle('open', open);
-      return;
-    }
+    const open = e.target.closest('[data-open]');
+    if (open && !e.target.closest('a')) { AL_DETAIL = open.dataset.open; drawAlerts(); scrollTop(); return; }
+    if (e.target.closest('[data-back]')) { AL_DETAIL = null; drawAlerts(); scrollTop(); return; }
     const a = e.target.closest('a[data-sku]');
     if (a) { alertGotoSku(a.dataset.sku); return; }
     const sa = e.target.closest('a[data-sup]');
@@ -7749,8 +7936,6 @@ function renderAlerts() {
       renderSidebar(); setView('plan');
       return;
     }
-    const all = e.target.closest('button[data-all]');
-    if (all) { AL_ALL.add(all.dataset.all); drawAlerts(); return; }
     const dis = e.target.closest('button[data-dismiss]');
     if (dis) {
       const it = buildAlerts().byKey.get(dis.dataset.dismiss); if (!it) return;
@@ -7769,6 +7954,34 @@ function alertGotoSku(id) {
   const inp = document.getElementById('search'); if (inp) inp.value = sku.code;
   renderSidebar(); setView('plan');
 }
+// Alert types switched on, in page order: tags whose Alert switch is on + the enabled plan alerts.
+function alEnabledIds() {
+  const tc = tagCfg(), pc = planAlertCfg();
+  const on = id => (tc[id] ? tc[id].alert : pc[id] ? pc[id].on : false) && id !== 'minval';
+  const ids = ALERT_GROUPS.flatMap(g => g.ids).filter(on);
+  for (const d of TAG_DEFS) if (on(d.id) && !ids.includes(d.id)) ids.push(d.id);
+  return ids;
+}
+function alDef(id) { return TAG_DEF[id] || PLAN_ALERT_DEF[id] || { label: id, sev: 'info', desc: '' }; }
+// Rows of one section that pass the severity / text filter (and dismissal, unless shown).
+function alVisibleItems(s) {
+  return s ? s.items.filter(it => alVisible(it) && (AL_SHOW_DIS || !alIsDismissed(it))) : [];
+}
+// The one-line headline figure for a tile / detail header.
+function alHeadline(s, live) {
+  if (!s || !live.length) return '';
+  const tot = live.reduce((a, it) => a + it.impact, 0);
+  if (s.spec && s.spec.total) return tot > 0 ? s.spec.total(tot) : '';
+  if (s.kind === 'supply' || s.kind === 'po') return tot > 0 ? `${AL_GBP(tot)} FOB` : '';
+  if (s.id === 'space') return live.map(it => `${it.cells[0].replace(/<[^>]*>/g, '')} peak ${it.cells[3].replace(/<[^>]*>/g, '').replace(/\s+/g, ' ')}`).join(' · ');
+  return '';
+}
+// Short label for an item in a tile's preview list.
+function alPreviewText(it) {
+  if (it.sku) return `<b>${esc(it.sku.code)}</b> ${esc(it.sku.name || '')}`;
+  const t = c => String(c || '').replace(/<div[^>]*>.*?<\/div>/g, '').replace(/<[^>]*>/g, '').trim();
+  return `<b>${esc(t(it.cells[0]))}</b> ${esc(t(it.cells[1]))}`;
+}
 function drawAlerts() {
   const { sections } = buildAlerts();
   const n = alertCounts();
@@ -7777,53 +7990,70 @@ function drawAlerts() {
     ['warn', 'Warning', n.warn], ['other', 'Info', other]]
     .map(([k, l, c]) => `<button type="button" data-sev="${k}" class="${AL_SEV === k ? 'on' : ''} sev-${k}">${l} <b>${c}</b></button>`).join('');
   document.getElementById('al-dis-n').textContent = n.dismissed ? `(${n.dismissed})` : '';
-  // headline figures
-  const sumImp = (id, onlyBad) => { const s = sections.get(id); if (!s) return 0;
-    return s.items.filter(it => !alIsDismissed(it) && (!onlyBad || it.sev === 'bad')).reduce((a, it) => a + it.impact, 0); };
-  const cnt = (id, sv) => { const s = sections.get(id); return s ? s.items.filter(it => !alIsDismissed(it) && (!sv || it.sev === sv)).length : 0; };
-  const kpi = (v, l, s, cls) => `<div class="al-kpi ${cls || ''}"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
-  document.getElementById('al-kpis').innerHTML =
-      kpi(n.bad, 'Urgent', `${n.warn} warning${n.warn === 1 ? '' : 's'} · ${other} info`, n.bad ? 'k-bad' : '')
-    + kpi(cnt('oos') + cnt('stockout'), 'Out of stock / running out', `${AL_GBP(sumImp('oos') + sumImp('stockout'))} lost sales est.`, cnt('oos') ? 'k-bad' : '')
-    + kpi(cnt('order', 'bad') + cnt('unpo', 'bad'), 'Orders overdue to place', `${cnt('order') + cnt('unpo')} due within the window`, (cnt('order', 'bad') + cnt('unpo', 'bad')) ? 'k-bad' : '')
-    + kpi(cnt('book'), 'POs to book', `${cnt('book', 'bad')} late`, cnt('book', 'bad') ? 'k-warn' : '')
-    + kpi(AL_GBP(sumImp('overstocked')), `Stock above ${tagCfg().overstocked.p.cover} wks cover`, `at landed cost · ${cnt('overstocked')} overstocked products`, '');
-  // section jump chips + the sections themselves, in group order
-  const order = ALERT_GROUPS.flatMap(g => g.ids);
-  const known = new Set(order);
-  for (const id of sections.keys()) if (!known.has(id)) order.push(id);
-  const vis = id => {
-    const s = sections.get(id); if (!s) return [];
-    return s.items.filter(it => alVisible(it) && (AL_SHOW_DIS || !alIsDismissed(it)));
-  };
-  document.getElementById('al-jump').innerHTML = order.filter(id => vis(id).length).map(id => {
-    const s = sections.get(id), k = vis(id);
-    const sv = k.some(it => it.sev === 'bad') ? 'bad' : s.sev;
-    return `<button type="button" class="tq-chip tg-${sv}" data-jump="${id}" title="${esc(s.desc || '')}">${esc(s.label)} <b>${k.length}</b></button>`;
-  }).join('');
-  let html = '';
-  for (const g of ALERT_GROUPS) {
-    const ids = g.ids.filter(id => vis(id).length);
-    if (!ids.length) continue;
-    html += `<div class="al-group">${esc(g.name)}</div>` + ids.map(id => alSectionHtml(sections.get(id), vis(id))).join('');
+  const ids = alEnabledIds();
+  if (AL_DETAIL && !ids.includes(AL_DETAIL)) AL_DETAIL = null;
+  const body = document.getElementById('al-body');
+  body.innerHTML = AL_DETAIL ? alDetailHtml(sections, ids, AL_DETAIL) : alOverviewHtml(sections, ids);
+}
+// Overview: one tile per alert type, grouped by category; click a tile for its full list.
+function alOverviewHtml(sections, ids) {
+  const filtering = !!(AL_FILTER.trim() || AL_SEV !== 'all');
+  let html = '', any = false;
+  const groups = ALERT_GROUPS.map(g => ({ name: g.name, ids: g.ids.filter(id => ids.includes(id)) }));
+  const extra = ids.filter(id => !ALERT_GROUPS.some(g => g.ids.includes(id)));
+  if (extra.length) groups.push({ name: 'Other', ids: extra });
+  for (const g of groups) {
+    if (!g.ids.length) continue;
+    const tiles = g.ids.map(id => {
+      const s = sections.get(id), def = alDef(id);
+      const vis = alVisibleItems(s), live = vis.filter(it => !alIsDismissed(it));
+      const nBad = live.filter(it => it.sev === 'bad').length;
+      if (live.length) any = true;
+      const sev = nBad ? 'bad' : def.sev;
+      if (!vis.length) {
+        return `<div class="al-tile al-clear" title="${esc(def.desc || '')}"><div class="alt-head"><span class="alt-name">${esc(def.label)}</span>`
+          + `<span class="alt-n">0</span></div><div class="alt-ok">${filtering ? 'None match the filter' : '✓ All clear'}</div></div>`;
+      }
+      const head = alHeadline(s, live);
+      const prev = vis.slice(0, 3).map(it => `<li class="sv-${it.sev}">${alPreviewText(it)}</li>`).join('');
+      return `<button type="button" class="al-tile tl-${sev}" data-open="${id}" title="${esc(def.desc || '')}">`
+        + `<div class="alt-head"><span class="alt-name">${esc(def.label)}</span><span class="alt-n">${live.length}</span></div>`
+        + `<div class="alt-sub">${nBad && nBad < live.length ? `<span class="alt-urg">${nBad} urgent</span>` : nBad ? '<span class="alt-urg">urgent</span>' : `<span class="alt-sev">${SEV_LABEL[def.sev] || ''}</span>`}`
+        + `${head ? `<span class="alt-fig">${head}</span>` : ''}</div>`
+        + `<div class="alt-desc">${esc(def.desc || '')}</div>`
+        + `<ul class="alt-prev">${prev}</ul>`
+        + `<div class="alt-more">${vis.length > 3 ? `+ ${vis.length - 3} more · ` : ''}View all →</div></button>`;
+    }).join('');
+    html += `<div class="al-group">${esc(g.name)}</div><div class="al-tiles">${tiles}</div>`;
   }
-  const extra = order.filter(id => !ALERT_GROUPS.some(g => g.ids.includes(id)) && vis(id).length);
-  if (extra.length) html += `<div class="al-group">Other</div>` + extra.map(id => alSectionHtml(sections.get(id), vis(id))).join('');
-  if (!html) {
-    const filtering = AL_FILTER || AL_SEV !== 'all';
-    html = `<div class="empty">${filtering ? 'No alerts match the filter.' : `Nothing needs attention in ${YEAR} right now.`}</div>`;
-  }
+  if (!ids.length) html = `<div class="empty">No alerts are switched on — choose them in <a data-settings="1">Alert settings</a>.</div>`;
+  else if (!any && !filtering) html = `<div class="al-allclear">Nothing needs attention in ${YEAR} right now.</div>` + html;
   const pc = planAlertCfg();
   if (pc.minval.on && +pc.minval.p.gbp > 0)
     html += `<p class="muted-note al-foot">Product warnings worth less than <b>£${alN(pc.minval.p.gbp)}</b> are left out — change it, or switch alerts on and off, in <a data-settings="1">Alert settings</a>.</p>`;
-  document.getElementById('al-body').innerHTML = html;
+  return html;
 }
-function alSectionHtml(s, items) {
-  const open = AL_OPEN[s.id] != null ? AL_OPEN[s.id] : (s.sev === 'bad' || s.sev === 'warn');
-  const live = items.filter(it => !alIsDismissed(it));
-  const tot = live.reduce((a, it) => a + it.impact, 0);
-  const totTxt = s.spec && s.spec.total && tot > 0 ? `<span class="al-tot">${s.spec.total(tot)}</span>` : '';
-  const shown = AL_ALL.has(s.id) || AL_FILTER ? items : items.slice(0, AL_ROWS);
+// Detail: one alert type's full table, with a strip to hop between types.
+function alDetailHtml(sections, ids, id) {
+  const s = sections.get(id), def = alDef(id);
+  const vis = alVisibleItems(s), live = vis.filter(it => !alIsDismissed(it));
+  const strip = ids.map(k => {
+    const sk = sections.get(k), lv = alVisibleItems(sk).filter(it => !alIsDismissed(it));
+    const sv = lv.some(it => it.sev === 'bad') ? 'bad' : alDef(k).sev;
+    return `<button type="button" class="tq-chip tg-${sv}${k === id ? ' on' : ''}${lv.length ? '' : ' al-zero'}" data-open="${k}">${esc(alDef(k).label)} <b>${lv.length}</b></button>`;
+  }).join('');
+  const head = alHeadline(s, live);
+  const tagBtn = s && s.kind === 'product' && tagCfg()[id] && tagCfg()[id].on
+    ? `<button type="button" class="al-btn" data-term="${esc(s.term)}" title="Search the Plan for “${esc(s.term)}”">Show in Plan</button>` : '';
+  let html = `<div class="al-nav"><button type="button" class="al-back" data-back="1">← All alerts</button><div class="al-jump">${strip}</div></div>`
+    + `<section class="al-detail tl-${live.some(it => it.sev === 'bad') ? 'bad' : def.sev}">`
+    + `<div class="ald-head"><h3>${esc(def.label)}</h3><b class="al-n">${live.length}</b>${head ? `<span class="al-tot">${head}</span>` : ''}${tagBtn}</div>`
+    + `<div class="ald-desc">${esc(def.desc || '')}</div>`;
+  html += vis.length ? alTableHtml(s, vis)
+    : `<div class="empty">${AL_FILTER.trim() || AL_SEV !== 'all' ? 'Nothing here matches the filter.' : '✓ All clear — nothing to action.'}</div>`;
+  return html + `</section>`;
+}
+function alTableHtml(s, items) {
   const product = s.kind === 'product';
   let heads;
   if (product) {
@@ -7833,7 +8063,7 @@ function alSectionHtml(s, items) {
   const LEFT = new Set(['Code', 'Product', 'Supplier', 'PO', 'Storage', 'Import', 'Products', 'Cadence', 'Status', 'Missing']);
   const left = heads.map(h => LEFT.has(String(h).replace(/<[^>]*>/g, '').trim()));
   const off = product ? 3 : 0;                  // product rows lead with their own code / name / supplier cells
-  const rows = shown.map(it => {
+  const rows = items.map(it => {
     const dis = alIsDismissed(it);
     const lead = product
       ? `<td class="al-code"><a data-sku="${esc(it.sku.id)}" title="Open ${esc(it.sku.code)} in the Plan">${esc(it.sku.code)}</a></td>`
@@ -7845,15 +8075,8 @@ function alSectionHtml(s, items) {
     return `<tr class="al-row sv-${it.sev}${dis ? ' al-dismissed' : ''}"><td class="al-sev"><i></i></td>${lead}`
       + it.cells.map((c, i) => `<td${left[i + off] ? ' class="l"' : ''}>${c}</td>`).join('') + `<td class="al-acts">${acts}</td></tr>`;
   }).join('');
-  const more = shown.length < items.length
-    ? `<div class="al-more"><button type="button" data-all="${s.id}">Show all ${items.length}</button></div>` : '';
-  const tagBtn = product && tagCfg()[s.id] && tagCfg()[s.id].on
-    ? `<button type="button" class="al-btn" data-term="${esc(s.term)}" title="Search the Plan for “${esc(s.term)}”">Show in Plan</button>` : '';
-  return `<section class="al-sec${open ? ' open' : ''}" id="al-sec-${s.id}">`
-    + `<div class="al-sec-head" data-sec="${s.id}"><span class="al-chev">▸</span><span class="tag-chip tg-${s.sev}">${esc(s.label)}</span>`
-    + `<b class="al-n">${live.length}</b><span class="al-desc">${esc(s.desc || '')}</span>${totTxt}${tagBtn}</div>`
-    + `<div class="al-sec-body"><table class="flat al-table"><thead><tr><th></th>${heads.map((h, i) => `<th${left[i] ? ' class="l"' : ''}>${h}</th>`).join('')}<th></th></tr></thead>`
-    + `<tbody>${rows}</tbody></table>${more}</div></section>`;
+  return `<div class="ald-body"><table class="flat al-table"><thead><tr><th></th>${heads.map((h, i) => `<th${left[i] ? ' class="l"' : ''}>${h}</th>`).join('')}<th></th></tr></thead>`
+    + `<tbody>${rows}</tbody></table></div>`;
 }
 
 /* ---------------- Graveyard (delisted products off the Buying Report) ---------------- */
@@ -8092,6 +8315,8 @@ async function loadYear(year) {
   ORDERS = data.orders || {};
   PO_WEBSA = data.poWebsa || null;          // global PO ↔ container linking (shared across years)
   CHANNEL_INDEX = data.channelIndex || null;
+  BUDGET = data.budgetUnits || null;        // budget units by w/c date (global)
+  BUDGET_MAP = null;
   PO_CONTAINERS = data.poContainers || null;
   SETTINGS = Object.assign({
     multiplier: M.multiplier || 1,
@@ -8148,11 +8373,13 @@ async function loadYear(year) {
         const neu = ends.get(sku.id);
         if (neu == null) { newBase[sku.id] = sku.stock_now; continue; }
         const ref = (base && base[sku.id] != null) ? base[sku.id] : sku.stock_now;
-        if (Math.abs(neu.stock - ref) > 0.5) stockChainChanged = true;
+        if (!budgetActive() && Math.abs(neu.stock - ref) > 0.5) stockChainChanged = true;
         sku.stock_now = neu.stock; newBase[sku.id] = neu.stock;
         if (neu.ly) sku.ly = neu.ly;   // live "LY Sales" = prior year's realised actuals + forecast
       }
-      persistStockbase(newBase);   // remember the basis so future loads only rebuild rebuys on a real change
+      // remember the basis so future loads only rebuild rebuys on a real change — but not
+      // while the Budget units switch is on (that chain is a what-if, not the plan's basis)
+      if (!budgetActive()) persistStockbase(newBase);
     }
   }
 
@@ -8180,8 +8407,10 @@ async function loadYear(year) {
     if (hit) currentSupplier = hit.name;
   }
   renderSidebar(); setView(currentView);   // stay on the page the user was viewing (Plan or Summary)
+  loadNextYearOrders();            // "Needs ordering" looks past year end for orders already placed
   if (seasonActiveFor(YEAR) && SEASON().useWeather) applySeasonality();   // refine with live weather (never touches proposals)
   document.title = `${YEAR} Tradeplan — week ${SETTINGS.current_week}`;
+  budgetFlagUpdate();
 }
 
 async function init() {
@@ -8267,6 +8496,8 @@ async function init() {
   document.getElementById('buying-cancel').addEventListener('click', () => document.getElementById('buying-dialog').close());
   document.getElementById('buying-apply').addEventListener('click', applyBuyingUpdates);
   document.getElementById('duty-file').addEventListener('change', dutyFileChosen);
+  document.getElementById('budget-file').addEventListener('change', budgetFileChosen);
+  document.getElementById('bud-flag').addEventListener('click', toggleBudget);
   document.getElementById('duty-cancel').addEventListener('click', () => document.getElementById('duty-dialog').close());
   document.getElementById('duty-apply').addEventListener('click', applyDutyUpdates);
   // per-product Details dialog
